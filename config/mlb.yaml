@@ -1,0 +1,33 @@
+data_dir: data/mlb
+artifact_dir: artifacts/mlb
+seed: 42
+parser_version: "1.0.0"
+feature_set_version: k_mvp_v1
+model_version: nb_k_v1
+workload_model_version: nb_bf_v1
+k_max: 15
+tail_mass_threshold: 0.001
+prediction_interval: 0.80
+lines: [4.5, 5.5, 6.5]
+early_exit_bf: 15
+pitcher_k_prior_strength: 175.0
+batter_k_prior_strength: 225.0
+rate_limit_seconds: 1.0
+user_agent: nba-quant-mlb-research/1.0
+posterior_draws: 64
+workload_min_train_starts: 24
+workload_l2: 1.0
+strikeout_l2: 2.0
+forecast_horizon_hours: 2.0
+quote_latency_seconds: 0.0
+frozen_eval_start: "2023-01-01"
+frozen_eval_end: "2025-12-31"
+folds:
+  - name: dev_2018
+    train_end: "2017-12-31"
+    test_start: "2018-01-01"
+    test_end: "2018-12-31"
+  - name: dev_2019
+    train_end: "2018-12-31"
+    test_start: "2019-01-01"
+    test_end: "2019-12-31"

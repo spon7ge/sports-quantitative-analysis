@@ -1,6 +1,8 @@
 data/bronze/
 data/silver/
 data/research/
+data/mlb/
+artifacts/mlb/
 .ipynb_checkpoints/
 __pycache__/
 *.py[cod]

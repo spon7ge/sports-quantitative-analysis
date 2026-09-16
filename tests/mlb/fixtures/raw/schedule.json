@@ -1,0 +1,61 @@
+{
+  "source": "mlb_stats_api",
+  "games": [
+    {
+      "game_pk": "500001",
+      "scheduled_start_utc": "2017-04-07 23:10:00+00:00",
+      "status": "scheduled",
+      "home_team_id": "133",
+      "away_team_id": "136",
+      "venue_id": "1000",
+      "doubleheader": "0",
+      "probable_home_pitcher_id": "111001",
+      "probable_away_pitcher_id": "111004",
+      "valid_from_utc": "2017-04-05 23:10:00+00:00",
+      "valid_to_utc": "2017-04-08 05:10:00+00:00",
+      "snapshot_id": "snap-0001"
+    },
+    {
+      "game_pk": "500002",
+      "scheduled_start_utc": "2017-04-07 23:10:00+00:00",
+      "status": "scheduled",
+      "home_team_id": "134",
+      "away_team_id": "137",
+      "venue_id": "1001",
+      "doubleheader": "0",
+      "probable_home_pitcher_id": "111002",
+      "probable_away_pitcher_id": "111005",
+      "valid_from_utc": "2017-04-05 23:10:00+00:00",
+      "valid_to_utc": "2017-04-08 05:10:00+00:00",
+      "snapshot_id": "snap-0002"
+    },
+    {
+      "game_pk": "500003",
+      "scheduled_start_utc": "2017-04-07 23:10:00+00:00",
+      "status": "scheduled",
+      "home_team_id": "135",
+      "away_team_id": "138",
+      "venue_id": "1002",
+      "doubleheader": "0",
+      "probable_home_pitcher_id": "111003",
+      "probable_away_pitcher_id": "111006",
+      "valid_from_utc": "2017-04-05 23:10:00+00:00",
+      "valid_to_utc": "2017-04-08 05:10:00+00:00",
+      "snapshot_id": "snap-0003"
+    },
+    {
+      "game_pk": "500004",
+      "scheduled_start_utc": "2017-04-14 23:10:00+00:00",
+      "status": "scheduled",
+      "home_team_id": "133",
+      "away_team_id": "136",
+      "venue_id": "1000",
+      "doubleheader": "0",
+      "probable_home_pitcher_id": "111001",
+      "probable_away_pitcher_id": "111004",
+      "valid_from_utc": "2017-04-12 23:10:00+00:00",
+      "valid_to_utc": "2017-04-15 05:10:00+00:00",
+      "snapshot_id": "snap-0004"
+    }
+  ]
+}

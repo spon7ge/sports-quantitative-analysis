@@ -1,0 +1,35 @@
+requires-python = ">=3.12"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/mlb"]
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = true
+no_implicit_optional = true
+# pandas-stubs overloads dominate this stack; keep real name/import errors.
+disable_error_code = [
+    "call-overload",
+    "arg-type",
+    "assignment",
+    "operator",
+    "union-attr",
+    "return-value",
+    "attr-defined",
+    "index",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,287 @@
+# One-line descriptions for every MLB MVP table and column in src/mlb/schemas.py.
+
+tables:
+  raw_snapshots:
+    description: Append-only payload receipts for Savant CSV and Stats API fetches.
+    columns:
+      snapshot_id: Unique identifier for this immutable fetch.
+      source: Upstream name (for example mlb_stats_api or baseball_savant).
+      request_params_json: JSON of request parameters used for the fetch.
+      fetched_at_utc: UTC timestamp when the payload was retrieved.
+      payload_hash: Content hash of the stored payload.
+      parser_version: Parser contract version that may consume this snapshot.
+      payload_path: Relative path to the raw payload on disk.
+
+  game_versions:
+    description: Versioned schedule rows with validity windows for probable starters.
+    columns:
+      game_pk: MLB game primary key.
+      scheduled_start_utc: Scheduled first pitch in UTC.
+      status: Schedule status (scheduled, postponed, rescheduled, and similar).
+      home_team_id: MLB team ID for the home club.
+      away_team_id: MLB team ID for the away club.
+      venue_id: MLB venue ID.
+      doubleheader: Doubleheader game number (0 if not a doubleheader).
+      probable_home_pitcher_id: Probable home starter MLB person ID (nullable).
+      probable_away_pitcher_id: Probable away starter MLB person ID (nullable).
+      valid_from_utc: Inclusive start of this version's validity window.
+      valid_to_utc: Exclusive end of this version's validity window.
+      snapshot_id: Snapshot that produced this version.
+
+  pitch_events:
+    description: Pitch-level Statcast events with swing, zone, and stuff fields.
+    columns:
+      game_pk: MLB game primary key.
+      pitch_id: Stable pitch identifier within the game.
+      at_bat_number: Plate appearance number within the game.
+      pitch_number: Pitch number within the plate appearance.
+      pitcher_id: Pitcher MLB person ID.
+      batter_id: Batter MLB person ID.
+      event_time_utc: Pitch event time in UTC.
+      pitch_result: Coarse pitch outcome label.
+      pa_result: Result of the enclosing plate appearance.
+      pitcher_hand: Pitcher throwing hand (L/R).
+      batter_stand: Batter side for this pitch (L/R).
+      release_speed: Release velocity in mph.
+      pfx_x: Horizontal movement in feet.
+      pfx_z: Vertical movement in feet.
+      plate_x: Horizontal plate location in feet.
+      plate_z: Vertical plate location in feet.
+      pitch_type: Pitch type code (FF, SL, CH, and similar).
+      is_swing: 1 if the batter swung.
+      is_whiff: 1 if the swing missed.
+      is_called_strike: 1 if a taken pitch was a called strike.
+      is_in_zone: 1 if the pitch was in the rulebook zone.
+      is_chase: 1 if the batter swung at a pitch out of the zone.
+      source_vintage: Label for the Statcast vintage or fixture source.
+      ingested_at_utc: When this row was ingested (must precede cutoff).
+      snapshot_id: Snapshot that produced this pitch.
+
+  plate_appearances:
+    description: One row per plate appearance with strikeout and count context.
+    columns:
+      game_pk: MLB game primary key.
+      pa_id: Stable plate-appearance identifier.
+      at_bat_number: Plate appearance number within the game.
+      pitcher_id: Pitcher MLB person ID.
+      batter_id: Batter MLB person ID.
+      result: PA result label (strikeout, out, onbase, and similar).
+      is_strikeout: 1 if the PA ended in a strikeout.
+      batting_slot: Lineup slot (1-9).
+      pitcher_hand: Pitcher throwing hand (L/R).
+      batter_stand: Batter side for this PA (L/R).
+      tto_number: Times-through-the-order index for this PA.
+      pitches_in_pa: Number of pitches in the PA.
+      event_time_utc: PA event time in UTC.
+      ingested_at_utc: When this row was ingested.
+      snapshot_id: Snapshot that produced this PA.
+
+  pitcher_starts:
+    description: One row per pitcher-game start with realized workload and K.
+    columns:
+      pitcher_id: Pitcher MLB person ID.
+      game_pk: MLB game primary key.
+      game_date: Local/scheduled calendar date as YYYY-MM-DD.
+      season: MLB season year.
+      strikeouts: Realized strikeouts in the start.
+      batters_faced: Batters faced.
+      pitches: Pitches thrown.
+      outs: Outs recorded (capped at 27 in fixtures).
+      role: starter or opener.
+      is_home: 1 if the pitcher is the home starter.
+      opponent_team_id: Opponent MLB team ID.
+      team_id: Pitcher's MLB team ID.
+      venue_id: MLB venue ID.
+      pitcher_hand: Pitcher throwing hand (L/R).
+      scheduled_start_utc: Scheduled first pitch in UTC.
+      event_time_utc: Start event time used for leakage checks.
+      ingested_at_utc: When this start row was ingested.
+      doubleheader: Doubleheader game number (0 if not).
+
+  pregame_snapshots:
+    description: Cutoff-stamped starter state used as the feature-row spine.
+    columns:
+      pregame_id: Unique pitcher-game-cutoff identifier.
+      game_pk: MLB game primary key.
+      pitcher_id: Pitcher MLB person ID.
+      prediction_cutoff_utc: Forecast as-of time (start minus horizon).
+      forecast_horizon_hours: Hours between cutoff and scheduled start.
+      scheduled_start_utc: Scheduled first pitch in UTC.
+      game_date: Calendar date as YYYY-MM-DD.
+      season: MLB season year.
+      starter_state: probable, announced, scratched, or unknown.
+      lineup_state: team_fallback, expected, or announced.
+      roster_state: Roster availability label at cutoff.
+      is_opener: 1 if the pitcher is used as an opener.
+      is_il_return: 1 if the start is flagged as an IL return.
+      is_restricted: 1 if pitch count / role is restricted.
+      is_home: 1 if the pitcher is at home.
+      team_id: Pitcher's MLB team ID.
+      opponent_team_id: Opponent MLB team ID.
+      venue_id: MLB venue ID.
+      pitcher_hand: Pitcher throwing hand (L/R).
+      expected_rhb_share: Expected share of right-handed batters.
+      lineup_batter_ids_json: JSON list of known lineup batter IDs.
+      source_snapshot_ids_json: JSON list of snapshots used at cutoff.
+
+  feature_rows:
+    description: Cutoff-strict k_mvp_v1 features for one pitcher-game.
+    columns:
+      pitcher_id: Pitcher MLB person ID.
+      game_pk: MLB game primary key.
+      prediction_cutoff_utc: Feature as-of timestamp in UTC.
+      feature_set_version: Feature contract version (k_mvp_v1).
+      pregame_id: Joining key to the pregame snapshot.
+      k_bf_shrunk_60: Empirical-Bayes K/BF over a trailing 60-day window.
+      k_bf_shrunk_365: Empirical-Bayes K/BF over a trailing 365-day window.
+      k_bf_shrunk_prior2: Empirical-Bayes K/BF over the prior two seasons.
+      n_eff_k_bf_60: Effective BF sample size for the 60-day K rate.
+      n_eff_k_bf_365: Effective BF sample size for the 365-day K rate.
+      n_eff_k_bf_prior2: Effective BF sample size for the prior-two-season K rate.
+      csw_300: Called-strike-plus-whiff rate over trailing 300 pitches.
+      whiff_300: Whiff rate over trailing 300 pitches.
+      chase_300: Chase rate over trailing 300 pitches.
+      zone_300: Zone rate over trailing 300 pitches.
+      swing_300: Swing rate over trailing 300 pitches.
+      called_strike_300: Called-strike rate over trailing 300 pitches.
+      csw_750: Called-strike-plus-whiff rate over trailing 750 pitches.
+      whiff_750: Whiff rate over trailing 750 pitches.
+      chase_750: Chase rate over trailing 750 pitches.
+      zone_750: Zone rate over trailing 750 pitches.
+      swing_750: Swing rate over trailing 750 pitches.
+      called_strike_750: Called-strike rate over trailing 750 pitches.
+      csw_365: Called-strike-plus-whiff rate over trailing 365 days.
+      whiff_365: Whiff rate over trailing 365 days.
+      chase_365: Chase rate over trailing 365 days.
+      zone_365: Zone rate over trailing 365 days.
+      swing_365: Swing rate over trailing 365 days.
+      called_strike_365: Called-strike rate over trailing 365 days.
+      bf_per_start_3: Mean batters faced over the last 3 starts.
+      pitches_per_start_3: Mean pitches over the last 3 starts.
+      outs_per_start_3: Mean outs over the last 3 starts.
+      bf_per_start_5: Mean batters faced over the last 5 starts.
+      pitches_per_start_5: Mean pitches over the last 5 starts.
+      outs_per_start_5: Mean outs over the last 5 starts.
+      bf_per_start_10: Mean batters faced over the last 10 starts.
+      pitches_per_start_10: Mean pitches over the last 10 starts.
+      outs_per_start_10: Mean outs over the last 10 starts.
+      pitches_last_start: Pitches thrown in the immediately prior start.
+      rest_days: Days of rest since the previous start.
+      expected_bf_oof: Out-of-fold expected batters faced.
+      bf_sd_oof: Out-of-fold standard deviation of batters faced.
+      expected_pitches_oof: Out-of-fold expected pitch count.
+      expected_outs_oof: Out-of-fold expected outs.
+      p_early_exit_oof: Out-of-fold probability of exiting at or below early_exit_bf.
+      opp_k_rate_vs_hand_shrunk: Shrunk opponent K rate versus this pitcher hand.
+      n_eff_opp_k: Effective sample size for the opponent K rate.
+      lineup_k_rate_shrunk: Shrunk projected lineup K rate.
+      lineup_state_code: Integer code for lineup_state.
+      pitcher_throws_L: 1 if the pitcher throws left-handed.
+      expected_rhb_share: Expected share of right-handed batters.
+      fb_velo_300: Fastball velocity over trailing 300 pitches.
+      fb_velo_365: Fastball velocity over trailing 365 days.
+      fb_velo_delta: Fastball velocity change (300 minus 365).
+      ff_share_300: Fastball-family share over trailing 300 classified pitches.
+      bb_share_300: Breaking-ball share over trailing 300 classified pitches.
+      os_share_300: Offspeed share over trailing 300 classified pitches.
+      ff_share_delta: Fastball-share change versus the 365-day baseline.
+      bb_share_delta: Breaking-share change versus the 365-day baseline.
+      os_share_delta: Offspeed-share change versus the 365-day baseline.
+      is_opener: 1 if the pitcher is used as an opener.
+      is_il_return: 1 if the start is flagged as an IL return.
+      is_restricted: 1 if the start is role/pitch-count restricted.
+      is_home: 1 if the pitcher is at home.
+      venue_id: MLB venue ID.
+      season: MLB season year.
+      rules_era: Rules-era label (pre2020, 2020, 2021_22, pitch_clock).
+      starter_state_code: Integer code for starter_state.
+      missing_pitcher_k: 1 if pitcher K-rate inputs were missing.
+      missing_plate_discipline: 1 if plate-discipline inputs were missing.
+      missing_workload: 1 if workload-history inputs were missing.
+      missing_opponent: 1 if opponent-rate inputs were missing.
+      missing_lineup: 1 if lineup inputs were missing.
+      missing_stuff: 1 if stuff/mix inputs were missing.
+      missing_role: 1 if role/context inputs were missing.
+      max_input_event_time_utc: Latest event time used to build the row.
+      max_source_ingestion_time_utc: Latest ingestion time used to build the row.
+
+  market_quotes:
+    description: User-supplied strikeout over/under quotes, append-only.
+    columns:
+      quote_id: Unique quote identifier.
+      game_pk: MLB game primary key.
+      pitcher_id: Pitcher MLB person ID.
+      sportsbook: Book name.
+      jurisdiction: Legal market (default US).
+      line: Strikeout total line (typically a half-point).
+      over_price: Listed over price in price_format units.
+      under_price: Listed under price in price_format units.
+      price_format: american or decimal (default american).
+      fetched_at_utc: When the quote was observed (must precede cutoff to attach).
+      quote_status: Book status (open, current, and similar).
+      rule_version: Settlement rule label (default k_standard_v1).
+      fill_flag: 1 if a simulated fill is recorded (nullable).
+      rejected_flag: 1 if the quote was rejected (nullable).
+      limit: Posted stake limit if known.
+      void_flag: 1 if the market would void (nullable).
+      settled_flag: 1 if the quote is marked settled (nullable).
+
+  id_map:
+    description: Chadwick-style identifier map for pitchers and batters.
+    columns:
+      mlb_id: Canonical MLB person ID used as pitcher_id/batter_id.
+      key_mlbam: MLBAM identifier (usually equal to mlb_id).
+      key_fangraphs: FanGraphs ID if known (nullable; not scraped here).
+      key_bbref: Baseball-Reference identifier.
+      key_retro: Retrosheet identifier.
+      name: Display name.
+      bats: Batter side (L/R/S).
+      throws: Throwing hand (L/R).
+
+  predictions:
+    description: Strikeout PMF and prop probabilities for one pitcher-game cutoff.
+    columns:
+      pitcher_id: Pitcher MLB person ID.
+      game_pk: MLB game primary key.
+      prediction_cutoff_utc: Forecast as-of timestamp in UTC.
+      forecast_horizon_hours: Hours between cutoff and scheduled start.
+      expected_bf: Predicted batters faced used in the report.
+      expected_pitches: Predicted pitch count.
+      expected_outs: Predicted outs recorded.
+      expected_innings: Predicted innings (outs / 3).
+      expected_k: Predictive mean strikeouts.
+      variance_k: Predictive variance of strikeouts.
+      pi_lower: Lower edge of the configured prediction interval.
+      pi_upper: Upper edge of the configured prediction interval.
+      pmf_00: P(K = 0).
+      pmf_01: P(K = 1).
+      pmf_02: P(K = 2).
+      pmf_03: P(K = 3).
+      pmf_04: P(K = 4).
+      pmf_05: P(K = 5).
+      pmf_06: P(K = 6).
+      pmf_07: P(K = 7).
+      pmf_08: P(K = 8).
+      pmf_09: P(K = 9).
+      pmf_10: P(K = 10).
+      pmf_11: P(K = 11).
+      pmf_12: P(K = 12).
+      pmf_13: P(K = 13).
+      pmf_14: P(K = 14).
+      pmf_15: P(K = 15).
+      pmf_tail: P(K >= 16) after collapsing any extended support.
+      p_over_4_5: Model P(K > 4.5).
+      p_under_4_5: Model P(K < 4.5).
+      p_over_5_5: Model P(K > 5.5).
+      p_under_5_5: Model P(K < 5.5).
+      p_over_6_5: Model P(K > 6.5).
+      p_under_6_5: Model P(K < 6.5).
+      model_version: Strikeout model version (nb_k_v1).
+      feature_version: Feature set version used at predict time.
+      workload_model_version: Workload model version (nb_bf_v1).
+      source_snapshot_ids_json: JSON list of snapshots behind the prediction.
+      missing_data_flags_json: JSON of missingness flags at predict time.
+      restriction_flags_json: JSON of role/restriction flags at predict time.
+      market_p_over: De-vigged quote P(over) when a timely quote is attached.
+      market_p_under: De-vigged quote P(under) when a timely quote is attached.
+      market_disagreement: model_p_over minus market_p_over.

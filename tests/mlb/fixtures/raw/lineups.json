@@ -1,0 +1,65 @@
+[
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222028,
+    "batting_slot": 1,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222029,
+    "batting_slot": 2,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222030,
+    "batting_slot": 3,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222031,
+    "batting_slot": 4,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222032,
+    "batting_slot": 5,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222033,
+    "batting_slot": 6,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222034,
+    "batting_slot": 7,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222035,
+    "batting_slot": 8,
+    "side": "away"
+  },
+  {
+    "game_pk": 500043,
+    "team_id": 136,
+    "batter_id": 222036,
+    "batting_slot": 9,
+    "side": "away"
+  }
+]
