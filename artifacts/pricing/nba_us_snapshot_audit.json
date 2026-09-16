@@ -1,0 +1,360 @@
+{
+  "2026-02-10": {
+    "integrity": {
+      "n_rows": 651,
+      "odds_after_tip": 0,
+      "features_after_or_on_game": 0,
+      "dnp_voids": 127,
+      "dnp_graded_as_zero": 0,
+      "half_point_pushes": 0,
+      "implausible_over_edges_gt_10pct": 206,
+      "implausible_under_edges_gt_10pct": 17
+    },
+    "current_vs_market": {
+      "n": 651,
+      "mean_over_edge": 0.06754503271717223,
+      "mean_abs_over_edge": 0.08366266256438831,
+      "largest": [
+        {
+          "player_name": "Dalton Knecht",
+          "book": "FanDuel",
+          "line": 8.5,
+          "hat_p": 2.9097518920898438,
+          "current_p_over": 0.0955,
+          "p_market_over": 0.4939310568053083,
+          "current_over_edge": -0.3984310568053083
+        },
+        {
+          "player_name": "Franz Wagner",
+          "book": "FanDuel",
+          "line": 14.5,
+          "hat_p": 19.042879104614258,
+          "current_p_over": 0.747,
+          "p_market_over": 0.4718423169750604,
+          "current_over_edge": 0.2751576830249396
+        },
+        {
+          "player_name": "Rui Hachimura",
+          "book": "BetMGM",
+          "line": 15.5,
+          "hat_p": 11.866060256958008,
+          "current_p_over": 0.257,
+          "p_market_over": 0.5203045685279188,
+          "current_over_edge": -0.26330456852791884
+        },
+        {
+          "player_name": "Rui Hachimura",
+          "book": "DraftKings",
+          "line": 15.5,
+          "hat_p": 11.866060256958008,
+          "current_p_over": 0.257,
+          "p_market_over": 0.510397604391948,
+          "current_over_edge": -0.25339760439194803
+        },
+        {
+          "player_name": "Jake LaRavia",
+          "book": "FanDuel",
+          "line": 13.5,
+          "hat_p": 9.714119911193848,
+          "current_p_over": 0.255,
+          "p_market_over": 0.48581617766250607,
+          "current_over_edge": -0.23081617766250606
+        },
+        {
+          "player_name": "Jake LaRavia",
+          "book": "BetRivers",
+          "line": 12.5,
+          "hat_p": 9.714119911193848,
+          "current_p_over": 0.31275,
+          "p_market_over": 0.5401900804186387,
+          "current_over_edge": -0.22744008041863872
+        },
+        {
+          "player_name": "Jake LaRavia",
+          "book": "BetOnline.ag",
+          "line": 13.5,
+          "hat_p": 9.714119911193848,
+          "current_p_over": 0.255,
+          "p_market_over": 0.48149290561381863,
+          "current_over_edge": -0.22649290561381863
+        },
+        {
+          "player_name": "Jake LaRavia",
+          "book": "BetRivers",
+          "line": 13.5,
+          "hat_p": 9.714119911193848,
+          "current_p_over": 0.255,
+          "p_market_over": 0.4773835745752045,
+          "current_over_edge": -0.22238357457520447
+        },
+        {
+          "player_name": "OG Anunoby",
+          "book": "FanDuel",
+          "line": 15.5,
+          "hat_p": 19.026554107666016,
+          "current_p_over": 0.697,
+          "p_market_over": 0.48124062031015497,
+          "current_over_edge": 0.215759379689845
+        },
+        {
+          "player_name": "Jake LaRavia",
+          "book": "DraftKings",
+          "line": 12.5,
+          "hat_p": 9.714119911193848,
+          "current_p_over": 0.31275,
+          "p_market_over": 0.5238589211618258,
+          "current_over_edge": -0.21110892116182578
+        },
+        {
+          "player_name": "OG Anunoby",
+          "book": "DraftKings",
+          "line": 15.5,
+          "hat_p": 19.026554107666016,
+          "current_p_over": 0.697,
+          "p_market_over": 0.487517163899638,
+          "current_over_edge": 0.20948283610036195
+        },
+        {
+          "player_name": "OG Anunoby",
+          "book": "BetOnline.ag",
+          "line": 15.5,
+          "hat_p": 19.026554107666016,
+          "current_p_over": 0.697,
+          "p_market_over": 0.4876847290640395,
+          "current_over_edge": 0.20931527093596047
+        },
+        {
+          "player_name": "Jake LaRavia",
+          "book": "BetMGM",
+          "line": 12.5,
+          "hat_p": 9.714119911193848,
+          "current_p_over": 0.31275,
+          "p_market_over": 0.5203045685279188,
+          "current_over_edge": -0.20755456852791887
+        },
+        {
+          "player_name": "Rui Hachimura",
+          "book": "BetRivers",
+          "line": 14.5,
+          "hat_p": 11.866060256958008,
+          "current_p_over": 0.31225,
+          "p_market_over": 0.519771442128989,
+          "current_over_edge": -0.20752144212898893
+        },
+        {
+          "player_name": "OG Anunoby",
+          "book": "BetRivers",
+          "line": 16.5,
+          "hat_p": 19.026554107666016,
+          "current_p_over": 0.64325,
+          "p_market_over": 0.43694311172035644,
+          "current_over_edge": 0.20630688827964355
+        }
+      ]
+    },
+    "current_vs_clip_mean": {
+      "n": 651,
+      "mean_over_shift": 0.001906298003072201,
+      "mean_abs_over_shift": 0.0049093701996927785,
+      "low_scorer_overs": {
+        "n": 32,
+        "mean_over_shift": 0.015273437500000014
+      }
+    },
+    "edge_buckets": {
+      "over": {
+        "<2%": {
+          "n": 49,
+          "wins": 7,
+          "losses": 32,
+          "pushes": 0,
+          "voids": 10
+        },
+        "2\u20135%": {
+          "n": 127,
+          "wins": 51,
+          "losses": 36,
+          "pushes": 0,
+          "voids": 40
+        },
+        "5\u201310%": {
+          "n": 189,
+          "wins": 91,
+          "losses": 60,
+          "pushes": 0,
+          "voids": 38
+        },
+        ">10%": {
+          "n": 206,
+          "wins": 135,
+          "losses": 52,
+          "pushes": 0,
+          "voids": 19
+        }
+      },
+      "under": {
+        "<2%": {
+          "n": 35,
+          "wins": 21,
+          "losses": 7,
+          "pushes": 0,
+          "voids": 7
+        },
+        "2\u20135%": {
+          "n": 20,
+          "wins": 10,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 10
+        },
+        "5\u201310%": {
+          "n": 8,
+          "wins": 3,
+          "losses": 2,
+          "pushes": 0,
+          "voids": 3
+        },
+        ">10%": {
+          "n": 17,
+          "wins": 12,
+          "losses": 5,
+          "pushes": 0,
+          "voids": 0
+        }
+      }
+    },
+    "side_split": {
+      "over": {
+        "n": 651,
+        "n_positive_edge": 571,
+        "mean_edge": 0.06754503271717223,
+        "mean_positive_edge": 0.0861963306727635,
+        "positive_edge_wins": 284,
+        "positive_edge_losses": 180
+      },
+      "under": {
+        "n": 651,
+        "n_positive_edge": 80,
+        "mean_edge": -0.06754503271717224,
+        "mean_positive_edge": 0.06557860644086047,
+        "positive_edge_wins": 46,
+        "positive_edge_losses": 14
+      }
+    },
+    "as_of": "2026-02-10",
+    "quotes_file": "NBA_US_20260210_144744.csv",
+    "n_snapshot_pairs": 651,
+    "closing_distinct_n": 0,
+    "clv_note": "Single-pull files: closing odds equal the analysis snapshot. CLV is not identified."
+  },
+  "2026-03-25": {
+    "integrity": {
+      "n_rows": 0,
+      "odds_after_tip": 0,
+      "features_after_or_on_game": 0,
+      "dnp_voids": 0,
+      "dnp_graded_as_zero": 0,
+      "half_point_pushes": 0,
+      "implausible_over_edges_gt_10pct": 0,
+      "implausible_under_edges_gt_10pct": 0
+    },
+    "current_vs_market": {
+      "n": 0,
+      "mean_over_edge": null,
+      "mean_abs_over_edge": null,
+      "largest": []
+    },
+    "current_vs_clip_mean": {
+      "n": 0,
+      "mean_over_shift": null,
+      "mean_abs_over_shift": null,
+      "low_scorer_overs": {
+        "n": 0,
+        "mean_over_shift": null
+      }
+    },
+    "edge_buckets": {
+      "over": {
+        "<2%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        },
+        "2\u20135%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        },
+        "5\u201310%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        },
+        ">10%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        }
+      },
+      "under": {
+        "<2%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        },
+        "2\u20135%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        },
+        "5\u201310%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        },
+        ">10%": {
+          "n": 0,
+          "wins": 0,
+          "losses": 0,
+          "pushes": 0,
+          "voids": 0
+        }
+      }
+    },
+    "side_split": {
+      "over": {
+        "n": 0,
+        "n_positive_edge": 0,
+        "mean_edge": null,
+        "mean_positive_edge": null,
+        "positive_edge_wins": 0,
+        "positive_edge_losses": 0
+      },
+      "under": {
+        "n": 0,
+        "n_positive_edge": 0,
+        "mean_edge": null,
+        "mean_positive_edge": null,
+        "positive_edge_wins": 0,
+        "positive_edge_losses": 0
+      }
+    },
+    "as_of": "2026-03-25",
+    "quotes_file": "NBA_US_20260325_131922.csv",
+    "note": "No local games strictly after as_of in this snapshot."
+  }
+}

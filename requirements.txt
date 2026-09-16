@@ -1,0 +1,12 @@
+pandas==3.0.5
+numpy==2.5.3
+pyarrow==25.0.1
+nba_api==1.11.4
+beautifulsoup4==4.15.0
+curl_cffi==0.16.3
+playwright==1.62.0
+xgboost==3.4.1
+scikit-learn==1.9.0
+optuna==5.0.0
+matplotlib==3.11.1
+seaborn==0.13.2

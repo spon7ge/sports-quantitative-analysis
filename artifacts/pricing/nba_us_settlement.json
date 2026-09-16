@@ -1,0 +1,45 @@
+{
+  "2026-02-10": {
+    "quotes_file": "NBA_US_20260210_144744.csv",
+    "as_of": "2026-02-10",
+    "history_max": "2026-02-09",
+    "displayed_markets": 651,
+    "bets": 506,
+    "settled": 406,
+    "voids": 100,
+    "wins": 278,
+    "losses": 128,
+    "pushes": 0,
+    "profit": 128.31169561253358,
+    "roi": 0.3160386591441714,
+    "hit_rate": 0.6847290640394089,
+    "mean_quoted_ev": 0.15728544083284912,
+    "displayed_game_dates": [
+      "2026-02-11",
+      "2026-02-12"
+    ],
+    "grades": {
+      "win": 278,
+      "loss": 128,
+      "void": 100
+    }
+  },
+  "2026-03-25": {
+    "quotes_file": "NBA_US_20260325_131922.csv",
+    "as_of": "2026-03-25",
+    "history_max": "2026-03-24",
+    "displayed_markets": 0,
+    "bets": 0,
+    "settled": 0,
+    "voids": 0,
+    "wins": 0,
+    "losses": 0,
+    "pushes": 0,
+    "profit": null,
+    "roi": null,
+    "hit_rate": null,
+    "mean_quoted_ev": null,
+    "displayed_game_dates": [],
+    "note": "No local games strictly after as_of in this snapshot."
+  }
+}

@@ -1,0 +1,10 @@
+data/bronze/
+data/silver/
+data/research/
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+artifacts/models/
+.DS_Store
+.pytest_cache/
+.venv/
