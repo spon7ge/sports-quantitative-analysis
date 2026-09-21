@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -15,7 +17,17 @@ from src.mlb.models.batter_rates import (
     rate_version,
     shrink_batter_k_pa,
 )
+from src.mlb.pipeline.features import select_game_version
+from src.mlb.pipeline.http import HttpFn
 from src.mlb.schemas import LINEUP_SLOT_COLUMNS, coerce_frame
+from src.mlb.storage import MlbStore
+
+BOXSCORE_00_LEAD = pd.Timedelta(hours=24)
+LINEUP_URL_TEMPLATE = "https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
 
 STARTING_NINE_COLUMNS = (
     "game_pk",
@@ -205,3 +217,277 @@ def freeze_lineup_slot_rates(
                 frozen.at[index, f"{metric}_{window}"] = value
 
     return coerce_frame(frozen, LINEUP_SLOT_COLUMNS)
+
+
+def _utc_timestamp(value: Any) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if pd.isna(timestamp):
+        return pd.NaT
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def is_dummy_dh2_start(start: Any, game1_start: Any = None) -> bool:
+    """Return whether a DH2 scheduled start is unusable as an as-of timestamp."""
+    start = _utc_timestamp(start)
+    if pd.isna(start):
+        return True
+    if start.hour == 0 and start.minute == 0 and start.second == 0:
+        return True
+    game1 = _utc_timestamp(game1_start)
+    return bool(
+        not pd.isna(game1)
+        and start.date() == game1.date()
+        and start == game1
+    )
+
+
+def write_lineup_coverage(
+    slots: pd.DataFrame,
+    skips: pd.DataFrame,
+    *,
+    season: int,
+) -> dict[str, int]:
+    """Summarize written nines and explicit skip reasons for one season."""
+    season_slots = slots.loc[slots.get("season", pd.Series(dtype="int64")) == season]
+    season_skips = skips.loc[skips.get("season", pd.Series(dtype="int64")) == season]
+    complete = 0
+    if not season_slots.empty:
+        complete = int(
+            season_slots.groupby(["game_pk", "team_id"])["slot"].nunique().eq(9).sum()
+        )
+    skipped_games = (
+        set(season_skips["game_pk"].astype(int)) if not season_skips.empty else set()
+    )
+    written_games = (
+        set(season_slots["game_pk"].astype(int)) if not season_slots.empty else set()
+    )
+    reasons = season_skips.get("reason", pd.Series(dtype="string"))
+    incomplete_games = set(
+        season_skips.loc[reasons == "incomplete_nine", "game_pk"].astype(int)
+    )
+    return {
+        "season": int(season),
+        "n_game_pks": len(written_games | skipped_games),
+        "n_boxscore_ok": len(written_games | incomplete_games),
+        "n_sides_complete_nine": complete,
+        "n_slots_written": int(len(season_slots)),
+        "n_skip_dh2_dummy_start": int((reasons == "dh2_dummy_start").sum()),
+        "n_skip_no_boxscore": int((reasons == "no_boxscore").sum()),
+        "n_skip_incomplete_nine": int((reasons == "incomplete_nine").sum()),
+    }
+
+
+def assert_lineup_coverage(coverage: dict[str, Any], *, season: int) -> None:
+    """Raise when a season has no slots or fewer than 95% complete sides."""
+    if int(coverage.get("n_slots_written", 0)) == 0:
+        raise ValueError(f"lineup coverage for {season} wrote zero slots")
+    n_boxscore_ok = int(coverage.get("n_boxscore_ok", 0))
+    denominator = 2 * n_boxscore_ok
+    complete_rate = (
+        float(coverage.get("n_sides_complete_nine", 0)) / denominator
+        if denominator
+        else 0.0
+    )
+    if complete_rate < 0.95:
+        raise ValueError(
+            f"lineup complete-nine coverage for {season} is {complete_rate:.3f}"
+        )
+
+
+def _local_lineup_payload(config: MlbConfig, game_pk: int) -> bytes:
+    candidates = (
+        config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json",
+        Path(config.fixture_dir) / "raw" / f"lineups_{game_pk}.json",
+        Path(config.fixture_dir) / "raw" / "lineups.json",
+    )
+    for path in candidates:
+        if path.exists():
+            return path.read_bytes()
+    raise FileNotFoundError(f"No local lineup payload for game {game_pk}")
+
+
+def _original_game_version(
+    game_versions: pd.DataFrame, game_pk: int
+) -> pd.Series | None:
+    versions = game_versions.loc[game_versions["game_pk"] == game_pk]
+    if versions.empty:
+        return None
+    starts = pd.to_datetime(versions["scheduled_start_utc"], utc=True)
+    if starts.notna().any():
+        return versions.loc[starts.idxmin()]
+    return versions.iloc[0]
+
+
+def _pitcher_hand(people: pd.DataFrame, pitcher_id: int | None) -> str:
+    if pitcher_id is None or pd.isna(pitcher_id) or people.empty:
+        return ""
+    id_column = "mlb_id" if "mlb_id" in people else "pitcher_id"
+    match = people.loc[people[id_column] == int(pitcher_id)]
+    if match.empty:
+        return ""
+    value = match.iloc[-1].get("throws", "")
+    return "" if pd.isna(value) else str(value)
+
+
+def ingest_lineup_slots(
+    config: MlbConfig,
+    *,
+    game_pks: list[int],
+    provenance: str,
+    http: HttpFn | None = None,
+) -> pd.DataFrame:
+    """Fetch complete starting nines, freeze cutoff-safe rates, and persist them."""
+    from src.mlb.pipeline.ingest import snapshot_raw
+
+    if provenance not in {"live_feed", "boxscore_00"}:
+        raise ValueError(f"unsupported lineup provenance: {provenance}")
+
+    store = MlbStore(config)
+    game_versions = store.read_table("game_versions")
+    people = store.read_table("id_map")
+    batter_pas = store.read_table("batter_pas")
+    existing = store.read_table("lineup_slots")
+    frames: list[pd.DataFrame] = []
+    skip_rows: list[dict[str, Any]] = []
+    seasons: set[int] = set()
+
+    for game_pk in game_pks:
+        params = {"game_pk": int(game_pk)}
+        payload = (
+            _local_lineup_payload(config, int(game_pk))
+            if http is None
+            else http(LINEUP_URL_TEMPLATE.format(game_pk=int(game_pk)), params)
+        )
+        parsed = parse_starting_nine(payload, game_pk=int(game_pk))
+        season = int(parsed["season"].iloc[0]) if not parsed.empty else 0
+        seasons.add(season)
+        original = _original_game_version(game_versions, int(game_pk))
+        start = (
+            _utc_timestamp(original["scheduled_start_utc"])
+            if original is not None
+            else pd.NaT
+        )
+        doubleheader = (
+            int(original.get("doubleheader", 0)) if original is not None else 0
+        )
+        game1_start = None
+        if doubleheader == 2 and original is not None and not game_versions.empty:
+            peers = game_versions.loc[
+                (game_versions["home_team_id"] == original["home_team_id"])
+                & (game_versions["away_team_id"] == original["away_team_id"])
+                & (game_versions["doubleheader"] == 1)
+            ]
+            if not peers.empty:
+                game1_start = peers.iloc[0]["scheduled_start_utc"]
+        if (
+            provenance == "boxscore_00"
+            and doubleheader == 2
+            and is_dummy_dh2_start(start, game1_start)
+        ):
+            skip_rows.append(
+                {"game_pk": game_pk, "season": season, "reason": "dh2_dummy_start"}
+            )
+            continue
+        if parsed.empty:
+            skip_rows.append(
+                {"game_pk": game_pk, "season": season, "reason": "no_boxscore"}
+            )
+            continue
+        side_sizes = parsed.groupby(["team_id", "side"])["slot"].nunique()
+        complete_keys = set(side_sizes.loc[side_sizes == 9].index)
+        if len(complete_keys) != 2:
+            skip_rows.append(
+                {"game_pk": game_pk, "season": season, "reason": "incomplete_nine"}
+            )
+        if not complete_keys:
+            continue
+
+        effective_start = start
+        if provenance == "live_feed" and pd.isna(effective_start):
+            game_rows = game_versions.loc[game_versions["game_pk"] == int(game_pk)]
+            usable = game_rows.loc[
+                pd.to_datetime(game_rows["scheduled_start_utc"], utc=True).notna()
+            ]
+            if not usable.empty:
+                valid_from = pd.to_datetime(usable["valid_from_utc"], utc=True)
+                effective_start = _utc_timestamp(
+                    usable.loc[valid_from.idxmax(), "scheduled_start_utc"]
+                )
+        if pd.isna(effective_start):
+            skip_rows.append(
+                {"game_pk": game_pk, "season": season, "reason": "dh2_dummy_start"}
+            )
+            continue
+        cutoff = effective_start - pd.Timedelta(hours=config.forecast_horizon_hours)
+        ingested_at = (
+            effective_start - BOXSCORE_00_LEAD
+            if provenance == "boxscore_00"
+            else pd.Timestamp(_now_utc())
+        )
+        if provenance == "live_feed" and ingested_at >= cutoff:
+            continue
+        snapshot_id = snapshot_raw(
+            config, "mlb_lineup_slots", params, payload, ingested_at
+        )
+        version = select_game_version(game_versions, int(game_pk), cutoff)
+
+        for (team_id, side), side_slots in parsed.groupby(
+            ["team_id", "side"], sort=False
+        ):
+            if (team_id, side) not in complete_keys:
+                continue
+            pitcher_field = (
+                "probable_away_pitcher_id"
+                if side == "home"
+                else "probable_home_pitcher_id"
+            )
+            pitcher_id = version.get(pitcher_field) if version is not None else None
+            frozen = freeze_lineup_slot_rates(
+                side_slots,
+                batter_pas,
+                people,
+                config,
+                cutoff=cutoff,
+                opposing_pitcher_hand=_pitcher_hand(people, pitcher_id),
+                vs_pitcher_id=None if pd.isna(pitcher_id) else int(pitcher_id),
+            )
+            frozen["lineup_state"] = "announced"
+            frozen["observed_before_cutoff"] = int(provenance == "live_feed")
+            frozen["provenance"] = provenance
+            frozen["ingested_at_utc"] = ingested_at
+            frozen["snapshot_id"] = snapshot_id
+            frames.append(coerce_frame(frozen, LINEUP_SLOT_COLUMNS))
+
+    written = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else coerce_frame(pd.DataFrame(), LINEUP_SLOT_COLUMNS)
+    )
+    if not written.empty:
+        keys = ["game_pk", "team_id", "slot", "rate_version", "provenance"]
+        old_keys = set(existing[keys].itertuples(index=False, name=None))
+        written = written.loc[
+            [
+                tuple(row) not in old_keys
+                for row in written[keys].itertuples(index=False, name=None)
+            ]
+        ].reset_index(drop=True)
+        if not written.empty:
+            store.write_table(
+                "lineup_slots",
+                coerce_frame(
+                    pd.concat([existing, written], ignore_index=True),
+                    LINEUP_SLOT_COLUMNS,
+                ),
+            )
+
+    skips = pd.DataFrame(skip_rows, columns=["game_pk", "season", "reason"])
+    for season in sorted(seasons):
+        coverage = write_lineup_coverage(written, skips, season=season)
+        store.write_json(
+            config.artifact_dir / f"lineup_coverage_{season}.json", coverage
+        )
+        assert_lineup_coverage(coverage, season=season)
+    return written
