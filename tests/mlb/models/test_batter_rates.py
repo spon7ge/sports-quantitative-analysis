@@ -147,3 +147,48 @@ def test_unknown_hand_keeps_overall_and_sets_vs_hand_nan() -> None:
     for window in out.values():
         assert math.isfinite(window["k_pa_overall_shrunk"])
         assert math.isnan(window["k_pa_vs_hand_shrunk"])
+
+
+def test_filters_decoys_and_uses_calendar_years_for_prior2() -> None:
+    cutoff = pd.Timestamp("2026-07-01T00:00:00Z")
+    pas = pd.DataFrame(
+        [
+            # Eligible in both rolling windows, but not prior2.
+            (1, "2026-06-20T00:00:00Z", 0, "strikeout"),
+            # Eligible in prior2, but both are outside the rolling 365 days.
+            (1, "2025-01-15T00:00:00Z", 0, "strikeout"),
+            (1, "2024-06-15T00:00:00Z", 0, "out"),
+            # Decoys exercise every binding eligibility filter.
+            (2, "2025-02-01T00:00:00Z", 0, "strikeout"),
+            (1, "2024-05-01T00:00:00Z", 1, "strikeout"),
+            (1, "2026-07-01T00:00:00Z", 0, "strikeout"),
+            (1, "2026-07-02T00:00:00Z", 0, "strikeout"),
+        ],
+        columns=[
+            "batter_id",
+            "event_time_utc",
+            "event_time_imputed",
+            "event_type",
+        ],
+    )
+    pas["pitcher_hand"] = "R"
+    config = replace(load_config(), batter_k_prior_strength=1.0)
+
+    out = shrink_batter_k_pa(
+        pas,
+        batter_id=1,
+        opposing_pitcher_hand="",
+        bats="R",
+        cutoff=cutoff,
+        league=_league(),
+        config=config,
+    )
+
+    recent_expected = shrink_rate(1, 1, 0.22, 1.0)
+    prior2_expected = shrink_rate(1, 2, 0.22, 1.0)
+    assert out["60"]["pa_all"] == 1.0
+    assert out["365"]["pa_all"] == 1.0
+    assert out["prior2"]["pa_all"] == 2.0
+    assert out["60"]["k_pa_overall_shrunk"] == pytest.approx(recent_expected)
+    assert out["365"]["k_pa_overall_shrunk"] == pytest.approx(recent_expected)
+    assert out["prior2"]["k_pa_overall_shrunk"] == pytest.approx(prior2_expected)
