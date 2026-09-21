@@ -311,8 +311,6 @@ def copy_live_ingest_clock(
     if existing is None or existing.empty or copied.empty:
         return copied
     keys = ["game_pk", "team_id", "slot"]
-    if "snapshot_id" in existing and "snapshot_id" in copied:
-        keys.append("snapshot_id")
     live = existing.loc[existing["provenance"] == "live_feed"].copy()
     if live.empty:
         return copied

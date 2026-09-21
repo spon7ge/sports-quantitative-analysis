@@ -645,6 +645,7 @@ def test_live_clock_copy_preserves_original_as_of() -> None:
                 "slot": 1,
                 "rate_version": "A",
                 "provenance": "live_feed",
+                "snapshot_id": "snapshot-A",
                 "ingested_at_utc": original_clock,
             }
         ]
@@ -657,6 +658,7 @@ def test_live_clock_copy_preserves_original_as_of() -> None:
                 "slot": 1,
                 "rate_version": "B",
                 "provenance": "live_feed",
+                "snapshot_id": "snapshot-B",
                 "ingested_at_utc": pd.Timestamp("2026-07-01T18:00:00Z"),
             }
         ]
