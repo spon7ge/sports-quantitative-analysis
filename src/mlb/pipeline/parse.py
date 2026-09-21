@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.mlb.pipeline.lineup_slots import parse_starting_nine
 from src.mlb.schemas import (
     GAME_VERSION_COLUMNS,
     ID_MAP_COLUMNS,
@@ -367,38 +368,8 @@ def parse_lineups(raw_payload: str | bytes, game_pk: int | None = None) -> pd.Da
         return frame[keep] if keep else pd.DataFrame(columns=list(LINEUP_COLUMNS))
     if isinstance(data, dict) and isinstance(data.get("players"), list):
         return pd.DataFrame(data["players"])
-
-    resolved_pk = game_pk
-    if resolved_pk is None and isinstance(data, dict):
-        game_info = (data.get("gameData") or {}).get("game", {})
-        resolved_pk = data.get("gamePk") or game_info.get("pk")
-
-    box: dict[str, Any] = {}
-    if isinstance(data, dict):
-        live = data.get("liveData") or {}
-        box = live.get("boxscore") or data.get("boxscore") or data
-
-    teams = box.get("teams") if isinstance(box, dict) else None
-    if not teams:
-        return pd.DataFrame(columns=list(LINEUP_COLUMNS))
-
-    rows: list[dict[str, Any]] = []
-    for side in ("home", "away"):
-        team = teams.get(side) or {}
-        team_id = (team.get("team") or {}).get("id")
-        order = team.get("battingOrder") or []
-        for slot, player_key in enumerate(order, start=1):
-            batter_id = int(str(player_key).replace("ID", ""))
-            rows.append(
-                {
-                    "game_pk": resolved_pk,
-                    "team_id": team_id,
-                    "batter_id": batter_id,
-                    "batting_slot": slot,
-                    "side": side,
-                }
-            )
-    return pd.DataFrame(rows, columns=list(LINEUP_COLUMNS))
+    slots = parse_starting_nine(raw_payload, game_pk=game_pk)
+    return slots.rename(columns={"slot": "batting_slot"})[list(LINEUP_COLUMNS)]
 
 
 def parse_people(raw_payload: str | bytes) -> pd.DataFrame:
