@@ -228,6 +228,110 @@ def _utc_timestamp(value: Any) -> pd.Timestamp:
     return timestamp.tz_convert("UTC")
 
 
+def select_lineup_slots(
+    slots: pd.DataFrame,
+    *,
+    cutoff: pd.Timestamp,
+    rate_version: str,
+) -> pd.DataFrame:
+    """Select the latest cutoff-safe card for each versioned lineup slot."""
+    if slots is None or slots.empty:
+        return slots.copy()
+    selected = slots.loc[slots["rate_version"] == rate_version].copy()
+    if selected.empty:
+        return selected
+    ingested_at = pd.to_datetime(selected["ingested_at_utc"], utc=True)
+    selected = selected.loc[ingested_at < _utc_timestamp(cutoff)].copy()
+    if selected.empty:
+        return selected
+    selected["_ingested_at_utc"] = pd.to_datetime(
+        selected["ingested_at_utc"], utc=True
+    )
+    selected = selected.sort_values("_ingested_at_utc").drop_duplicates(
+        ["game_pk", "team_id", "slot", "rate_version"], keep="last"
+    )
+    return selected.drop(columns="_ingested_at_utc").reset_index(drop=True)
+
+
+def select_probable_pitcher(
+    game_versions: pd.DataFrame,
+    game_pk: int,
+    cutoff: pd.Timestamp,
+    *,
+    batting_is_home: bool,
+) -> tuple[int | None, str]:
+    """Return the opposing probable pitcher from the latest valid version."""
+    version = select_game_version(game_versions, game_pk, _utc_timestamp(cutoff))
+    if version is None:
+        return None, ""
+    side = "away" if batting_is_home else "home"
+    pitcher_id = version.get(f"probable_{side}_pitcher_id")
+    hand = version.get(f"probable_{side}_pitcher_hand", "")
+    resolved_id = None if pd.isna(pitcher_id) else int(pitcher_id)
+    resolved_hand = "" if pd.isna(hand) else str(hand)
+    return resolved_id, resolved_hand
+
+
+def earliest_scheduled_start(
+    game_versions: pd.DataFrame, game_pk: int
+) -> pd.Timestamp:
+    """Return the earliest known scheduled start for a game."""
+    if game_versions is None or game_versions.empty:
+        return pd.NaT
+    starts = pd.to_datetime(
+        game_versions.loc[
+            game_versions["game_pk"] == game_pk, "scheduled_start_utc"
+        ],
+        utc=True,
+    )
+    return starts.min()
+
+
+def lineup_identity_mismatch_rate(
+    live: pd.DataFrame, official: pd.DataFrame
+) -> float:
+    """Return batter identity mismatch after joining each team's slots."""
+    keys = ["game_pk", "team_id", "slot"]
+    joined = live[keys + ["batter_id"]].merge(
+        official[keys + ["batter_id"]],
+        on=keys,
+        how="inner",
+        suffixes=("_live", "_official"),
+    )
+    if joined.empty:
+        return float("nan")
+    return float((joined["batter_id_live"] != joined["batter_id_official"]).mean())
+
+
+def copy_live_ingest_clock(
+    existing: pd.DataFrame, new_rows: pd.DataFrame
+) -> pd.DataFrame:
+    """Copy each original live card clock onto newly frozen slot rows."""
+    copied = new_rows.copy()
+    if existing is None or existing.empty or copied.empty:
+        return copied
+    keys = ["game_pk", "team_id", "slot"]
+    if "snapshot_id" in existing and "snapshot_id" in copied:
+        keys.append("snapshot_id")
+    live = existing.loc[existing["provenance"] == "live_feed"].copy()
+    if live.empty:
+        return copied
+    live["_original_ingested_at_utc"] = pd.to_datetime(
+        live["ingested_at_utc"], utc=True
+    )
+    clocks = (
+        live.groupby(keys, as_index=False)["_original_ingested_at_utc"].min()
+    )
+    copied = copied.merge(clocks, on=keys, how="left")
+    replace_clock = (copied["provenance"] == "live_feed") & copied[
+        "_original_ingested_at_utc"
+    ].notna()
+    copied.loc[replace_clock, "ingested_at_utc"] = copied.loc[
+        replace_clock, "_original_ingested_at_utc"
+    ]
+    return copied.drop(columns="_original_ingested_at_utc")
+
+
 def is_dummy_dh2_start(start: Any, game1_start: Any = None) -> bool:
     """Return whether a DH2 scheduled start is unusable as an as-of timestamp."""
     start = _utc_timestamp(start)

@@ -12,10 +12,15 @@ from src.mlb.config import load_config
 from src.mlb.pipeline.lineup_slots import (
     BOXSCORE_00_LEAD,
     assert_lineup_coverage,
+    copy_live_ingest_clock,
+    earliest_scheduled_start,
     freeze_lineup_slot_rates,
     ingest_lineup_slots,
     is_dummy_dh2_start,
+    lineup_identity_mismatch_rate,
     parse_starting_nine,
+    select_lineup_slots,
+    select_probable_pitcher,
     write_lineup_coverage,
 )
 from src.mlb.pipeline.parse import parse_lineups
@@ -544,3 +549,120 @@ def test_lineup_coverage_passes_healthy_and_fails_low_or_zero() -> None:
     low = dict(coverage, n_sides_complete_nine=1)
     with pytest.raises(ValueError):
         assert_lineup_coverage(low, season=2026)
+
+
+def test_select_lineup_slots_filters_rate_version_before_latest() -> None:
+    cutoff = pd.Timestamp("2026-07-01T17:00:00Z")
+    slots = pd.DataFrame(
+        [
+            {
+                "game_pk": 1,
+                "team_id": 10,
+                "slot": 1,
+                "rate_version": "A",
+                "batter_id": 101,
+                "ingested_at_utc": cutoff - pd.Timedelta(hours=2),
+            },
+            {
+                "game_pk": 1,
+                "team_id": 10,
+                "slot": 1,
+                "rate_version": "B",
+                "batter_id": 202,
+                "ingested_at_utc": cutoff - pd.Timedelta(hours=1),
+            },
+            {
+                "game_pk": 1,
+                "team_id": 10,
+                "slot": 1,
+                "rate_version": "A",
+                "batter_id": 303,
+                "ingested_at_utc": cutoff,
+            },
+        ]
+    )
+
+    selected = select_lineup_slots(slots, cutoff=cutoff, rate_version="A")
+
+    assert selected["rate_version"].tolist() == ["A"]
+    assert selected["batter_id"].tolist() == [101]
+
+
+def test_probable_pitcher_is_latest_valid_but_start_is_earliest() -> None:
+    cutoff = pd.Timestamp("2026-07-01T17:00:00Z")
+    game_versions = pd.DataFrame(
+        [
+            {
+                "game_pk": 1,
+                "scheduled_start_utc": "2026-07-01T19:00:00Z",
+                "probable_away_pitcher_id": 11,
+                "probable_away_pitcher_hand": "L",
+                "valid_from_utc": cutoff - pd.Timedelta(days=10),
+                "valid_to_utc": cutoff - pd.Timedelta(hours=2),
+            },
+            {
+                "game_pk": 1,
+                "scheduled_start_utc": "2026-07-01T20:00:00Z",
+                "probable_away_pitcher_id": 22,
+                "probable_away_pitcher_hand": "R",
+                "valid_from_utc": cutoff - pd.Timedelta(hours=1),
+                "valid_to_utc": pd.NaT,
+            },
+        ]
+    )
+
+    assert select_probable_pitcher(
+        game_versions, 1, cutoff, batting_is_home=True
+    ) == (22, "R")
+    assert earliest_scheduled_start(game_versions, 1) == pd.Timestamp(
+        "2026-07-01T19:00:00Z"
+    )
+
+
+def test_lineup_identity_mismatch_joins_team_and_slot() -> None:
+    live = pd.DataFrame(
+        [
+            {"game_pk": 1, "team_id": team, "slot": slot, "batter_id": batter}
+            for team, offset in ((10, 0), (20, 100))
+            for slot, batter in ((slot, offset + slot) for slot in range(1, 10))
+        ]
+    )
+    official = live.copy()
+
+    assert lineup_identity_mismatch_rate(live, official) == 0.0
+    assert math.isnan(
+        lineup_identity_mismatch_rate(live.iloc[0:0], official)
+    )
+
+
+def test_live_clock_copy_preserves_original_as_of() -> None:
+    original_clock = pd.Timestamp("2026-07-01T12:00:00Z")
+    existing = pd.DataFrame(
+        [
+            {
+                "game_pk": 1,
+                "team_id": 10,
+                "slot": 1,
+                "rate_version": "A",
+                "provenance": "live_feed",
+                "ingested_at_utc": original_clock,
+            }
+        ]
+    )
+    new_rows = pd.DataFrame(
+        [
+            {
+                "game_pk": 1,
+                "team_id": 10,
+                "slot": 1,
+                "rate_version": "B",
+                "provenance": "live_feed",
+                "ingested_at_utc": pd.Timestamp("2026-07-01T18:00:00Z"),
+            }
+        ]
+    )
+
+    copied = copy_live_ingest_clock(existing, new_rows)
+
+    assert copied.loc[0, "ingested_at_utc"] == original_clock
+    assert copied.loc[0, "ingested_at_utc"] < pd.Timestamp("2026-07-01T13:00:00Z")
