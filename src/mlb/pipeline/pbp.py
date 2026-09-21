@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import gzip
 import json
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from src.mlb.config import MlbConfig
+from src.mlb.pipeline.http import HttpFn
+from src.mlb.pipeline.ingest import snapshot_raw
 from src.mlb.schemas import BATTER_PA_COLUMNS, coerce_frame
+from src.mlb.storage import MlbStore
+
+LIVE_FEED_URL_TEMPLATE = "https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+PBP_URL_TEMPLATE = "https://statsapi.mlb.com/api/v1/game/{game_pk}/playByPlay"
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
 
 
 def _as_text(raw_payload: str | bytes) -> str:
@@ -20,6 +33,106 @@ def _as_text(raw_payload: str | bytes) -> str:
 def _game_pk(data: dict[str, Any]) -> Any:
     game = (data.get("gameData") or {}).get("game") or {}
     return data.get("gamePk") if data.get("gamePk") is not None else game.get("pk")
+
+
+def _has_plays(raw_payload: str | bytes) -> bool:
+    data = json.loads(_as_text(raw_payload))
+    if not isinstance(data, dict):
+        return False
+    live_data = data.get("liveData") or {}
+    return (live_data.get("plays") or {}).get("allPlays") is not None or data.get(
+        "allPlays"
+    ) is not None
+
+
+def _with_game_pk(raw_payload: str | bytes, game_pk: int) -> str | bytes:
+    data = json.loads(_as_text(raw_payload))
+    if not isinstance(data, dict) or _game_pk(data) is not None:
+        return raw_payload
+    data["gamePk"] = int(game_pk)
+    return json.dumps(data)
+
+
+def _local_payload(config: MlbConfig, game_pk: int) -> bytes:
+    gzip_path = config.raw_dir / "mlb_pbp" / f"{game_pk}.json.gz"
+    if gzip_path.exists():
+        with gzip.open(gzip_path, "rb") as handle:
+            return handle.read()
+
+    fixture_dir = Path(config.fixture_dir) / "raw"
+    for name in (f"{game_pk}.json", f"pbp_{game_pk}.json", "pbp.json"):
+        fixture_path = fixture_dir / name
+        if fixture_path.exists():
+            return fixture_path.read_bytes()
+    raise FileNotFoundError(f"No local play-by-play payload for game {game_pk}")
+
+
+def ingest_play_by_play(
+    config: MlbConfig,
+    *,
+    game_pks: list[int],
+    http: HttpFn | None = None,
+    people: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Ingest game PAs, retaining the latest wall-clock version of each PA."""
+    frames: list[pd.DataFrame] = []
+    for game_pk in game_pks:
+        params = {"game_pk": int(game_pk)}
+        ingested_at = _now_utc()
+        if http is None:
+            payload = _local_payload(config, int(game_pk))
+        else:
+            payload = http(
+                LIVE_FEED_URL_TEMPLATE.format(game_pk=int(game_pk)),
+                params,
+            )
+            if not _has_plays(payload):
+                snapshot_raw(
+                    config,
+                    "mlb_pbp",
+                    params,
+                    payload,
+                    ingested_at,
+                )
+                payload = http(
+                    PBP_URL_TEMPLATE.format(game_pk=int(game_pk)),
+                    params,
+                )
+
+        snapshot_id = snapshot_raw(
+            config,
+            "mlb_pbp",
+            params,
+            payload,
+            ingested_at,
+        )
+        gzip_path = config.raw_dir / "mlb_pbp" / f"{game_pk}.json.gz"
+        gzip_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(gzip_path, "wb") as handle:
+            handle.write(payload if isinstance(payload, bytes) else payload.encode())
+        frames.append(
+            parse_play_by_play(
+                _with_game_pk(payload, int(game_pk)),
+                snapshot_id,
+                ingested_at,
+                people=people,
+            )
+        )
+
+    parsed = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else coerce_frame(pd.DataFrame(), BATTER_PA_COLUMNS)
+    )
+    if parsed.empty:
+        return parsed
+
+    store = MlbStore(config)
+    combined = pd.concat([store.read_table("batter_pas"), parsed], ignore_index=True)
+    combined = combined.sort_values("ingested_at_utc", kind="stable")
+    combined = combined.drop_duplicates("pa_id", keep="last").reset_index(drop=True)
+    store.write_table("batter_pas", coerce_frame(combined, BATTER_PA_COLUMNS))
+    return parsed
 
 
 def _batter_bats(people: pd.DataFrame | None) -> dict[int, str]:
@@ -105,8 +218,7 @@ def parse_play_by_play(
     frame = pd.DataFrame(rows)
     if not frame.empty:
         pitcher_ids = {
-            game: set(group["pitcher_id"])
-            for game, group in frame.groupby("game_pk")
+            game: set(group["pitcher_id"]) for game, group in frame.groupby("game_pk")
         }
         frame["is_pitcher_in_game"] = [
             int(batter_id in pitcher_ids[game])
