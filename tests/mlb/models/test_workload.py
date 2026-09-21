@@ -25,12 +25,22 @@ def dummy_feature_rows(starts: pd.DataFrame, rng: np.random.Generator) -> pd.Dat
         "expected_bf_oof": starts["batters_faced"].astype(float).to_numpy(),
         "bf_sd_oof": np.full(n, 3.0),
         "p_early_exit_oof": np.full(n, 0.12),
+        "bf_mean_5": 22.0 + rng.normal(0.0, 2.0, n),
+        "bf_sd_5": 2.0 + rng.random(n),
+        "early_exit_rate_5": rng.uniform(0.05, 0.30, n),
+        "pitches_per_bf_5": 3.8 + rng.normal(0.0, 0.2, n),
         "k_bf_shrunk_365": (
             starts["strikeouts"].astype(float) / starts["batters_faced"].clip(lower=1)
         ).to_numpy(),
-        "k_bf_shrunk_60": (
-            starts["strikeouts"].astype(float) / starts["batters_faced"].clip(lower=1)
-        ).to_numpy(),
+        "k_bf_shrunk_60": np.clip(
+            (
+                starts["strikeouts"].astype(float)
+                / starts["batters_faced"].clip(lower=1)
+            ).to_numpy()
+            + rng.normal(0.0, 0.02, n),
+            0.05,
+            0.45,
+        ),
         "opp_k_rate_vs_hand_shrunk": np.full(n, 0.22),
         "lineup_k_rate_shrunk": np.full(n, 0.23),
         "csw_750": 0.27 + rng.normal(0.0, 0.02, n),

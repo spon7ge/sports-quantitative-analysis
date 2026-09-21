@@ -23,6 +23,22 @@ from src.models.evaluation import (
 
 
 class EvaluationMetricTests(unittest.TestCase):
+    def test_crps_matches_pairwise_definition(self) -> None:
+        rng = np.random.default_rng(0)
+        samples = rng.normal(size=(6, 5))
+        actual = rng.normal(size=6)
+        pairwise = np.mean(
+            np.abs(samples[:, :, None] - samples[:, None, :]),
+            axis=(1, 2),
+        )
+        expected = float(
+            np.mean(
+                np.mean(np.abs(samples - actual[:, None]), axis=1)
+                - 0.5 * pairwise
+            )
+        )
+        self.assertAlmostEqual(crps(samples, actual), expected, places=12)
+
     def test_perfect_ensemble_has_low_crps_and_nll(self) -> None:
         actual = np.array([10, 10, 10], dtype=float)
         samples = np.full((3, 500), 10.0)

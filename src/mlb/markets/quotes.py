@@ -165,7 +165,12 @@ def select_quotes_asof(
     quote_line_col = "line_quote" if "line_quote" in merged.columns else "line"
 
     picked_rows: list[pd.Series] = []
-    for _, group in merged.groupby("_pred_idx", sort=True):
+    book_col = "sportsbook" if "sportsbook" in merged.columns else None
+    group_keys: list[str] = ["_pred_idx"]
+    if book_col is not None:
+        group_keys.append(book_col)
+    group_keys.append(quote_line_col)
+    for _, group in merged.groupby(group_keys, sort=True, dropna=False):
         row0 = group.iloc[0]
         target = _target_line(row0, default_line)
         line_values = pd.to_numeric(group[quote_line_col], errors="coerce")

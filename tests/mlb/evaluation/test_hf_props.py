@@ -74,16 +74,57 @@ def test_pair_and_select_prefers_pinnacle_near_five_five() -> None:
     )
     paired = pair_over_under(collapse_last_pre_start(ticks))
     selected = select_asof_strikeout_quotes(paired)
-    assert len(selected) == 1
-    assert float(selected.iloc[0]["line"]) == 5.5
-    assert selected.iloc[0]["book"] == "pinnacle"
+    assert set(selected["book"].astype(str).str.lower()) == {"pinnacle", "bet365"}
+    pin_lines = set(
+        pd.to_numeric(
+            selected.loc[selected["book"].astype(str).str.lower() == "pinnacle", "line"],
+            errors="coerce",
+        )
+    )
+    assert pin_lines == {4.5, 5.5, 6.5}
+    bet_lines = set(
+        pd.to_numeric(
+            selected.loc[selected["book"].astype(str).str.lower() == "bet365", "line"],
+            errors="coerce",
+        )
+    )
+    assert bet_lines == {5.5}
+    pin_row = (
+        selected.loc[
+            (selected["book"].astype(str).str.lower() == "pinnacle")
+            & (pd.to_numeric(selected["line"], errors="coerce") == 5.5)
+        ]
+        .reset_index(drop=True)
+    )
     quotes = quotes_from_paired(
-        selected,
+        pin_row,
         game_pk=pd.Series([824277]),
         pitcher_id=pd.Series([676974]),
     )
     assert list(quotes.columns) == list(MARKET_QUOTE_COLUMNS)
     assert quotes.iloc[0]["price_format"] == "decimal"
+
+
+def test_select_keeps_novig_and_prophetx_alongside_pinnacle() -> None:
+    start = pd.Timestamp("2026-05-18 22:40:00", tz="UTC")
+    ts = start - pd.Timedelta(hours=3)
+    books = ["pinnacle", "novig", "prophetx"]
+    ticks = pd.DataFrame(
+        {
+            "game_id": ["m~a"] * 6,
+            "start_time": [start] * 6,
+            "player": ["Max Meyer"] * 6,
+            "line": [5.5] * 6,
+            "side": ["over", "under"] * 3,
+            "book": [b for b in books for _ in range(2)],
+            "ts": [ts] * 6,
+            "odds": [1.91, 1.91, 1.95, 1.87, 1.93, 1.89],
+            "result": [6.0] * 6,
+            "won": [True] * 6,
+        }
+    )
+    selected = select_asof_strikeout_quotes(pair_over_under(collapse_last_pre_start(ticks)))
+    assert set(selected["book"].astype(str).str.lower()) == {"pinnacle", "novig", "prophetx"}
 
 
 def test_normalize_player_name_strips_accents_and_suffix() -> None:

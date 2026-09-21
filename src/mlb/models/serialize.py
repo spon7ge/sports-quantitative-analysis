@@ -57,6 +57,10 @@ def as_strikeout_model(bundle: Any):
     if not isinstance(bundle, dict):
         raise TypeError(f"Cannot hydrate StrikeoutModel from {type(bundle)!r}")
     cov = bundle.get("cov")
+    extra = dict(bundle.get("extra") or {})
+    dropped = bundle.get("dropped_features") or extra.get("dropped_features") or {}
+    centers = bundle.get("centers") or extra.get("centers") or {}
+    scales = bundle.get("scales") or extra.get("scales") or {}
     return StrikeoutModel(
         feature_names=tuple(bundle["feature_names"]),
         coef=np.asarray(bundle["coef"], dtype=float),
@@ -65,7 +69,21 @@ def as_strikeout_model(bundle: Any):
         method=str(bundle.get("method", "glm")),
         cov=None if cov is None else np.asarray(cov, dtype=float),
         model_version=str(bundle.get("model_version", "nb_k_v1")),
-        extra=dict(bundle.get("extra") or {}),
+        extra=extra,
+        dropped_features={str(key): str(value) for key, value in dict(dropped).items()},
+        centers={str(key): float(value) for key, value in dict(centers).items()},
+        scales={str(key): float(value) for key, value in dict(scales).items()},
+        train_start=str(bundle.get("train_start", extra.get("train_start", ""))),
+        train_end=str(bundle.get("train_end", extra.get("train_end", ""))),
+        n_train=int(bundle.get("n_train", extra.get("n_train", 0)) or 0),
+        matrix_rank=int(bundle.get("matrix_rank", extra.get("matrix_rank", 0)) or 0),
+        condition_number=float(
+            bundle.get("condition_number", extra.get("condition_number", float("nan")))
+        ),
+        fold=str(bundle.get("fold", extra.get("fold", ""))),
+        uses_bf_offset=bool(
+            bundle.get("uses_bf_offset", extra.get("uses_bf_offset", False))
+        ),
     )
 
 
@@ -78,6 +96,10 @@ def as_workload_model(bundle: Any):
     if not isinstance(bundle, dict):
         raise TypeError(f"Cannot hydrate WorkloadModel from {type(bundle)!r}")
     cov = bundle.get("cov")
+    extra = dict(bundle.get("extra") or {})
+    dropped = bundle.get("dropped_features") or extra.get("dropped_features") or {}
+    centers = bundle.get("centers") or extra.get("centers") or {}
+    scales = bundle.get("scales") or extra.get("scales") or {}
     return WorkloadModel(
         feature_names=tuple(bundle["feature_names"]),
         coef=np.asarray(bundle["coef"], dtype=float),
@@ -90,5 +112,13 @@ def as_workload_model(bundle: Any):
         method=str(bundle.get("method", "glm")),
         cov=None if cov is None else np.asarray(cov, dtype=float),
         model_version=str(bundle.get("model_version", "nb_bf_v1")),
-        extra=dict(bundle.get("extra") or {}),
+        extra=extra,
+        dropped_features={str(key): str(value) for key, value in dict(dropped).items()},
+        centers={str(key): float(value) for key, value in dict(centers).items()},
+        scales={str(key): float(value) for key, value in dict(scales).items()},
+        n_train=int(bundle.get("n_train", extra.get("n_train", 0)) or 0),
+        matrix_rank=int(bundle.get("matrix_rank", extra.get("matrix_rank", 0)) or 0),
+        condition_number=float(
+            bundle.get("condition_number", extra.get("condition_number", float("nan")))
+        ),
     )

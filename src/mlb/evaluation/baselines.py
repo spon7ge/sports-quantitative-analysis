@@ -146,16 +146,24 @@ def prediction_frame_from_mu(
     else:
         frame["forecast_horizon_hours"] = config.forecast_horizon_hours
     for name, default in (
-        ("expected_bf", "expected_bf_oof"),
-        ("expected_pitches", "expected_pitches_oof"),
-        ("expected_outs", "expected_outs_oof"),
+        ("expected_bf", "bf_mean_5"),
+        ("expected_pitches", "pitches_per_start_5"),
+        ("expected_outs", "outs_per_start_5"),
     ):
         if default in test.columns:
             frame[name] = pd.to_numeric(test[default], errors="coerce").values
         elif name in test.columns:
             frame[name] = pd.to_numeric(test[name], errors="coerce").values
         else:
-            frame[name] = np.nan
+            oof_name = {
+                "expected_bf": "expected_bf_oof",
+                "expected_pitches": "expected_pitches_oof",
+                "expected_outs": "expected_outs_oof",
+            }[name]
+            if oof_name in test.columns:
+                frame[name] = pd.to_numeric(test[oof_name], errors="coerce").values
+            else:
+                frame[name] = np.nan
     frame["expected_innings"] = frame["expected_outs"] / 3.0
     frame["expected_k"] = mu
     frame["variance_k"] = variance
@@ -461,7 +469,11 @@ def fit_baselines(
     outs_hat = _col_or_default(
         test,
         "expected_outs_oof",
-        _pitcher_train_means(train, test, "outs", league_outs),
+        _col_or_default(
+            test,
+            "outs_per_start_5",
+            _pitcher_train_means(train, test, "outs", league_outs),
+        ),
     )
     k9_mu = np.where(np.isfinite(k9), k9 * outs_hat / 27.0, league_mu)
     k9_mu = np.where(np.isfinite(k9_mu), k9_mu, league_mu)
@@ -475,8 +487,16 @@ def fit_baselines(
         )
     bf_hat = _col_or_default(
         test,
-        "expected_bf_oof",
-        _pitcher_train_means(train, test, "batters_faced", league_bf),
+        "bf_mean_5",
+        _col_or_default(
+            test,
+            "expected_bf_oof",
+            _col_or_default(
+                test,
+                "bf_per_start_5",
+                _pitcher_train_means(train, test, "batters_faced", league_bf),
+            ),
+        ),
     )
     shrunk_mu = np.clip(shrunk_rate * bf_hat, 1e-8, None)
 

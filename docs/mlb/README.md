@@ -75,7 +75,7 @@ Computed on `pregame_snapshots` rows. Events and ingestions must both precede th
 - Pitcher K rates (empirical Bayes): `k_bf_shrunk_{60,365,prior2}`, `n_eff_k_bf_{60,365,prior2}`
 - Plate discipline (trailing 300 / 750 pitches and 365-day): `{csw,whiff,chase,zone,swing,called_strike}_{300,750,365}`
 - Workload history (trailing 3/5/10 starts): `{bf,pitches,outs}_per_start_{3,5,10}`, `pitches_last_start`, `rest_days`
-- OOF workload (filled by the modeling layer): `expected_bf_oof`, `bf_sd_oof`, `expected_pitches_oof`, `expected_outs_oof`, `p_early_exit_oof`
+- OOF workload (filled by the modeling layer): `expected_bf_oof` / `predicted_bf_oof`, `bf_sd_oof`, `expected_pitches_oof`, `expected_outs_oof`, `p_early_exit_oof`. Workload NB uses lagged `bf_mean_5`, `bf_sd_5`, `early_exit_rate_5`, rolling pitches/outs, `pitches_per_bf_5`, rest/absence flags, and missing-history.
 - Opponent / lineup: `opp_k_rate_vs_hand_shrunk`, `n_eff_opp_k`, `lineup_k_rate_shrunk`, `lineup_state_code`, `pitcher_throws_L`, `expected_rhb_share`
 - Stuff / mix: `fb_velo_{300,365,delta}`, `{ff,bb,os}_share_300`, `{ff,bb,os}_share_delta`
 - Role / context: `is_opener`, `is_il_return`, `is_restricted`, `is_home`, `venue_id`, `season`, `rules_era`, `starter_state_code`
@@ -88,8 +88,8 @@ Computed on `pregame_snapshots` rows. Events and ingestions must both precede th
 ## Modeling assumptions
 
 - Strikeouts are Negative Binomial NB2: `Var = mu + alpha * mu^2`, `alpha > 0`. Support is `0 … k_max` with a tail bin `P(K >= k_max + 1)` (`k_max = 15`).
-- Workload features used by the strikeout model are **out-of-fold**. In-sample fitted BF is never written to `expected_bf_oof`.
-- The count model is **not** a BF offset plus independent K|BF noise, and the MVP does not add simulated BF noise on top of the NB.
+- Workload features used by the strikeout model are **out-of-fold**. In-sample fitted BF is never written to `expected_bf_oof` / `predicted_bf_oof`.
+- Strikeouts are an exposure model: \(\log E[K] = \log(\widehat{BF}_{\text{oof}}) +\) pitcher-skill and context terms. The offset is `log(predicted_bf_oof)`, never realized Game N BF. The MVP does not add simulated BF noise on top of the NB.
 - Sportsbook lines are not baseball-model features.
 
 ## Leakage controls

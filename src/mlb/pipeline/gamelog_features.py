@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.mlb import FEATURE_SET_VERSION
 from src.mlb.config import MlbConfig
+from src.mlb.models.preprocess import encode_rest_features
 from src.mlb.models.shrinkage import shrink_rate
 from src.mlb.schemas import FEATURE_ROW_COLUMNS, coerce_frame, empty_frame
 
@@ -84,16 +85,19 @@ def build_gamelog_feature_rows(
         )
     frame["pitches_last_start"] = shifted_pitches
     frame["rest_days"] = rest
-    frame["expected_bf_oof"] = frame["bf_per_start_5"]
-    frame["expected_pitches_oof"] = frame["pitches_per_start_5"]
-    frame["expected_outs_oof"] = frame["outs_per_start_5"]
-    frame["bf_sd_oof"] = grouped["batters_faced"].transform(
+    frame["bf_mean_5"] = frame["bf_per_start_5"]
+    frame["bf_sd_5"] = grouped["batters_faced"].transform(
         lambda s: s.shift(1).rolling(5, min_periods=2).std()
     )
     early = (shifted_bf < float(config.early_exit_bf)).astype(float)
-    frame["p_early_exit_oof"] = early.groupby(frame["pitcher_id"]).transform(
-        lambda s: s.rolling(10, min_periods=1).mean()
+    frame["early_exit_rate_5"] = early.groupby(frame["pitcher_id"]).transform(
+        lambda s: s.rolling(5, min_periods=1).mean()
     )
+    ppbf = shifted_pitches / shifted_bf.clip(lower=1e-6)
+    frame["pitches_per_bf_5"] = ppbf.groupby(frame["pitcher_id"]).transform(
+        lambda s: s.rolling(5, min_periods=1).mean()
+    )
+    frame = encode_rest_features(frame)
 
     k60, bf60 = _prior_window_sums(frame, 60)
     k365, bf365 = _prior_window_sums(frame, 365)

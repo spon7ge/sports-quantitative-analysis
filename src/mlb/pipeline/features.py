@@ -12,6 +12,7 @@ import pandas as pd
 from src.mlb import FEATURE_SET_VERSION
 from src.mlb.config import MlbConfig
 from src.mlb.models.shrinkage import shrink_rate
+from src.mlb.models.preprocess import encode_rest_features
 from src.mlb.schemas import (
     FASTBALL_TYPES,
     FEATURE_ROW_COLUMNS,
@@ -353,6 +354,21 @@ def build_feature_rows(
             workload_vals[f"bf_per_start_{window}"] = bf_mean
             workload_vals[f"pitches_per_start_{window}"] = pitches_mean
             workload_vals[f"outs_per_start_{window}"] = outs_mean
+        chunk5 = workload_pool.tail(5)
+        if chunk5.empty:
+            bf_sd_5 = early_exit_rate_5 = pitches_per_bf_5 = float("nan")
+        else:
+            bf_sd_5 = (
+                float(chunk5["batters_faced"].std(ddof=1))
+                if len(chunk5) >= 2
+                else float("nan")
+            )
+            early_exit_rate_5 = float(
+                (chunk5["batters_faced"] < float(config.early_exit_bf)).mean()
+            )
+            pitches_per_bf_5 = _nanmean(
+                chunk5["pitches"] / chunk5["batters_faced"].clip(lower=1e-6)
+            )
         if workload_pool.empty:
             pitches_last_start = float("nan")
             rest_days = float("nan")
@@ -488,7 +504,12 @@ def build_feature_rows(
             "outs_per_start_10": workload_vals["outs_per_start_10"],
             "pitches_last_start": pitches_last_start,
             "rest_days": rest_days,
+            "bf_mean_5": workload_vals["bf_per_start_5"],
+            "bf_sd_5": bf_sd_5,
+            "early_exit_rate_5": early_exit_rate_5,
+            "pitches_per_bf_5": pitches_per_bf_5,
             "expected_bf_oof": float("nan"),
+            "predicted_bf_oof": float("nan"),
             "bf_sd_oof": float("nan"),
             "expected_pitches_oof": float("nan"),
             "expected_outs_oof": float("nan"),
@@ -528,7 +549,8 @@ def build_feature_rows(
         }
         rows.append(row)
 
-    return coerce_frame(pd.DataFrame(rows), FEATURE_ROW_COLUMNS)
+    built = coerce_frame(pd.DataFrame(rows), FEATURE_ROW_COLUMNS)
+    return coerce_frame(encode_rest_features(built), FEATURE_ROW_COLUMNS)
 
 
 def _windowed_pas(

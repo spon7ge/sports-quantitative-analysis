@@ -167,7 +167,17 @@ tables:
       outs_per_start_10: Mean outs over the last 10 starts.
       pitches_last_start: Pitches thrown in the immediately prior start.
       rest_days: Days of rest since the previous start.
-      expected_bf_oof: Out-of-fold expected batters faced.
+      rest_days_capped: Rest days capped at 14; missing for first starts.
+      standard_rest: 1 if rest is 4-6 days.
+      extended_rest: 1 if rest is 7-14 days.
+      long_absence: 1 if rest exceeds 14 days.
+      first_start_or_missing_history: 1 if rest/history is missing.
+      bf_mean_5: Mean batters faced over the last 5 starts (alias of bf_per_start_5).
+      bf_sd_5: Sample SD of batters faced over the last 5 starts.
+      early_exit_rate_5: Share of the last 5 starts with BF below early_exit_bf.
+      pitches_per_bf_5: Mean pitches per batter faced over the last 5 starts.
+      expected_bf_oof: Out-of-fold expected batters faced from nb_bf_v1.
+      predicted_bf_oof: Alias of expected_bf_oof used as the strikeout exposure.
       bf_sd_oof: Out-of-fold standard deviation of batters faced.
       expected_pitches_oof: Out-of-fold expected pitch count.
       expected_outs_oof: Out-of-fold expected outs.

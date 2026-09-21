@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import numpy as np
 import pandas as pd
 
 UTC_DTYPE = "datetime64[us, UTC]"
@@ -186,7 +187,17 @@ FEATURE_VALUE_COLUMNS: tuple[str, ...] = (
     ],
     "pitches_last_start",
     "rest_days",
+    "rest_days_capped",
+    "standard_rest",
+    "extended_rest",
+    "long_absence",
+    "first_start_or_missing_history",
+    "bf_mean_5",
+    "bf_sd_5",
+    "early_exit_rate_5",
+    "pitches_per_bf_5",
     "expected_bf_oof",
+    "predicted_bf_oof",
     "bf_sd_oof",
     "expected_pitches_oof",
     "expected_outs_oof",
@@ -314,10 +325,16 @@ PITCH_FAMILY = {
 }
 
 WORKLOAD_FEATURE_COLUMNS: tuple[str, ...] = (
-    "rest_days",
-    "bf_per_start_5",
+    "bf_mean_5",
+    "bf_sd_5",
+    "early_exit_rate_5",
     "pitches_per_start_5",
     "outs_per_start_5",
+    "pitches_per_bf_5",
+    "rest_days_capped",
+    "extended_rest",
+    "long_absence",
+    "first_start_or_missing_history",
     "is_opener",
     "is_restricted",
     "is_il_return",
@@ -325,22 +342,14 @@ WORKLOAD_FEATURE_COLUMNS: tuple[str, ...] = (
 )
 
 STRIKEOUT_FEATURE_COLUMNS: tuple[str, ...] = (
-    "expected_bf_oof",
-    "bf_sd_oof",
-    "p_early_exit_oof",
     "k_bf_shrunk_365",
     "k_bf_shrunk_60",
-    "opp_k_rate_vs_hand_shrunk",
-    "lineup_k_rate_shrunk",
-    "csw_750",
-    "whiff_750",
-    "fb_velo_delta",
-    "ff_share_delta",
-    "rest_days",
-    "is_home",
-    "is_opener",
-    "is_restricted",
+    "rest_days_capped",
+    "extended_rest",
+    "long_absence",
+    "first_start_or_missing_history",
     "pitcher_throws_L",
+    "is_home",
 )
 
 
@@ -354,7 +363,14 @@ def coerce_frame(frame: pd.DataFrame, schema: Mapping[str, str]) -> pd.DataFrame
     ordered = []
     for column, dtype in schema.items():
         if column not in frame:
-            series = pd.Series(pd.NA, index=frame.index, dtype=dtype)
+            if dtype == "float64":
+                series = pd.Series(np.nan, index=frame.index, dtype=dtype)
+            elif dtype == "int64":
+                series = pd.Series(0, index=frame.index, dtype=dtype)
+            elif dtype == UTC_DTYPE:
+                series = pd.Series(pd.NaT, index=frame.index, dtype=dtype)
+            else:
+                series = pd.Series(pd.NA, index=frame.index, dtype=dtype)
         elif dtype == UTC_DTYPE:
             series = pd.to_datetime(frame[column], utc=True).astype(UTC_DTYPE)
         else:

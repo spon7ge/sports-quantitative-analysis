@@ -10,3 +10,4 @@ artifacts/models/
 .DS_Store
 .pytest_cache/
 .venv/
+.env

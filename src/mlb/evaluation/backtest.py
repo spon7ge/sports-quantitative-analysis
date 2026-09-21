@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -19,13 +20,29 @@ from src.mlb.models.calibration import (
     randomized_pit,
 )
 from src.mlb.models.metrics import discrete_crps, pmf_nll
+from src.mlb.models.preprocess import prepare_strikeout_frame
 from src.mlb.schemas import FEATURE_ROW_COLUMNS, PMF_COLUMNS
+
+LOGGER = logging.getLogger(__name__)
+
+REQUIRED_PANEL_FEATURES: tuple[str, ...] = (
+    "bf_mean_5",
+    "bf_sd_5",
+    "early_exit_rate_5",
+    "k_bf_shrunk_365",
+    "k_bf_shrunk_60",
+    "rest_days",
+    "pitcher_throws_L",
+    "is_home",
+)
+_CONTEXT_COLUMNS: tuple[str, ...] = ("is_home", "season", "venue_id")
 
 _PIPELINE_MODULES = (
     "src.mlb.pipeline",
     "src.mlb.pipeline.features",
     "src.mlb.pipeline.build",
     "src.mlb.pipeline.ingest",
+    "src.mlb.pipeline.gamelog_features",
 )
 _MODEL_MODULES = (
     "src.mlb.models",
@@ -152,6 +169,59 @@ def _skeleton_feature_rows(
     return pd.concat([spine, keys], ignore_index=True)
 
 
+def _coalesce_overlap_column(
+    panel: pd.DataFrame, column: str, right_name: str
+) -> pd.DataFrame:
+    if right_name not in panel.columns:
+        return panel
+    if column not in panel.columns:
+        panel[column] = panel[right_name]
+        return panel.drop(columns=[right_name])
+    left = pd.to_numeric(panel[column], errors="coerce")
+    right = pd.to_numeric(panel[right_name], errors="coerce")
+    both = left.notna() & right.notna()
+    if both.any():
+        left_v = left.loc[both].to_numpy(dtype=float)
+        right_v = right.loc[both].to_numpy(dtype=float)
+        if not np.allclose(left_v, right_v, equal_nan=True):
+            n_bad = int((~np.isclose(left_v, right_v, equal_nan=True)).sum())
+            raise ValueError(
+                f"{column} disagrees between feature rows and pitcher starts "
+                f"({n_bad} rows)"
+            )
+    panel[column] = left.where(left.notna(), right)
+    return panel.drop(columns=[right_name])
+
+
+def _assert_panel_features(panel: pd.DataFrame) -> None:
+    suffixed = [
+        name
+        for name in panel.columns
+        if any(
+            name == f"{column}_{suffix}"
+            for column in _CONTEXT_COLUMNS
+            for suffix in ("x", "y", "right")
+        )
+    ]
+    if suffixed:
+        raise ValueError(f"evaluation panel has suffixed context columns: {suffixed}")
+    missing: list[str] = []
+    core = (
+        "k_bf_shrunk_365",
+        "k_bf_shrunk_60",
+        "rest_days",
+        "pitcher_throws_L",
+        "is_home",
+    )
+    for name in core:
+        if name not in panel.columns:
+            missing.append(name)
+    if "bf_mean_5" not in panel.columns and "bf_per_start_5" not in panel.columns:
+        missing.append("bf_mean_5")
+    if missing:
+        raise ValueError(f"evaluation panel missing required features: {missing}")
+
+
 def _evaluation_panel(
     tables: dict[str, pd.DataFrame],
     feature_rows: pd.DataFrame,
@@ -184,8 +254,24 @@ def _evaluation_panel(
         if c in starts.columns
     ]
     panel = feature_rows.merge(
-        starts[start_keep], on=["pitcher_id", "game_pk"], how="left"
+        starts[start_keep],
+        on=["pitcher_id", "game_pk"],
+        how="left",
+        suffixes=("", "_right"),
     )
+    for column in _CONTEXT_COLUMNS:
+        panel = _coalesce_overlap_column(panel, column, f"{column}_right")
+        panel = _coalesce_overlap_column(panel, column, f"{column}_x")
+        if f"{column}_y" in panel.columns:
+            panel = _coalesce_overlap_column(panel, column, f"{column}_y")
+    leftover_right = [c for c in panel.columns if c.endswith("_right")]
+    for column in leftover_right:
+        base = column[: -len("_right")]
+        if base in panel.columns:
+            panel[base] = panel[base].where(panel[base].notna(), panel[column])
+            panel = panel.drop(columns=[column])
+        else:
+            panel = panel.rename(columns={column: base})
     if pregame is not None and not pregame.empty:
         pre_keep = [
             c
@@ -227,10 +313,14 @@ def _evaluation_panel(
                 panel["prediction_cutoff_utc"] = panel["prediction_cutoff_utc"].fillna(
                     panel["prediction_cutoff_utc_pre"]
                 )
+        for column in _CONTEXT_COLUMNS:
+            panel = _coalesce_overlap_column(panel, column, f"{column}_pre")
     if "game_date" not in panel.columns:
         raise ValueError("evaluation panel requires game_date")
     if "forecast_horizon_hours" not in panel.columns:
         panel["forecast_horizon_hours"] = config.forecast_horizon_hours
+    panel = prepare_strikeout_frame(panel)
+    _assert_panel_features(panel)
     return panel
 
 
@@ -322,29 +412,46 @@ def _ensure_prediction_pmf(
     return packed
 
 
-def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str, Any]:
-    """Chronological folds, strikeout/baseline scores, and quote compare."""
-    rng = np.random.default_rng(config.seed)
-    build_feature_rows = _load_symbol("build_feature_rows", _PIPELINE_MODULES)
+def _model_feature_rows(
+    tables: dict[str, pd.DataFrame], config: MlbConfig
+) -> pd.DataFrame:
+    pitches = tables.get("pitch_events")
+    gamelog = tables.get("pitcher_starts")
+    feature_rows: pd.DataFrame | None = None
+    if pitches is None or pitches.empty:
+        from src.mlb.pipeline.gamelog_features import build_gamelog_feature_rows
+
+        if gamelog is not None and not gamelog.empty:
+            feature_rows = build_gamelog_feature_rows(tables, config)
+    if feature_rows is None:
+        build_feature_rows = _load_symbol("build_feature_rows", _PIPELINE_MODULES)
+        if build_feature_rows is not None:
+            feature_rows = build_feature_rows(tables, config)
+        else:
+            feature_rows = tables.get("feature_rows")
+            if feature_rows is None or feature_rows.empty:
+                feature_rows = _skeleton_feature_rows(tables, config)
     add_oof = _load_symbol("add_oof_workload_features", _MODEL_MODULES)
-    fit_strikeouts = _load_symbol("fit_strikeouts", _MODEL_MODULES)
-    predict_pmf = _load_symbol("predict_strikeout_pmf", _MODEL_MODULES)
-
-    if build_feature_rows is not None:
-        feature_rows = build_feature_rows(tables, config)
-    else:
-        feature_rows = tables.get("feature_rows")
-        if feature_rows is None or feature_rows.empty:
-            feature_rows = _skeleton_feature_rows(tables, config)
-
     starts = tables["pitcher_starts"]
     if add_oof is not None:
         feature_rows = add_oof(starts, feature_rows, config)
+    return feature_rows
+
+
+def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str, Any]:
+    """Chronological folds, strikeout/baseline scores, and quote compare."""
+    rng = np.random.default_rng(config.seed)
+    fit_strikeouts = _load_symbol("fit_strikeouts", _MODEL_MODULES)
+    predict_pmf = _load_symbol("predict_strikeout_pmf", _MODEL_MODULES)
+    feature_rows = _model_feature_rows(tables, config)
 
     panel = _evaluation_panel(tables, feature_rows, config)
     dates = panel["game_date"].astype(str)
     folds = chronological_folds(dates, config)
     quotes = tables.get("market_quotes")
+
+    from src.mlb.models.strikeouts import format_glm_diagnostics
+    from src.mlb.models.workload import GlmFitError
 
     fold_records: list[dict[str, Any]] = []
     score_rows: list[dict[str, Any]] = []
@@ -375,12 +482,37 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
                 if "strikeouts" in train.columns
                 else train
             )
-            model = fit_strikeouts(train_fit, config)
+            try:
+                model = fit_strikeouts(train_fit, config, fold=window.name)
+            except GlmFitError as exc:
+                diag = dict(getattr(exc, "diagnostics", None) or {})
+                fold_records[-1]["glm_diagnostics"] = diag
+                fold_records[-1]["method"] = str(diag.get("method", "glm"))
+                LOGGER.error(format_glm_diagnostics(window.name, diag))
+                raise
+            if str(model.method) != "glm":
+                diag = dict(model.extra.get("glm_diagnostics") or {})
+                fold_records[-1]["glm_diagnostics"] = diag
+                LOGGER.error(format_glm_diagnostics(window.name, diag))
+                raise RuntimeError(
+                    f"fold {window.name} produced method={model.method!r}; "
+                    "intercept-only fallback cannot be scored as strikeout_nb"
+                )
             raw_pred = predict_pmf(model, test, config)
             fold_pred = _ensure_prediction_pmf(raw_pred, test, config)
+            fold_pred["fit_method"] = model.method
+            diag = dict(model.extra.get("glm_diagnostics") or {})
+            fold_records[-1]["method"] = model.method
+            fold_records[-1]["retained_features"] = list(model.feature_names)
+            fold_records[-1]["dropped_features"] = dict(model.dropped_features)
+            fold_records[-1]["matrix_rank"] = int(model.matrix_rank)
+            fold_records[-1]["glm_diagnostics"] = diag
+            LOGGER.info(format_glm_diagnostics(window.name, diag))
         else:
             fold_pred = baselines["league_nb"].copy()
             fold_pred["model_version"] = "baseline_league_nb_fallback"
+            fold_pred["fit_method"] = "baseline"
+            fold_records[-1]["method"] = "baseline"
 
         fold_pred["fold"] = window.name
         if "strikeouts" not in fold_pred.columns and "strikeouts" in test.columns:
@@ -397,6 +529,7 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
             )
             scores["fold"] = window.name
             scores["model"] = "strikeout_nb"
+            scores["method"] = str(fold_records[-1].get("method", "glm"))
             score_rows.append(scores)
             for name, frame in baselines.items():
                 aligned = frame.reset_index(drop=True)

@@ -167,3 +167,149 @@ def test_worst_price_during_latency(mlb_config) -> None:
     assert len(compared) == 1
     assert compared.iloc[0]["quote_id"] == "q-b"
     assert american_to_implied(-150.0) > american_to_implied(-110.0)
+
+
+def _live_quote_row(
+    *,
+    p_over: float,
+    p_under: float,
+    over_price: float,
+    under_price: float,
+    strikeouts: float,
+    line: float = 5.5,
+    price_format: str = "decimal",
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "game_pk": [1],
+            "pitcher_id": [10],
+            "line": [line],
+            "over_price": [over_price],
+            "under_price": [under_price],
+            "price_format": [price_format],
+            "model_p_over": [p_over],
+            "model_p_under": [p_under],
+            "strikeouts": [strikeouts],
+        }
+    )
+
+
+def test_plus_ev_skips_when_both_sides_are_negative() -> None:
+    from src.mlb.evaluation.market import simulate_plus_ev_bets
+
+    # Fair coin at -110 / -110: both EVs are negative after juice.
+    raw = american_to_implied(-110)
+    screened, summary = simulate_plus_ev_bets(
+        _live_quote_row(
+            p_over=0.5,
+            p_under=0.5,
+            over_price=-110,
+            under_price=-110,
+            strikeouts=6,
+            price_format="american",
+        )
+    )
+    assert summary["n_bets"] == 0
+    assert summary["n_skipped"] == 1
+    assert screened.iloc[0]["bet_side"] == ""
+    assert screened.iloc[0]["result"] == "skip"
+    assert screened.iloc[0]["ev_over"] < 0
+    assert screened.iloc[0]["ev_under"] < 0
+    _ = raw
+
+
+def test_plus_ev_bets_over_and_settles_win() -> None:
+    from src.mlb.evaluation.market import simulate_plus_ev_bets
+
+    screened, summary = simulate_plus_ev_bets(
+        _live_quote_row(
+            p_over=0.70,
+            p_under=0.30,
+            over_price=1.80,
+            under_price=2.10,
+            strikeouts=7,
+        )
+    )
+    row = screened.iloc[0]
+    assert row["bet_side"] == "over"
+    assert row["result"] == "win"
+    assert abs(row["pnl"] - (1.80 - 1.0)) < 1e-12
+    assert summary["n_bets"] == 1
+    assert summary["n_wins"] == 1
+    assert summary["roi"] > 0
+
+
+def test_plus_ev_bets_under_and_settles_loss() -> None:
+    from src.mlb.evaluation.market import simulate_plus_ev_bets
+
+    screened, summary = simulate_plus_ev_bets(
+        _live_quote_row(
+            p_over=0.30,
+            p_under=0.70,
+            over_price=2.10,
+            under_price=1.80,
+            strikeouts=8,
+        )
+    )
+    row = screened.iloc[0]
+    assert row["bet_side"] == "under"
+    assert row["result"] == "loss"
+    assert abs(row["pnl"] + 1.0) < 1e-12
+    assert summary["n_losses"] == 1
+    assert summary["hit_rate"] == 0.0
+
+
+def test_plus_ev_takes_larger_side_when_both_clear() -> None:
+    from src.mlb.evaluation.market import simulate_plus_ev_bets
+
+    screened, _ = simulate_plus_ev_bets(
+        _live_quote_row(
+            p_over=0.62,
+            p_under=0.38,
+            over_price=3.00,
+            under_price=3.00,
+            strikeouts=6,
+        )
+    )
+    assert screened.iloc[0]["bet_side"] == "over"
+    assert screened.iloc[0]["ev_over"] > screened.iloc[0]["ev_under"]
+    assert screened.iloc[0]["ev_under"] > 0
+
+
+def test_plus_ev_min_ev_filters_small_edges() -> None:
+    from src.mlb.evaluation.market import simulate_plus_ev_bets
+
+    row = _live_quote_row(
+        p_over=0.54,
+        p_under=0.46,
+        over_price=1.95,
+        under_price=1.95,
+        strikeouts=6,
+    )
+    taken, taken_sum = simulate_plus_ev_bets(row, min_ev=0.0)
+    skipped, skipped_sum = simulate_plus_ev_bets(row, min_ev=0.20)
+    assert taken_sum["n_bets"] == 1
+    assert taken.iloc[0]["bet_side"] in {"over", "under"}
+    assert skipped_sum["n_bets"] == 0
+    assert skipped.iloc[0]["result"] == "skip"
+
+
+def test_plus_ev_push_returns_stake() -> None:
+    from src.mlb.evaluation.market import simulate_plus_ev_bets
+
+    screened, summary = simulate_plus_ev_bets(
+        _live_quote_row(
+            p_over=0.70,
+            p_under=0.20,
+            over_price=1.80,
+            under_price=2.10,
+            strikeouts=5,
+            line=5.0,
+        )
+    )
+    assert screened.iloc[0]["bet_side"] == "over"
+    assert screened.iloc[0]["result"] == "push"
+    assert screened.iloc[0]["pnl"] == 0.0
+    assert summary["n_pushes"] == 1
+    assert summary["units_staked"] == 1.0
+    assert summary["units_pnl"] == 0.0

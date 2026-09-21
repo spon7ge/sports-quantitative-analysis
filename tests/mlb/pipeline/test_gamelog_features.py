@@ -42,3 +42,13 @@ def test_gamelog_k_rate_ignores_current_start(mlb_config) -> None:
     assert first["n_eff_k_bf_365"] == 0
     assert second["n_eff_k_bf_365"] == 20
     assert second["k_bf_shrunk_365"] < 0.2
+    assert first["first_start_or_missing_history"] == 1.0
+    assert pd.isna(first["expected_bf_oof"])
+    assert pd.isna(first["bf_sd_oof"])
+    assert pd.isna(first["p_early_exit_oof"])
+    assert pd.isna(second["expected_bf_oof"])
+    assert second["bf_mean_5"] == 20
+    assert second["pitches_per_bf_5"] == 4.0
+    assert second["early_exit_rate_5"] == 0.0
+    assert second["extended_rest"] == 1.0
+    assert second["rest_days_capped"] == 7.0

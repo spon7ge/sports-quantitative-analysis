@@ -49,8 +49,16 @@ def _panel() -> tuple[pd.DataFrame, pd.DataFrame]:
                     "outs": max(bf - 7, 1),
                     "rest_days": 5.0,
                     "bf_per_start_5": 10.0,
+                    "bf_mean_5": 10.0,
+                    "bf_sd_5": 1.5,
+                    "early_exit_rate_5": 1.0 if bf < 15 else 0.0,
                     "pitches_per_start_5": 40.0,
                     "outs_per_start_5": 7.0,
+                    "pitches_per_bf_5": 4.0,
+                    "rest_days_capped": 5.0,
+                    "extended_rest": 0.0,
+                    "long_absence": 0.0,
+                    "first_start_or_missing_history": 0.0,
                     "is_opener": 0.0,
                     "is_restricted": 0.0,
                     "is_il_return": 0.0,
@@ -58,7 +66,10 @@ def _panel() -> tuple[pd.DataFrame, pd.DataFrame]:
                 }
             )
     starts = pd.DataFrame(rows)
-    features = starts[["pitcher_id", "game_pk", *WORKLOAD_FEATURE_COLUMNS]].copy()
+    keep = ["pitcher_id", "game_pk"] + [
+        column for column in WORKLOAD_FEATURE_COLUMNS if column in starts.columns
+    ]
+    features = starts[keep].copy()
     return starts, features
 
 
@@ -87,3 +98,30 @@ def test_oof_workload_excludes_same_row_batters_faced() -> None:
         on=["pitcher_id", "game_pk"],
     )["expected_bf"]
     assert leaked_mu.min() > third["expected_bf_oof"].max()
+
+
+def test_oof_writes_predicted_bf_oof_alias() -> None:
+    starts, features = _panel()
+    out = add_oof_workload_features(starts, features, _config())
+    third = out.merge(
+        starts[["pitcher_id", "game_pk", "game_date"]],
+        on=["pitcher_id", "game_pk"],
+    )
+    later = third.loc[third["game_date"] == "2018-04-15"]
+    assert later["predicted_bf_oof"].notna().all()
+    np.testing.assert_allclose(
+        later["predicted_bf_oof"].to_numpy(),
+        later["expected_bf_oof"].to_numpy(),
+    )
+    required = {
+        "bf_mean_5",
+        "bf_sd_5",
+        "early_exit_rate_5",
+        "pitches_per_start_5",
+        "outs_per_start_5",
+        "pitches_per_bf_5",
+        "rest_days_capped",
+        "long_absence",
+        "first_start_or_missing_history",
+    }
+    assert required.issubset(WORKLOAD_FEATURE_COLUMNS)

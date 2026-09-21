@@ -33,17 +33,24 @@ def negative_log_likelihood(
 
 
 def crps(samples: np.ndarray, actual: np.ndarray) -> float:
-    """Fair sample CRPS (Gneiting and Raftery)."""
+    """Fair sample CRPS (Gneiting and Raftery).
+
+    Uses the sorted-draw identity for the pairwise term so a
+    calibration slice with thousands of rows and 2,000 draws
+    does not allocate an ``(n, draws, draws)`` cube.
+    """
     draws, outcomes = _align(samples, actual)
     absolute_error = np.mean(
         np.abs(draws - outcomes[:, None]),
         axis=1,
     )
-    pairwise = np.mean(
-        np.abs(draws[:, :, None] - draws[:, None, :]),
-        axis=(1, 2),
-    )
-
+    ordered = np.sort(draws, axis=1)
+    n_draws = ordered.shape[1]
+    if n_draws == 0:
+        return float("nan")
+    ranks = np.arange(1, n_draws + 1, dtype=float)
+    weights = 2.0 * ranks - n_draws - 1.0
+    pairwise = (2.0 / (n_draws * n_draws)) * ordered.dot(weights)
     return float(np.mean(absolute_error - 0.5 * pairwise))
 
 
@@ -121,9 +128,8 @@ def score_distribution(
 ) -> dict[str, float]:
     """Return the metrics used to compare probabilistic models.
 
-    Pairwise CRPS allocates ``(n, draws, draws)`` and will kill a
-    kernel on a full holdout with 2,000 simulations. Pass
-    ``include_crps=False`` for large ensembles.
+    CRPS is O(n draws log draws). Pass ``include_crps=False``
+    only if you do not need it.
     """
     scores = {
         "negative_log_likelihood": negative_log_likelihood(

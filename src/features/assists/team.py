@@ -21,9 +21,12 @@ def add_team_features(work: pd.DataFrame) -> pd.DataFrame:
         result["game_date"], errors="coerce"
     )
     snapshots = _team_snapshots(result)
+    snapshots["team_id"] = _numeric_id(snapshots["team_id"])
     left = result[
         ["_builder_row", "game_date", "team_id", "opp_team_id"]
     ].copy()
+    left["team_id"] = _numeric_id(left["team_id"])
+    left["opp_team_id"] = _numeric_id(left["opp_team_id"])
 
     own_columns = [
         "game_date",
@@ -153,3 +156,7 @@ def _reduce_team_games(frame: pd.DataFrame) -> pd.DataFrame:
         if column not in games.columns:
             games[column] = np.nan
     return games.reset_index()
+
+
+def _numeric_id(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").astype("float64")

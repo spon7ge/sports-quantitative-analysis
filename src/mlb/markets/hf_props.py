@@ -1,9 +1,10 @@
 """Load SmartStake Hugging Face player-prop ticks into quote rows.
 
 The public dataset is minute-level. This module keeps the last pre-start
-tick per (game, player, book, line, side), pairs over/under, and emits at
-most one as-of quote per starter. Sportsbook prices are not baseball
-features.
+tick per (game, player, book, line, side), pairs over/under, and emits one
+as-of quote per starter **per book per listed line** (4.5, 5.5, 6.5, …).
+Novig / ProphetX are not dropped when Pinnacle is present. Sportsbook
+prices are not baseball features.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ HF_STRIKEOUT_MARKET = "player strikeouts"
 HF_MONTHS = ("2026-03", "2026-04", "2026-05", "2026-06", "2026-07")
 PREFERRED_BOOKS = (
     "pinnacle",
+    "novig",
+    "prophetx",
     "draftkings",
     "fanduel",
     "bet365",
@@ -198,7 +201,12 @@ def select_asof_strikeout_quotes(
     *,
     target_line: float = DEFAULT_TARGET_LINE,
 ) -> pd.DataFrame:
-    """One paired quote per (game_id, player): nearest line, preferred book."""
+    """One paired quote per (game_id, player, book, line).
+
+    Keeps every listed starter line at each book (typically 3.5–12.5).
+    ``target_line`` is unused; it stays on the signature for callers.
+    """
+    _ = target_line
     if paired.empty:
         return paired.copy()
     frame = paired.copy()
@@ -213,22 +221,15 @@ def select_asof_strikeout_quotes(
     if frame.empty:
         return frame
     frame["player_key"] = frame["player"].astype(str).str.lower()
-    preferred = frame["book"].astype(str).str.lower().isin(PREFERRED_BOOKS)
-    group_key = frame["game_id"].astype(str) + "|" + frame["player_key"]
-    has_pref = preferred.groupby(group_key).transform("any")
-    frame = frame.loc[~has_pref | preferred]
-    frame["line_distance"] = (
-        pd.to_numeric(frame["line"], errors="coerce") - float(target_line)
-    ).abs()
-    frame["book_rank"] = _book_rank(frame["book"])
+    frame["book"] = frame["book"].astype(str).str.lower()
+    frame["line"] = pd.to_numeric(frame["line"], errors="coerce")
     frame["fetched_at_utc"] = pd.to_datetime(frame["fetched_at_utc"], utc=True)
     frame = frame.sort_values(
-        ["game_id", "player_key", "line_distance", "book_rank", "fetched_at_utc"],
+        ["game_id", "player_key", "book", "line", "fetched_at_utc"],
         ascending=[True, True, True, True, False],
     )
     return (
-        frame.drop_duplicates(["game_id", "player_key"], keep="first")
-        .drop(columns=["line_distance", "book_rank"])
+        frame.drop_duplicates(["game_id", "player_key", "book", "line"], keep="first")
         .reset_index(drop=True)
     )
 

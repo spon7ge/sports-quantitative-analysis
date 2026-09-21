@@ -274,33 +274,9 @@ def _cmd_build_features(args: argparse.Namespace, config: MlbConfig) -> int:
 def _prepare_train_frame(
     tables: dict[str, pd.DataFrame], config: MlbConfig
 ) -> pd.DataFrame:
-    from src.mlb.evaluation.backtest import _evaluation_panel, _skeleton_feature_rows
+    from src.mlb.evaluation.backtest import _evaluation_panel, _model_feature_rows
 
-    pitches = tables.get("pitch_events")
-    if pitches is None or pitches.empty:
-        from src.mlb.pipeline.gamelog_features import build_gamelog_feature_rows
-
-        feature_rows = build_gamelog_feature_rows(tables, config)
-        return _evaluation_panel(tables, feature_rows, config)
-
-    build = None
-    try:
-        build = _load_symbol("build_feature_rows", _PIPELINE_MODULES)
-    except MissingMlbModuleError:
-        build = None
-    if build is not None:
-        feature_rows = build(tables, config)
-    else:
-        feature_rows = tables.get("feature_rows")
-        if feature_rows is None or feature_rows.empty:
-            feature_rows = _skeleton_feature_rows(tables, config)
-    add_oof = None
-    try:
-        add_oof = _load_symbol("add_oof_workload_features", _MODEL_MODULES)
-    except MissingMlbModuleError:
-        add_oof = None
-    if add_oof is not None:
-        feature_rows = add_oof(tables["pitcher_starts"], feature_rows, config)
+    feature_rows = _model_feature_rows(tables, config)
     return _evaluation_panel(tables, feature_rows, config)
 
 

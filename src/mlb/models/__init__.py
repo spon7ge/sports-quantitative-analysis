@@ -25,6 +25,7 @@ from src.mlb.models.strikeouts import (
     predict_strikeout_pmf,
 )
 from src.mlb.models.workload import (
+    GlmFitError,
     WorkloadModel,
     add_oof_workload_features,
     fit_workload,
@@ -32,6 +33,7 @@ from src.mlb.models.workload import (
 )
 
 __all__ = [
+    "GlmFitError",
     "Recalibrator",
     "StrikeoutModel",
     "WorkloadModel",

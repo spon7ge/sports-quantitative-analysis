@@ -366,6 +366,46 @@ class TeamSnapshotTests(unittest.TestCase):
             tonight["team_pace_mean_10"],
         )
 
+    def test_missing_opponent_id_does_not_crash_asof_join(self) -> None:
+        history = pd.DataFrame(
+            [
+                _row(
+                    1, "2024-01-01", 20, ast=4, game_id=1,
+                    team_id=100, opp_team_id=200,
+                ),
+                _row(
+                    2, "2024-01-01", 20, ast=8, game_id=1,
+                    team_id=200, opp_team_id=100,
+                ),
+            ]
+        )
+        history["team_id"] = history["team_id"].astype("Int64")
+        history["opp_team_id"] = history["opp_team_id"].astype("Int64")
+        candidate = pd.DataFrame(
+            [
+                {
+                    **_row(
+                        1, "2024-01-05", np.nan, ast=np.nan, game_id=99,
+                        team_id=100, opp_team_id=200,
+                    ),
+                    "opp_team_id": pd.NA,
+                }
+            ]
+        )
+        candidate["team_id"] = candidate["team_id"].astype(object)
+        candidate["opp_team_id"] = candidate["opp_team_id"].astype(object)
+        featured = add_assists_features(
+            pd.concat([history, candidate], ignore_index=True)
+        )
+        tonight = featured.iloc[-1]
+        self.assertTrue(
+            pd.isna(tonight["opponent_team_ast_allowed_mean_10"])
+        )
+        self.assertTrue(
+            pd.isna(tonight["opponent_team_pace_mean_10"])
+        )
+        self.assertTrue(np.isfinite(tonight["team_ast_mean_10"]))
+
 
 _FEATURE_COLUMNS = list(CURRENT_ASSISTS_FEATURES)
 

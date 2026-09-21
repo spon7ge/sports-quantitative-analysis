@@ -42,3 +42,25 @@ def test_2018_fold_has_no_2017_test_dates(fixture_tables, mlb_config) -> None:
     _train, test_idx = chronological_folds(dates, mlb_config)[0]
     test_dates = pd.Series(dates).iloc[test_idx].astype(str)
     assert not test_dates.str.startswith("2017").any()
+
+
+def test_backtest_records_per_fold_glm_diagnostics(fixture_tables, mlb_config, caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="src.mlb.evaluation.backtest")
+    result = run_backtest(fixture_tables, mlb_config)
+    scored = [row for row in result["folds"] if row["n_test"] > 0]
+    assert scored
+    for row in scored:
+        diag = row["glm_diagnostics"]
+        assert diag["method"] == "glm"
+        assert diag["retained_features"]
+        assert len(diag["coef"]) == 1 + len(diag["retained_features"])
+        assert diag["coef_names"][0] == "intercept"
+        assert "converged" in diag
+        assert "fit_iterations" in diag
+        assert "offset_min" in diag
+        assert "offset_max" in diag
+        assert "offset_nan_count" in diag
+        assert row["name"] in caplog.text
+        assert "retained_features" in caplog.text or "beta" in caplog.text.lower()

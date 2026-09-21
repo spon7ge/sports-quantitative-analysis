@@ -42,11 +42,15 @@ Workload history (trailing 3/5/10 starts):
 
 - `{bf,pitches,outs}_per_start_{3,5,10}`
 - `pitches_last_start`, `rest_days`
+- `bf_mean_5`, `bf_sd_5`, `early_exit_rate_5`, `pitches_per_bf_5`
+- `rest_days_capped`, `standard_rest`, `extended_rest`, `long_absence`, `first_start_or_missing_history`
 
 OOF workload (filled by modeling; pipeline may leave null):
 
-- `expected_bf_oof`, `bf_sd_oof`, `expected_pitches_oof`, `expected_outs_oof`
+- `expected_bf_oof`, `predicted_bf_oof`, `bf_sd_oof`, `expected_pitches_oof`, `expected_outs_oof`
 - `p_early_exit_oof`
+
+`predicted_bf_oof` is the chronological `nb_bf_v1` prediction and is an alias of `expected_bf_oof`. Strikeouts use `log(predicted_bf_oof)` as an exposure offset, never realized Game N BF.
 
 Opponent / lineup:
 
@@ -119,15 +123,26 @@ def save_model(path, bundle) -> None
 def load_model(path) -> dict
 ```
 
-Negative binomial NB2: `Var = mu + alpha * mu^2`, `alpha > 0`. SciPy mapping:
+Workload history used by `nb_bf_v1` (lagged only):
+
+- `bf_mean_5`, `bf_sd_5`, `early_exit_rate_5`
+- `{pitches,outs}_per_start_5`, `pitches_per_bf_5`
+- `rest_days_capped`, `extended_rest`, `long_absence`, `first_start_or_missing_history`
+- `is_opener`, `is_restricted`, `is_il_return`, `is_home`
+
+Strikeout NB2: `Var = mu + alpha * mu^2`, `alpha > 0`. SciPy mapping:
 
 - `r = 1 / alpha`
 - `p = 1 / (1 + alpha * mu)`
 - `P(K=k) = nbinom.pmf(k, r, p)`
 
-Do **not** add simulated BF noise on top of the count model. Parameter uncertainty: draw `beta ~ MVN(hat, cov)` (`config.posterior_draws`, seed 42), average PMFs. If covariance is unavailable, skip draws and use the MLE PMF.
+\[
+\log E[K] = \log(\widehat{BF}_{\text{oof}}) + X\beta
+\]
 
-Workload OOF: expanding folds by `game_date` with `config.workload_min_train_starts`. Never write in-sample fitted BF into `expected_bf_oof`.
+`X` is pitcher skill and context (`k_bf_shrunk_*`, rest/absence flags, hand, home). The offset is `log(predicted_bf_oof)`, never realized Game N BF. Do **not** add simulated BF noise on top of the count model. Parameter uncertainty: draw `beta ~ MVN(hat, cov)` (`config.posterior_draws`, seed 42), average PMFs. If covariance is unavailable, skip draws and use the MLE PMF.
+
+Workload OOF: expanding folds by `game_date` with `config.workload_min_train_starts`. Never write in-sample fitted BF into `expected_bf_oof` / `predicted_bf_oof`.
 
 Early-exit threshold: `config.early_exit_bf` (15). `p_early_exit` from a regularized logit on the same OOF schedule.
 
