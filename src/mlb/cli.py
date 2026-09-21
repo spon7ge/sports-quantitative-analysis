@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -27,6 +29,8 @@ _PIPELINE_MODULES = (
     "src.mlb.pipeline.build",
     "src.mlb.pipeline.statcast",
     "src.mlb.pipeline.schedule",
+    "src.mlb.pipeline.pbp",
+    "src.mlb.pipeline.lineup_slots",
 )
 _MODEL_MODULES = (
     "src.mlb.models",
@@ -84,6 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_statcast.add_argument("--start", required=True, help="YYYY-MM-DD")
     p_statcast.add_argument("--end", required=True, help="YYYY-MM-DD")
+
+    for name, help_text in (
+        ("ingest-play-by-play", "Ingest stored-season play-by-play"),
+        ("ingest-lineup-slots", "Backfill stored-season lineup slots"),
+    ):
+        season_parser = sub.add_parser(name, parents=[shared], help=help_text)
+        season_parser.add_argument("--start-season", type=int, required=True)
+        season_parser.add_argument("--end-season", type=int, required=True)
 
     p_sched = sub.add_parser(
         "snapshot-schedule", parents=[shared], help="Snapshot MLB Stats API schedule"
@@ -240,9 +252,148 @@ def _cmd_snapshot_schedule(args: argparse.Namespace, config: MlbConfig) -> int:
 
 
 def _cmd_snapshot_lineups(args: argparse.Namespace, config: MlbConfig) -> int:
-    ingest = _load_symbol("ingest_lineups", _PIPELINE_MODULES)
-    frame = ingest(config, game_pk=args.game_pk, http=_http_client(args, config))
+    ingest = _load_symbol("ingest_lineup_slots", _PIPELINE_MODULES)
+    frame = ingest(
+        config,
+        game_pks=[args.game_pk],
+        provenance="live_feed",
+        http=_http_client(args, config),
+    )
     print(f"snapshot-lineups returned {0 if frame is None else len(frame)} rows")
+    return 0
+
+
+def _season_game_pks(
+    config: MlbConfig, *, start_season: int, end_season: int
+) -> list[int]:
+    store = MlbStore(config)
+    game_pks: set[int] = set()
+
+    starts = store.read_table("pitcher_starts")
+    if not starts.empty:
+        seasons = pd.to_numeric(starts["season"], errors="coerce")
+        selected = starts.loc[seasons.between(start_season, end_season), "game_pk"]
+        game_pks.update(pd.to_numeric(selected, errors="coerce").dropna().astype(int))
+
+    versions = store.read_table("game_versions")
+    if not versions.empty:
+        seasons = pd.to_datetime(
+            versions["scheduled_start_utc"], utc=True, errors="coerce"
+        ).dt.year
+        selected = versions.loc[
+            seasons.between(start_season, end_season), "game_pk"
+        ]
+        game_pks.update(pd.to_numeric(selected, errors="coerce").dropna().astype(int))
+
+    return sorted(game_pks)
+
+
+def _cmd_ingest_play_by_play(args: argparse.Namespace, config: MlbConfig) -> int:
+    game_pks = _season_game_pks(
+        config, start_season=args.start_season, end_season=args.end_season
+    )
+    if not game_pks:
+        return 0
+    ingest = _load_symbol("ingest_play_by_play", _PIPELINE_MODULES)
+    frame = ingest(
+        config,
+        game_pks=game_pks,
+        http=_http_client(args, config),
+    )
+    print(f"ingest-play-by-play returned {0 if frame is None else len(frame)} rows")
+    return 0
+
+
+def _print_lineup_spread_diagnostic(
+    slots: pd.DataFrame, config: MlbConfig
+) -> None:
+    required = {
+        "slot",
+        "batter_id",
+        "game_pk",
+        "k_pa_vs_hand_shrunk_365",
+        "pa_all_365",
+    }
+    if slots.empty or not required.issubset(slots.columns):
+        return
+
+    from src.mlb.models.batter_rates import is_strikeout
+
+    store = MlbStore(config)
+    pas = store.read_table("batter_pas")
+    versions = store.read_table("game_versions")
+    if pas.empty or versions.empty:
+        return
+    starts = (
+        versions.sort_values("valid_from_utc", kind="stable")
+        .drop_duplicates("game_pk", keep="first")
+        .set_index("game_pk")["scheduled_start_utc"]
+    )
+    rows: list[dict[str, float | int]] = []
+    pa_times = pd.to_datetime(pas["event_time_utc"], utc=True, errors="coerce")
+    for row in slots.itertuples(index=False):
+        start = starts.get(int(row.game_pk), pd.NaT)
+        if pd.isna(start):
+            continue
+        cutoff = pd.Timestamp(start) - pd.Timedelta(
+            hours=config.forecast_horizon_hours
+        )
+        eligible = pas.loc[
+            (pas["batter_id"] == int(row.batter_id))
+            & (pa_times < cutoff)
+            & (pa_times >= cutoff - pd.Timedelta(days=365))
+            & (pas["event_time_imputed"] == 0)
+        ]
+        raw = (
+            float(eligible["event_type"].map(is_strikeout).mean())
+            if not eligible.empty
+            else float("nan")
+        )
+        rows.append(
+            {
+                "slot": int(row.slot),
+                "shrunk": float(row.k_pa_vs_hand_shrunk_365),
+                "raw": raw,
+                "pa_all_365": float(row.pa_all_365),
+            }
+        )
+    diagnostic = pd.DataFrame(rows).dropna(subset=["raw", "pa_all_365"])
+    if diagnostic.empty:
+        return
+    diagnostic["pa_decile"] = pd.qcut(
+        diagnostic["pa_all_365"], q=10, labels=False, duplicates="drop"
+    )
+    slot_rates = diagnostic.groupby(["pa_decile", "slot"])[
+        ["shrunk", "raw"]
+    ].mean()
+    spread = slot_rates.groupby("pa_decile").std()
+    print("Slot 1-9 K/PA spread by pa_all_365 decile")
+    print(spread.to_string())
+
+
+def _cmd_ingest_lineup_slots(args: argparse.Namespace, config: MlbConfig) -> int:
+    game_pks = _season_game_pks(
+        config, start_season=args.start_season, end_season=args.end_season
+    )
+    if not game_pks:
+        return 0
+    ingest = _load_symbol("ingest_lineup_slots", _PIPELINE_MODULES)
+    frame = ingest(
+        config,
+        game_pks=game_pks,
+        provenance="boxscore_00",
+        http=_http_client(args, config),
+    )
+    for season in range(args.start_season, args.end_season + 1):
+        coverage_path = config.artifact_dir / f"lineup_coverage_{season}.json"
+        if coverage_path.exists():
+            print(json.loads(coverage_path.read_text()))
+    if (
+        isinstance(frame, pd.DataFrame)
+        and not args.fixture
+        and "PYTEST_CURRENT_TEST" not in os.environ
+    ):
+        _print_lineup_spread_diagnostic(frame, config)
     return 0
 
 
@@ -573,6 +724,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     handlers = {
         "ingest-statcast": _cmd_ingest_statcast,
+        "ingest-play-by-play": _cmd_ingest_play_by_play,
+        "ingest-lineup-slots": _cmd_ingest_lineup_slots,
         "snapshot-schedule": _cmd_snapshot_schedule,
         "snapshot-lineups": _cmd_snapshot_lineups,
         "build-features": _cmd_build_features,

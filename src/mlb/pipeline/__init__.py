@@ -10,12 +10,16 @@ from src.mlb.pipeline.ingest import (
     ingest_statcast,
     snapshot_raw,
 )
+from src.mlb.pipeline.lineup_slots import ingest_lineup_slots
 from src.mlb.pipeline.parse import parse_schedule, parse_statcast
+from src.mlb.pipeline.pbp import ingest_play_by_play
 from src.mlb.pipeline.quality import assert_no_leakage
 from src.mlb.pipeline.starts import build_pitcher_starts
 
 __all__ = [
     "ingest_statcast",
+    "ingest_play_by_play",
+    "ingest_lineup_slots",
     "ingest_schedule",
     "ingest_lineups",
     "ingest_chadwick",
