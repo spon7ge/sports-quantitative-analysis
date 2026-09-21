@@ -166,13 +166,13 @@ def freeze_lineup_slot_rates(
     else:
         cutoff = cutoff.tz_convert("UTC")
 
-    event_times = pd.to_datetime(batter_pas["event_time_utc"], utc=True)
-    league_pas = batter_pas.loc[
+    league_pas = league_eligible_pas(batter_pas, slots)
+    event_times = pd.to_datetime(league_pas["event_time_utc"], utc=True)
+    league_pas = league_pas.loc[
         (event_times < cutoff)
         & (event_times >= cutoff - pd.Timedelta(days=365))
-        & (batter_pas["event_time_imputed"] == 0)
+        & (league_pas["event_time_imputed"] == 0)
     ].copy()
-    league_pas = league_eligible_pas(league_pas, slots)
     league = _league_k_pa(league_pas)
 
     people_id_column = "mlb_id" if "mlb_id" in people else "batter_id"

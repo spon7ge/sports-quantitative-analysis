@@ -209,3 +209,71 @@ def test_freeze_rates_skips_imputed() -> None:
         vs_pitcher_id=None,
     )
     assert math.isfinite(float(unknown_hand.iloc[0]["k_pa_overall_shrunk_365"]))
+
+
+def test_freeze_league_rates_use_trailing_365_days() -> None:
+    cutoff = pd.Timestamp("2026-07-01T00:00:00Z")
+    slots = pd.DataFrame(
+        [
+            {
+                "game_pk": 745001,
+                "team_id": 118,
+                "side": "home",
+                "slot": 1,
+                "batter_id": 101,
+                "slot_is_pitcher": 0,
+                "season": 2026,
+            }
+        ]
+    )
+    columns = [
+        "game_pk",
+        "batter_id",
+        "pitcher_hand",
+        "batter_bats",
+        "event_type",
+        "event_time_utc",
+        "event_time_imputed",
+        "is_pitcher_in_game",
+    ]
+    baseline = pd.DataFrame(
+        [
+            (1, 101, "R", "R", "strikeout", cutoff - pd.Timedelta(days=1), 0, 0),
+            (2, 202, "R", "L", "out", cutoff - pd.Timedelta(days=2), 0, 0),
+        ],
+        columns=columns,
+    )
+    people = pd.DataFrame([{"mlb_id": 101, "bats": "R"}])
+
+    def frozen_overall(extra_age_days: int) -> float:
+        extra = pd.DataFrame(
+            [
+                (
+                    3,
+                    303,
+                    "R",
+                    "R",
+                    "strikeout",
+                    cutoff - pd.Timedelta(days=extra_age_days),
+                    0,
+                    0,
+                )
+            ],
+            columns=columns,
+        )
+        frozen = freeze_lineup_slot_rates(
+            slots,
+            pd.concat([baseline, extra], ignore_index=True),
+            people,
+            load_config(),
+            cutoff=cutoff,
+            opposing_pitcher_hand="R",
+            vs_pitcher_id=9001,
+        )
+        return float(frozen.iloc[0]["k_pa_overall_shrunk_365"])
+
+    outside_window = frozen_overall(366)
+    inside_window = frozen_overall(364)
+
+    assert outside_window == 0.5
+    assert inside_window == 2.0 / 3.0
