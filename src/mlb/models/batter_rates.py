@@ -34,3 +34,19 @@ def rate_version(config: MlbConfig) -> str:
     }
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return RATE_VERSION_PREFIX + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _odds(p: float) -> float:
+    clipped = min(max(float(p), 1e-6), 1.0 - 1e-6)
+    return clipped / (1.0 - clipped)
+
+
+def league_platoon_odds_ratio(
+    *,
+    bats: str,
+    league_k_pa_cell: float,
+    league_k_pa_bats: float,
+) -> float:
+    if bats is None or str(bats).strip() in {"", "nan", "<NA>", "None"}:
+        return 1.0
+    return _odds(league_k_pa_cell) / _odds(league_k_pa_bats)
