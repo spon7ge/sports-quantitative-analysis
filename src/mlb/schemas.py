@@ -157,6 +157,53 @@ ID_MAP_COLUMNS: dict[str, str] = {
     "throws": "string",
 }
 
+BATTER_PA_COLUMNS: dict[str, str] = {
+    "pa_id": "string",
+    "game_pk": "int64",
+    "at_bat_index": "int64",
+    "batter_id": "int64",
+    "pitcher_id": "int64",
+    "pitcher_hand": "string",
+    "batter_bats": "string",
+    "batter_stand": "string",
+    "event_type": "string",
+    "event_time_utc": UTC_DTYPE,
+    "event_time_imputed": "int64",
+    "is_pitcher_in_game": "int64",
+    "ingested_at_utc": UTC_DTYPE,
+    "snapshot_id": "string",
+}
+
+LINEUP_SLOT_COLUMNS: dict[str, str] = {
+    "game_pk": "int64",
+    "team_id": "int64",
+    "side": "string",
+    "slot": "int64",
+    "batter_id": "int64",
+    "slot_is_pitcher": "int64",
+    "k_pa_vs_hand_shrunk_60": "float64",
+    "k_pa_vs_hand_shrunk_365": "float64",
+    "k_pa_vs_hand_shrunk_prior2": "float64",
+    "k_pa_overall_shrunk_60": "float64",
+    "k_pa_overall_shrunk_365": "float64",
+    "k_pa_overall_shrunk_prior2": "float64",
+    "pa_vs_hand_60": "float64",
+    "pa_vs_hand_365": "float64",
+    "pa_vs_hand_prior2": "float64",
+    "pa_all_60": "float64",
+    "pa_all_365": "float64",
+    "pa_all_prior2": "float64",
+    "opposing_pitcher_hand": "string",
+    "vs_pitcher_id": "Int64",
+    "lineup_state": "string",
+    "observed_before_cutoff": "int64",
+    "provenance": "string",
+    "rate_version": "string",
+    "ingested_at_utc": UTC_DTYPE,
+    "snapshot_id": "string",
+    "season": "int64",
+}
+
 PLATE_DISCIPLINE_METRICS = (
     "csw",
     "whiff",
@@ -310,6 +357,8 @@ TABLE_SCHEMAS: dict[str, dict[str, str]] = {
     "market_quotes": MARKET_QUOTE_COLUMNS,
     "id_map": ID_MAP_COLUMNS,
     "predictions": PREDICTION_COLUMNS,
+    "batter_pas": BATTER_PA_COLUMNS,
+    "lineup_slots": LINEUP_SLOT_COLUMNS,
 }
 
 STARTER_STATE_CODES = {"unknown": 0, "probable": 1, "announced": 2, "scratched": 3}

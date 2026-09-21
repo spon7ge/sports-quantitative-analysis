@@ -50,6 +50,7 @@ class MlbConfig:
     early_exit_bf: int = 15
     pitcher_k_prior_strength: float = 175.0
     batter_k_prior_strength: float = 225.0
+    batter_hand_prior_strength: float = 400.0
     rate_limit_seconds: float = 1.0
     user_agent: str = "nba-quant-mlb-research/1.0"
     posterior_draws: int = 64
@@ -137,6 +138,9 @@ def load_config(path: str | Path | None = None) -> MlbConfig:
         ),
         batter_k_prior_strength=float(
             raw.get("batter_k_prior_strength", 225.0)
+        ),
+        batter_hand_prior_strength=float(
+            raw.get("batter_hand_prior_strength", 400.0)
         ),
         rate_limit_seconds=float(raw.get("rate_limit_seconds", 1.0)),
         user_agent=str(raw.get("user_agent", "nba-quant-mlb-research/1.0")),
