@@ -314,9 +314,9 @@ def _original_game_version(
     versions = game_versions.loc[game_versions["game_pk"] == game_pk]
     if versions.empty:
         return None
-    starts = pd.to_datetime(versions["scheduled_start_utc"], utc=True)
-    if starts.notna().any():
-        return versions.loc[starts.idxmin()]
+    valid_from = pd.to_datetime(versions["valid_from_utc"], utc=True)
+    if valid_from.notna().any():
+        return versions.loc[valid_from.idxmin()]
     return versions.iloc[0]
 
 

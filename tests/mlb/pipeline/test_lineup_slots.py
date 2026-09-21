@@ -479,6 +479,52 @@ def test_dummy_dh2_detection_and_boxscore_skip(tmp_path, monkeypatch) -> None:
     assert len(MlbStore(config).read_table("lineup_slots")) == 9
 
 
+def test_nat_dh2_skips_boxscore_but_live_uses_corrected_start(
+    tmp_path, monkeypatch
+) -> None:
+    game_pk = 745003
+    config = _ingest_config(tmp_path)
+    _seed_ingest_tables(config, game_pk=game_pk, start=pd.NaT, doubleheader=2)
+    store = MlbStore(config)
+    versions = store.read_table("game_versions")
+    corrected = versions.iloc[0].copy()
+    corrected["scheduled_start_utc"] = pd.Timestamp("2026-07-01T19:00:00Z")
+    corrected["valid_from_utc"] = pd.Timestamp("2026-06-01T00:00:00Z")
+    store.write_table(
+        "game_versions",
+        coerce_frame(
+            pd.concat([versions, corrected.to_frame().T], ignore_index=True),
+            GAME_VERSION_COLUMNS,
+        ),
+    )
+    fixture = config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(_complete_payload(game_pk))
+
+    with pytest.raises(ValueError, match="zero slots"):
+        ingest_lineup_slots(
+            config, game_pks=[game_pk], provenance="boxscore_00", http=None
+        )
+    coverage = json.loads(
+        (config.artifact_dir / "lineup_coverage_2026.json").read_text()
+    )
+    assert coverage["n_skip_dh2_dummy_start"] == 1
+    assert MlbStore(config).read_table("lineup_slots").empty
+
+    monkeypatch.setattr(
+        "src.mlb.pipeline.lineup_slots._now_utc",
+        lambda: pd.Timestamp("2026-07-01T15:00:00Z"),
+    )
+    fixture.write_text(_home_nine_payload(game_pk))
+    live = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="live_feed", http=None
+    )
+
+    assert len(live) == 9
+    assert live["observed_before_cutoff"].eq(1).all()
+    assert len(MlbStore(config).read_table("lineup_slots")) == 9
+
+
 def test_lineup_coverage_passes_healthy_and_fails_low_or_zero() -> None:
     slots = pd.DataFrame(
         [{"game_pk": 1, "team_id": team, "slot": slot, "season": 2026}
