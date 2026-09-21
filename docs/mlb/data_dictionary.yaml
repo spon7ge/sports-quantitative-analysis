@@ -248,6 +248,65 @@ tables:
       bats: Batter side (L/R/S).
       throws: Throwing hand (L/R).
 
+  batter_pas:
+    description: >-
+      One row per plate appearance from Stats API play-by-play (not Statcast plate_appearances).
+      Cutoff-strict rate windows join on event_time_utc only; ingested_at_utc is write recency for
+      dedupe, not an as-of filter. There is no stored is_strikeout; derive at read from event_type.
+    columns:
+      pa_id: Stable identity f"{game_pk}_{atBatIndex}".
+      game_pk: MLB game primary key.
+      at_bat_index: PBP atBatIndex, stable within the game.
+      batter_id: Batter MLB person ID.
+      pitcher_id: Pitcher MLB person ID.
+      pitcher_hand: Pitcher throwing hand (L/R) from the matchup.
+      batter_bats: Batter side (L/R/S) from people/id_map, not inferred from this PA stand.
+      batter_stand: Batter side (L/R) for this PA from matchup.batSide.
+      event_type: Raw result.eventType; never drop. is_strikeout is derived at read only.
+      event_time_utc: PA as-of timestamp for cutoff joins and trailing windows (strict < cutoff).
+      event_time_imputed: 1 when start/end time was missing (+4h fallback); excluded from rate windows.
+      is_pitcher_in_game: 1 iff batter_id appears as pitcher_id on any PA in this game_pk.
+      ingested_at_utc: Wall clock of the write; dedupe keeps latest per pa_id. Not lineup or PA as-of.
+      snapshot_id: Raw snapshot identifier for this game's payload.
+
+  lineup_slots:
+    description: >-
+      Long format posted starting nine (nine rows per snapshot). Append-only. Starting nine comes from
+      00-code players.*.battingOrder (slot = first digit), never teams.*.battingOrder. Canonical
+      Stanek case (2019-05-15 Rays opener Ryne Stanek listed ninth, PH before he batted): the 00 vector
+      keeps Stanek; PBP-first-nine is not the starting nine. Ohtani 2022+ two-way days use the
+      is_pitcher_in_game carve-out for league K/PA; slot_is_pitcher follows the batting-slot position
+      abbreviation, not whether he pitched that day. Do not group coverage or leak checks by lineup_state
+      alone—observed_before_cutoff=0 (boxscore_00) is more informative than live for retrospective rows.
+    columns:
+      game_pk: MLB game primary key.
+      team_id: Batting team MLB ID.
+      side: home or away.
+      slot: Lineup slot 1–9 from 00-filter parse.
+      batter_id: Batter MLB person ID for that 00 slot.
+      slot_is_pitcher: 1 iff that slot's boxscore position.abbreviation is P (batting-slot position).
+      k_pa_vs_hand_shrunk_60: Two-level vs-hand shrunk K/PA, 60-day window.
+      k_pa_vs_hand_shrunk_365: Two-level vs-hand shrunk K/PA, 365-day window (mixture default later).
+      k_pa_vs_hand_shrunk_prior2: Two-level vs-hand shrunk K/PA, prior two seasons.
+      k_pa_overall_shrunk_60: Leave-one-split-out overall shrunk K/PA, 60-day.
+      k_pa_overall_shrunk_365: Overall shrunk K/PA, 365-day; fallback when vs-hand is NaN.
+      k_pa_overall_shrunk_prior2: Overall shrunk K/PA, prior two seasons.
+      pa_vs_hand_60: Raw PA count vs opposing hand, 60-day (not n_eff_*).
+      pa_vs_hand_365: Raw PA count vs opposing hand, 365-day.
+      pa_vs_hand_prior2: Raw PA count vs opposing hand, prior two seasons.
+      pa_all_60: Raw PA count any hand, 60-day.
+      pa_all_365: Raw PA count any hand, 365-day.
+      pa_all_prior2: Raw PA count any hand, prior two seasons.
+      opposing_pitcher_hand: Probable opposing starter hand as of cutoff (not named vs_hand).
+      vs_pitcher_id: Probable opposing starter MLB id at cutoff (nullable).
+      lineup_state: announced, projected, or team_fallback on this table only; pregame_snapshots still team_fallback until wired.
+      observed_before_cutoff: 1 iff provenance is live_feed; 0 for boxscore_00 (retrospective stamp).
+      provenance: live_feed or boxscore_00.
+      rate_version: kpa_ prefix plus hash of shrinkage/window config (batter_k_prior_strength=225 inherited, not NLL-tuned).
+      ingested_at_utc: As-of for the lineup card (latest-wins before cutoff); not write recency—live re-freezes copy original snapshot clock.
+      snapshot_id: Raw snapshot identifier.
+      season: From gameData.game.season in the payload, not derived from UTC start.
+
   predictions:
     description: Strikeout PMF and prop probabilities for one pitcher-game cutoff.
     columns:

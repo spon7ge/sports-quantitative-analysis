@@ -23,7 +23,7 @@ See `src/mlb/schemas.py` for ordered columns and dtypes. Required tables:
 
 `raw_snapshots`, `game_versions`, `pitch_events`, `plate_appearances`,
 `pitcher_starts`, `pregame_snapshots`, `feature_rows`, `market_quotes`,
-`id_map`.
+`id_map`, `batter_pas`, `lineup_slots`.
 
 ## Feature columns (`k_mvp_v1`)
 
@@ -76,6 +76,111 @@ Provenance: `max_input_event_time_utc`, `max_source_ingestion_time_utc`.
 ## Prediction row
 
 See `PREDICTION_COLUMNS` in `schemas.py`. PMF keys are `pmf_00` … `pmf_15` plus `pmf_tail` (P(K>=16) after any support extension is collapsed into tail if k_max=15).
+
+## Lineup slots and batter PBP (public API)
+
+Constants and URLs:
+
+```python
+LIVE_FEED_URL_TEMPLATE = "https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+PBP_URL_TEMPLATE = "https://statsapi.mlb.com/api/v1/game/{game_pk}/playByPlay"
+BOXSCORE_URL_TEMPLATE = "https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore"
+
+STRIKEOUT_EVENT_TYPES = frozenset({
+    "strikeout",
+    "strikeout_double_play",
+    "strikeout_triple_play",
+})
+
+KPA_WINDOWS_DAYS = (60, 365)
+KPA_PRIOR_SEASONS = 2
+BOXSCORE_00_LEAD = pd.Timedelta(hours=24)
+RATE_VERSION_PREFIX = "kpa_"
+PITCHER_POSITIONS = frozenset({"P"})
+```
+
+Functions:
+
+```python
+def is_strikeout(event_type: str, *, events: frozenset[str] = STRIKEOUT_EVENT_TYPES) -> int:
+    """Derived at read. Never stored on batter_pas."""
+
+def parse_play_by_play(
+    raw_payload: str | bytes,
+    snapshot_id: str,
+    ingested_at: datetime | pd.Timestamp,
+) -> pd.DataFrame: ...
+
+def ingest_play_by_play(
+    config: MlbConfig,
+    *,
+    game_pks: list[int],
+    http: HttpFn | None = None,
+) -> pd.DataFrame: ...
+
+def parse_starting_nine(raw_payload: str | bytes, game_pk: int | None = None) -> pd.DataFrame:
+    """00-filter 1–9. Not teams.*.battingOrder."""
+
+def freeze_lineup_slot_rates(
+    slots: pd.DataFrame,
+    batter_pas: pd.DataFrame,
+    people: pd.DataFrame,
+    config: MlbConfig,
+) -> pd.DataFrame: ...
+
+def ingest_lineup_slots(
+    config: MlbConfig,
+    *,
+    game_pks: list[int],
+    provenance: str,  # "live_feed" | "boxscore_00"
+    http: HttpFn | None = None,
+) -> pd.DataFrame: ...
+
+def shrink_batter_k_pa(
+    pas: pd.DataFrame,
+    *,
+    batter_id: int,
+    opposing_pitcher_hand: str,
+    bats: str,
+    cutoff: pd.Timestamp,
+    league: LeagueKPa,
+    config: MlbConfig,
+) -> dict[str, dict[str, float]]:
+    """Keyed by window name '60' | '365' | 'prior2'.
+    Each value has k_pa_vs_hand_shrunk, k_pa_overall_shrunk,
+    pa_vs_hand, pa_all."""
+
+def league_platoon_odds_ratio(
+    *,
+    bats: str,
+    league_k_pa_cell: float,
+    league_k_pa_bats: float,
+) -> float:
+    """1.0 only when bats is missing or empty.
+    For L/R/S, callers pass cells computed inside that bats value."""
+
+def rate_version(config: MlbConfig) -> str: ...
+
+def lineup_identity_mismatch_rate(live: pd.DataFrame, official: pd.DataFrame) -> float:
+    """Join on (game_pk, team_id, slot). Identities only. No K, no quotes."""
+
+def write_lineup_coverage(slots: pd.DataFrame, skips: pd.DataFrame, *, season: int) -> dict: ...
+
+def assert_lineup_coverage(coverage: dict, *, season: int) -> None:
+    """Fail on zero announced rows or complete-nine rate below floor."""
+```
+
+CLI (lineup slice):
+
+```text
+python -m src.mlb ingest-play-by-play --start-season 2018 --end-season 2025
+python -m src.mlb ingest-lineup-slots --start-season 2018 --end-season 2025
+python -m src.mlb snapshot-lineups --game-pk INT
+```
+
+`snapshot-lineups` writes `lineup_slots` with `provenance=live_feed` through `parse_starting_nine`. `--fixture` reads `tests/mlb/fixtures/raw/` and never uses the network.
+
+**Not wired this slice:** `STRIKEOUT_FEATURE_COLUMNS`, `fit_strikeouts`, and `nb_k_v1` unchanged. Game-log `pregame_from_starts` keeps `lineup_state = "team_fallback"` and `lineup_batter_ids_json = "[]"`.
 
 ## Agent 1 signatures
 
@@ -168,6 +273,8 @@ CLI subcommands (argparse):
 - `ingest-statcast --start YYYY-MM-DD --end YYYY-MM-DD`
 - `snapshot-schedule --date YYYY-MM-DD`
 - `snapshot-lineups --game-pk INT`
+- `ingest-play-by-play --start-season INT --end-season INT`
+- `ingest-lineup-slots --start-season INT --end-season INT`
 - `build-features --cutoff ISO8601`
 - `train-workload`
 - `train-strikeouts`
