@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+import math
 
-from src.mlb.pipeline.lineup_slots import parse_starting_nine
+import pandas as pd
+from src.mlb.config import load_config
+from src.mlb.pipeline.lineup_slots import (
+    freeze_lineup_slot_rates,
+    parse_starting_nine,
+)
 from src.mlb.pipeline.parse import parse_lineups
+from src.mlb.schemas import LINEUP_SLOT_COLUMNS
 
 
 def _player(player_id: int, batting_order: str, position: str) -> dict[str, object]:
@@ -135,3 +142,70 @@ def test_parse_starting_nine_prefers_non_pitcher_for_duplicate_00_slot() -> None
     assert int(parsed.iloc[0]["game_pk"]) == 800001
     assert int(parsed.iloc[0]["batter_id"]) == 900002
     assert int(parsed.iloc[0]["slot_is_pitcher"]) == 0
+
+
+def test_freeze_rates_skips_imputed() -> None:
+    cutoff = pd.Timestamp("2026-07-01T00:00:00Z")
+    slots = pd.DataFrame(
+        [
+            {
+                "game_pk": 745001,
+                "team_id": 118,
+                "side": "home",
+                "slot": 1,
+                "batter_id": 101,
+                "slot_is_pitcher": 0,
+                "season": 2026,
+            }
+        ]
+    )
+    batter_pas = pd.DataFrame(
+        [
+            (1, 101, "R", "R", "strikeout", cutoff - pd.Timedelta(days=1), 0, 0),
+            (2, 101, "L", "R", "strikeout", cutoff - pd.Timedelta(days=2), 1, 0),
+            (3, 202, "R", "L", "out", cutoff - pd.Timedelta(days=3), 0, 0),
+        ],
+        columns=[
+            "game_pk",
+            "batter_id",
+            "pitcher_hand",
+            "batter_bats",
+            "event_type",
+            "event_time_utc",
+            "event_time_imputed",
+            "is_pitcher_in_game",
+        ],
+    )
+    people = pd.DataFrame([{"mlb_id": 101, "bats": "R"}])
+
+    frozen = freeze_lineup_slot_rates(
+        slots,
+        batter_pas,
+        people,
+        load_config(),
+        cutoff=cutoff,
+        opposing_pitcher_hand="R",
+        vs_pitcher_id=9001,
+    )
+
+    assert list(frozen.columns) == list(LINEUP_SLOT_COLUMNS)
+    assert math.isfinite(float(frozen.iloc[0]["k_pa_vs_hand_shrunk_365"]))
+    assert float(frozen.iloc[0]["pa_all_365"]) == 1.0
+    assert float(frozen.iloc[0]["pa_vs_hand_365"]) == 1.0
+    assert float(frozen.iloc[0]["k_pa_overall_shrunk_365"]) == 0.5
+    assert int(frozen.iloc[0]["vs_pitcher_id"]) == 9001
+    assert str(frozen.iloc[0]["rate_version"]).startswith("kpa_")
+    assert {column: str(dtype) for column, dtype in frozen.dtypes.items()} == {
+        column: dtype for column, dtype in LINEUP_SLOT_COLUMNS.items()
+    }
+
+    unknown_hand = freeze_lineup_slot_rates(
+        slots,
+        batter_pas,
+        people,
+        load_config(),
+        cutoff=cutoff,
+        opposing_pitcher_hand="",
+        vs_pitcher_id=None,
+    )
+    assert math.isfinite(float(unknown_hand.iloc[0]["k_pa_overall_shrunk_365"]))
