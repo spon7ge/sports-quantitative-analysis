@@ -309,6 +309,19 @@ def _complete_payload(game_pk: int = 745001, season: str = "2026") -> str:
     )
 
 
+def _home_nine_payload(game_pk: int, season: str = "2026") -> str:
+    payload = _payload(
+        home_players={
+            f"ID{100 + slot}": _player(100 + slot, f"{slot}00", "OF")
+            for slot in range(1, 10)
+        },
+        season=season,
+    )
+    return payload.replace('"gamePk": 745001', f'"gamePk": {game_pk}').replace(
+        '"pk": 745001', f'"pk": {game_pk}'
+    )
+
+
 def _ingest_config(tmp_path) -> object:
     return replace(
         load_config(),
@@ -391,6 +404,30 @@ def test_ingest_boxscore_stamp_is_24h_and_observed_false(tmp_path) -> None:
     assert written["observed_before_cutoff"].eq(0).all()
 
 
+def test_ingest_resume_uses_stored_slots_for_coverage(tmp_path) -> None:
+    game_pk = 745001
+    config = _ingest_config(tmp_path)
+    _seed_ingest_tables(
+        config,
+        game_pk=game_pk,
+        start=pd.Timestamp("2026-07-01T19:00:00Z"),
+    )
+    fixture = config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(_complete_payload(game_pk))
+
+    first = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="boxscore_00", http=None
+    )
+    second = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="boxscore_00", http=None
+    )
+
+    assert len(first) == 18
+    assert second.empty
+    assert len(MlbStore(config).read_table("lineup_slots")) == 18
+
+
 def test_dummy_dh2_detection_and_boxscore_skip(tmp_path, monkeypatch) -> None:
     assert is_dummy_dh2_start(pd.NaT, pd.Timestamp("2026-07-01T17:00:00Z"))
     assert is_dummy_dh2_start(
@@ -399,9 +436,22 @@ def test_dummy_dh2_detection_and_boxscore_skip(tmp_path, monkeypatch) -> None:
     )
 
     config = _ingest_config(tmp_path)
-    dummy_start = pd.Timestamp("2026-07-01T00:00:00Z")
+    dummy_start = pd.Timestamp("2026-07-01T17:00:00Z")
+    assert is_dummy_dh2_start(dummy_start, dummy_start)
     _seed_ingest_tables(
         config, game_pk=745002, start=dummy_start, doubleheader=2
+    )
+    store = MlbStore(config)
+    versions = store.read_table("game_versions")
+    game1 = versions.iloc[0].copy()
+    game1["game_pk"] = 745001
+    game1["doubleheader"] = 1
+    store.write_table(
+        "game_versions",
+        coerce_frame(
+            pd.concat([versions, game1.to_frame().T], ignore_index=True),
+            GAME_VERSION_COLUMNS,
+        ),
     )
     fixture = config.raw_dir / "mlb_lineup_slots" / "745002.json"
     fixture.parent.mkdir(parents=True)
@@ -418,13 +468,15 @@ def test_dummy_dh2_detection_and_boxscore_skip(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.mlb.pipeline.lineup_slots._now_utc",
-        lambda: pd.Timestamp("2026-06-30T20:00:00Z"),
+        lambda: pd.Timestamp("2026-07-01T13:00:00Z"),
     )
+    fixture.write_text(_home_nine_payload(745002))
     live = ingest_lineup_slots(
         config, game_pks=[745002], provenance="live_feed", http=None
     )
-    assert len(live) == 18
+    assert len(live) == 9
     assert live["observed_before_cutoff"].eq(1).all()
+    assert len(MlbStore(config).read_table("lineup_slots")) == 9
 
 
 def test_lineup_coverage_passes_healthy_and_fails_low_or_zero() -> None:

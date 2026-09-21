@@ -484,10 +484,18 @@ def ingest_lineup_slots(
             )
 
     skips = pd.DataFrame(skip_rows, columns=["game_pk", "season", "reason"])
-    for season in sorted(seasons):
-        coverage = write_lineup_coverage(written, skips, season=season)
-        store.write_json(
-            config.artifact_dir / f"lineup_coverage_{season}.json", coverage
-        )
-        assert_lineup_coverage(coverage, season=season)
+    if provenance == "boxscore_00":
+        coverage_slots = pd.concat([existing, written], ignore_index=True)
+        if not coverage_slots.empty:
+            coverage_slots = coverage_slots.loc[
+                coverage_slots["game_pk"].isin(game_pks)
+                & (coverage_slots["provenance"] == provenance)
+                & (coverage_slots["rate_version"] == rate_version(config))
+            ]
+        for season in sorted(seasons):
+            coverage = write_lineup_coverage(coverage_slots, skips, season=season)
+            store.write_json(
+                config.artifact_dir / f"lineup_coverage_{season}.json", coverage
+            )
+            assert_lineup_coverage(coverage, season=season)
     return written
