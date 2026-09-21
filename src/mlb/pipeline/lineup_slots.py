@@ -128,6 +128,8 @@ def parse_starting_nine(
 
 
 def _league_k_pa(pas: pd.DataFrame) -> LeagueKPa:
+    if pas.empty:
+        return LeagueKPa(overall=0.22, by_bats={}, by_bats_hand={})
     strikeouts = pas["event_type"].map(is_strikeout)
     overall = float(strikeouts.mean())
     if pd.isna(overall):
@@ -167,6 +169,7 @@ def freeze_lineup_slot_rates(
     people: pd.DataFrame,
     config: MlbConfig,
     *,
+    league_nines: pd.DataFrame | None = None,
     cutoff: pd.Timestamp,
     opposing_pitcher_hand: str,
     vs_pitcher_id: int | None,
@@ -178,7 +181,8 @@ def freeze_lineup_slot_rates(
     else:
         cutoff = cutoff.tz_convert("UTC")
 
-    league_pas = league_eligible_pas(batter_pas, slots)
+    eligibility_nines = slots if league_nines is None else league_nines
+    league_pas = league_eligible_pas(batter_pas, eligibility_nines)
     event_times = pd.to_datetime(league_pas["event_time_utc"], utc=True)
     league_pas = league_pas.loc[
         (event_times < cutoff)
@@ -451,6 +455,9 @@ def ingest_lineup_slots(
     people = store.read_table("id_map")
     batter_pas = store.read_table("batter_pas")
     existing = store.read_table("lineup_slots")
+    known_nines = existing[
+        ["game_pk", "batter_id", "slot_is_pitcher"]
+    ].drop_duplicates()
     frames: list[pd.DataFrame] = []
     skip_rows: list[dict[str, Any]] = []
     seasons: set[int] = set()
@@ -463,14 +470,32 @@ def ingest_lineup_slots(
             else http(LINEUP_URL_TEMPLATE.format(game_pk=int(game_pk)), params)
         )
         parsed = parse_starting_nine(payload, game_pk=int(game_pk))
-        season = int(parsed["season"].iloc[0]) if not parsed.empty else 0
-        seasons.add(season)
         original = _original_game_version(game_versions, int(game_pk))
-        start = (
+        original_start = (
             _utc_timestamp(original["scheduled_start_utc"])
             if original is not None
             else pd.NaT
         )
+        start = earliest_scheduled_start(game_versions, int(game_pk))
+        season = int(parsed["season"].iloc[0]) if not parsed.empty else 0
+        game_rows = game_versions.loc[game_versions["game_pk"] == int(game_pk)]
+        if season == 0:
+            if "season" in game_rows and game_rows["season"].notna().any():
+                season = int(
+                    game_rows.loc[game_rows["season"].notna(), "season"].iloc[0]
+                )
+            elif not pd.isna(start):
+                season = int(start.year)
+        if not parsed.empty:
+            parsed["season"] = season
+            known_nines = pd.concat(
+                [
+                    known_nines,
+                    parsed[["game_pk", "batter_id", "slot_is_pitcher"]],
+                ],
+                ignore_index=True,
+            ).drop_duplicates()
+        seasons.add(season)
         doubleheader = (
             int(original.get("doubleheader", 0)) if original is not None else 0
         )
@@ -486,7 +511,7 @@ def ingest_lineup_slots(
         if (
             provenance == "boxscore_00"
             and doubleheader == 2
-            and is_dummy_dh2_start(start, game1_start)
+            and is_dummy_dh2_start(original_start, game1_start)
         ):
             skip_rows.append(
                 {"game_pk": game_pk, "season": season, "reason": "dh2_dummy_start"}
@@ -507,10 +532,16 @@ def ingest_lineup_slots(
             continue
 
         effective_start = start
-        if provenance == "live_feed" and pd.isna(effective_start):
-            game_rows = game_versions.loc[game_versions["game_pk"] == int(game_pk)]
+        if (
+            provenance == "live_feed"
+            and doubleheader == 2
+            and is_dummy_dh2_start(original_start, game1_start)
+        ):
             usable = game_rows.loc[
-                pd.to_datetime(game_rows["scheduled_start_utc"], utc=True).notna()
+                [
+                    not is_dummy_dh2_start(value, game1_start)
+                    for value in game_rows["scheduled_start_utc"]
+                ]
             ]
             if not usable.empty:
                 valid_from = pd.to_datetime(usable["valid_from_utc"], utc=True)
@@ -551,6 +582,7 @@ def ingest_lineup_slots(
                 batter_pas,
                 people,
                 config,
+                league_nines=known_nines,
                 cutoff=cutoff,
                 opposing_pitcher_hand=_pitcher_hand(people, pitcher_id),
                 vs_pitcher_id=None if pd.isna(pitcher_id) else int(pitcher_id),
@@ -568,6 +600,8 @@ def ingest_lineup_slots(
         else coerce_frame(pd.DataFrame(), LINEUP_SLOT_COLUMNS)
     )
     if not written.empty:
+        if provenance == "live_feed":
+            written = copy_live_ingest_clock(existing, written)
         keys = ["game_pk", "team_id", "slot", "rate_version", "provenance"]
         old_keys = set(existing[keys].itertuples(index=False, name=None))
         written = written.loc[

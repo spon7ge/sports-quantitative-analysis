@@ -298,6 +298,35 @@ def test_freeze_league_rates_use_trailing_365_days() -> None:
     assert inside_window == 2.0 / 3.0
 
 
+def test_freeze_with_no_historical_pas_uses_finite_league_fallback() -> None:
+    cutoff = pd.Timestamp("2018-03-29T17:00:00Z")
+    slots = pd.DataFrame(
+        [{
+            "game_pk": 529407,
+            "team_id": 118,
+            "side": "home",
+            "slot": 1,
+            "batter_id": 101,
+            "slot_is_pitcher": 0,
+            "season": 2018,
+        }]
+    )
+    people = pd.DataFrame([{"mlb_id": 101, "bats": "R"}])
+
+    frozen = freeze_lineup_slot_rates(
+        slots,
+        coerce_frame(pd.DataFrame(), BATTER_PA_COLUMNS),
+        people,
+        load_config(),
+        cutoff=cutoff,
+        opposing_pitcher_hand="L",
+        vs_pitcher_id=9001,
+    )
+
+    assert math.isfinite(float(frozen.loc[0, "k_pa_vs_hand_shrunk_365"]))
+    assert frozen.loc[0, "k_pa_vs_hand_shrunk_365"] == pytest.approx(0.22)
+
+
 def _complete_payload(game_pk: int = 745001, season: str = "2026") -> str:
     return _payload(
         home_players={
@@ -409,6 +438,58 @@ def test_ingest_boxscore_stamp_is_24h_and_observed_false(tmp_path) -> None:
     assert written["observed_before_cutoff"].eq(0).all()
 
 
+def test_ingest_boxscore_uses_earliest_scheduled_start_not_first_seen(
+    tmp_path,
+) -> None:
+    game_pk = 745001
+    later_start = pd.Timestamp("2026-07-01T20:00:00Z")
+    earlier_start = pd.Timestamp("2026-07-01T19:00:00Z")
+    config = _ingest_config(tmp_path)
+    _seed_ingest_tables(config, game_pk=game_pk, start=later_start)
+    store = MlbStore(config)
+    versions = store.read_table("game_versions")
+    correction = versions.iloc[0].copy()
+    correction["scheduled_start_utc"] = earlier_start
+    correction["valid_from_utc"] = pd.Timestamp("2026-06-01T00:00:00Z")
+    store.write_table(
+        "game_versions",
+        coerce_frame(
+            pd.concat([versions, correction.to_frame().T], ignore_index=True),
+            GAME_VERSION_COLUMNS,
+        ),
+    )
+    fixture = config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(_complete_payload(game_pk))
+
+    written = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="boxscore_00", http=None
+    )
+
+    assert set(written["ingested_at_utc"]) == {earlier_start - BOXSCORE_00_LEAD}
+
+
+def test_ingest_fills_missing_payload_season_from_game_start(tmp_path) -> None:
+    game_pk = 567890
+    config = _ingest_config(tmp_path)
+    _seed_ingest_tables(
+        config,
+        game_pk=game_pk,
+        start=pd.Timestamp("2019-04-01T19:00:00Z"),
+    )
+    fixture = config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(_complete_payload(game_pk, season=""))
+
+    written = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="boxscore_00", http=None
+    )
+
+    assert written["season"].eq(2019).all()
+    assert (config.artifact_dir / "lineup_coverage_2019.json").exists()
+    assert not (config.artifact_dir / "lineup_coverage_0.json").exists()
+
+
 def test_ingest_resume_uses_stored_slots_for_coverage(tmp_path) -> None:
     game_pk = 745001
     config = _ingest_config(tmp_path)
@@ -431,6 +512,111 @@ def test_ingest_resume_uses_stored_slots_for_coverage(tmp_path) -> None:
     assert len(first) == 18
     assert second.empty
     assert len(MlbStore(config).read_table("lineup_slots")) == 18
+
+
+def test_ingest_uses_stored_historical_nines_for_two_way_league_pas(
+    tmp_path,
+) -> None:
+    game_pk = 745001
+    config = _ingest_config(tmp_path)
+    _seed_ingest_tables(
+        config,
+        game_pk=game_pk,
+        start=pd.Timestamp("2026-07-01T19:00:00Z"),
+    )
+    store = MlbStore(config)
+    history_time = pd.Timestamp("2026-06-01T19:00:00Z")
+    history = pd.DataFrame(
+        [
+            {
+                "pa_id": "ohtani-dh",
+                "game_pk": 744000,
+                "at_bat_index": 1,
+                "batter_id": 660271,
+                "pitcher_id": 660271,
+                "pitcher_hand": "R",
+                "batter_bats": "S",
+                "batter_stand": "L",
+                "event_type": "strikeout",
+                "event_time_utc": history_time,
+                "event_time_imputed": 0,
+                "is_pitcher_in_game": 1,
+                "ingested_at_utc": history_time,
+                "snapshot_id": "pbp-ohtani",
+            },
+            {
+                "pa_id": "reliever-ph",
+                "game_pk": 744001,
+                "at_bat_index": 1,
+                "batter_id": 700001,
+                "pitcher_id": 700001,
+                "pitcher_hand": "R",
+                "batter_bats": "R",
+                "batter_stand": "R",
+                "event_type": "field_out",
+                "event_time_utc": history_time,
+                "event_time_imputed": 0,
+                "is_pitcher_in_game": 1,
+                "ingested_at_utc": history_time,
+                "snapshot_id": "pbp-reliever",
+            },
+        ]
+    )
+    store.write_table("batter_pas", coerce_frame(history, BATTER_PA_COLUMNS))
+    stored_nine = pd.DataFrame(
+        [{
+            "game_pk": 744000,
+            "team_id": 108,
+            "side": "home",
+            "slot": 1,
+            "batter_id": 660271,
+            "slot_is_pitcher": 0,
+            "season": 2026,
+            "provenance": "boxscore_00",
+            "rate_version": "old",
+        }]
+    )
+    store.write_table("lineup_slots", coerce_frame(stored_nine, LINEUP_SLOT_COLUMNS))
+    fixture = config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(_complete_payload(game_pk))
+
+    written = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="boxscore_00", http=None
+    )
+
+    assert written["k_pa_overall_shrunk_365"].eq(1.0).all()
+
+
+def test_second_live_freeze_keeps_original_snapshot_clock(
+    tmp_path, monkeypatch
+) -> None:
+    game_pk = 745001
+    start = pd.Timestamp("2026-07-01T19:00:00Z")
+    first_clock = pd.Timestamp("2026-07-01T12:00:00Z")
+    second_clock = pd.Timestamp("2026-07-01T13:00:00Z")
+    config = _ingest_config(tmp_path)
+    _seed_ingest_tables(config, game_pk=game_pk, start=start)
+    fixture = config.raw_dir / "mlb_lineup_slots" / f"{game_pk}.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(_complete_payload(game_pk))
+    clocks = iter([first_clock, second_clock])
+    monkeypatch.setattr(
+        "src.mlb.pipeline.lineup_slots._now_utc", lambda: next(clocks)
+    )
+
+    first = ingest_lineup_slots(
+        config, game_pks=[game_pk], provenance="live_feed", http=None
+    )
+    changed_config = replace(
+        config, batter_k_prior_strength=config.batter_k_prior_strength + 1
+    )
+    second = ingest_lineup_slots(
+        changed_config, game_pks=[game_pk], provenance="live_feed", http=None
+    )
+
+    assert set(first["ingested_at_utc"]) == {first_clock}
+    assert set(second["ingested_at_utc"]) == {first_clock}
 
 
 def test_dummy_dh2_detection_and_boxscore_skip(tmp_path, monkeypatch) -> None:

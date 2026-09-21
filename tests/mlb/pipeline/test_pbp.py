@@ -156,3 +156,67 @@ def test_reingest_keeps_latest_wall_clock(tmp_path, monkeypatch) -> None:
     assert latest["event_type"] == "strikeout"
     assert latest["ingested_at_utc"] == pd.Timestamp("2026-09-21T00:01:00Z")
     assert "is_strikeout" not in stored.columns
+
+
+def test_ingest_uses_people_bats_and_defaults_to_empty(tmp_path) -> None:
+    config = replace(
+        load_config(),
+        data_dir=tmp_path / "data",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    game_pk = 746329
+    raw_path = config.raw_dir / "mlb_pbp" / f"{game_pk}.json.gz"
+    raw_path.parent.mkdir(parents=True)
+    payload = {
+        "gamePk": game_pk,
+        "allPlays": [
+            {
+                "atBatIndex": 0,
+                "result": {"eventType": "field_out"},
+                "about": {"startTime": "2024-04-03T18:05:00Z"},
+                "matchup": {"batter": {"id": 500}, "pitcher": {"id": 600}},
+            }
+        ],
+    }
+    with gzip.open(raw_path, "wb") as handle:
+        handle.write(json.dumps(payload).encode())
+
+    people = pd.DataFrame([{"mlb_id": 500, "bats": "S"}])
+    with_people = ingest_play_by_play(
+        config, game_pks=[game_pk], people=people
+    )
+    without_people = ingest_play_by_play(config, game_pks=[game_pk])
+
+    assert with_people.loc[0, "batter_bats"] == "S"
+    assert without_people.loc[0, "batter_bats"] == ""
+
+
+def test_ingest_imputes_from_payload_scheduled_start(tmp_path) -> None:
+    config = replace(
+        load_config(),
+        data_dir=tmp_path / "data",
+        artifact_dir=tmp_path / "artifacts",
+    )
+    game_pk = 746330
+    scheduled_start = pd.Timestamp("2024-04-04T18:00:00Z")
+    raw_path = config.raw_dir / "mlb_pbp" / f"{game_pk}.json.gz"
+    raw_path.parent.mkdir(parents=True)
+    payload = {
+        "gamePk": game_pk,
+        "gameData": {"datetime": {"dateTime": scheduled_start.isoformat()}},
+        "allPlays": [
+            {
+                "atBatIndex": 0,
+                "result": {"eventType": "walk"},
+                "about": {},
+                "matchup": {"batter": {"id": 500}, "pitcher": {"id": 600}},
+            }
+        ],
+    }
+    with gzip.open(raw_path, "wb") as handle:
+        handle.write(json.dumps(payload).encode())
+
+    result = ingest_play_by_play(config, game_pks=[game_pk])
+
+    assert result.loc[0, "event_time_imputed"] == 1
+    assert result.loc[0, "event_time_utc"] == scheduled_start + pd.Timedelta(hours=4)

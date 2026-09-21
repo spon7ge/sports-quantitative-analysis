@@ -299,6 +299,7 @@ def _cmd_ingest_play_by_play(args: argparse.Namespace, config: MlbConfig) -> int
         config,
         game_pks=game_pks,
         http=_http_client(args, config),
+        people=MlbStore(config).read_table("id_map"),
     )
     print(f"ingest-play-by-play returned {0 if frame is None else len(frame)} rows")
     return 0

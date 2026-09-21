@@ -53,6 +53,27 @@ def _with_game_pk(raw_payload: str | bytes, game_pk: int) -> str | bytes:
     return json.dumps(data)
 
 
+def _payload_scheduled_start(raw_payload: str | bytes) -> Any:
+    data = json.loads(_as_text(raw_payload))
+    if not isinstance(data, dict):
+        return None
+    return ((data.get("gameData") or {}).get("datetime") or {}).get("dateTime")
+
+
+def _stored_scheduled_start(
+    game_versions: pd.DataFrame, game_pk: int
+) -> pd.Timestamp:
+    if game_versions.empty:
+        return pd.NaT
+    starts = pd.to_datetime(
+        game_versions.loc[
+            game_versions["game_pk"] == int(game_pk), "scheduled_start_utc"
+        ],
+        utc=True,
+    )
+    return starts.min()
+
+
 def _local_payload(config: MlbConfig, game_pk: int) -> bytes:
     gzip_path = config.raw_dir / "mlb_pbp" / f"{game_pk}.json.gz"
     if gzip_path.exists():
@@ -75,6 +96,10 @@ def ingest_play_by_play(
     people: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Ingest game PAs, retaining the latest wall-clock version of each PA."""
+    store = MlbStore(config)
+    game_versions = store.read_table("game_versions")
+    if people is None:
+        people = store.read_table("id_map")
     frames: list[pd.DataFrame] = []
     for game_pk in game_pks:
         params = {"game_pk": int(game_pk)}
@@ -115,6 +140,10 @@ def ingest_play_by_play(
                 _with_game_pk(payload, int(game_pk)),
                 snapshot_id,
                 ingested_at,
+                scheduled_start=(
+                    _payload_scheduled_start(payload)
+                    or _stored_scheduled_start(game_versions, int(game_pk))
+                ),
                 people=people,
             )
         )
@@ -127,7 +156,6 @@ def ingest_play_by_play(
     if parsed.empty:
         return parsed
 
-    store = MlbStore(config)
     combined = pd.concat([store.read_table("batter_pas"), parsed], ignore_index=True)
     combined = combined.sort_values("ingested_at_utc", kind="stable")
     combined = combined.drop_duplicates("pa_id", keep="last").reset_index(drop=True)

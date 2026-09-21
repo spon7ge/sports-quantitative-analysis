@@ -94,7 +94,9 @@ def shrink_batter_k_pa(
         & (pas["event_time_imputed"] == 0)
     ].copy()
     eligible["_event_time_utc"] = event_times.loc[eligible.index]
-    eligible["_is_strikeout"] = eligible["event_type"].map(is_strikeout)
+    eligible["_is_strikeout"] = (
+        eligible["event_type"].map(is_strikeout).astype("int64")
+    )
 
     windows = {
         "60": eligible["_event_time_utc"] >= cutoff - pd.Timedelta(days=60),
