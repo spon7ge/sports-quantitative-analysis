@@ -7,6 +7,7 @@ from src.mlb.config import load_config
 from src.mlb.models.batter_rates import (
     LeagueKPa,
     is_strikeout,
+    league_eligible_pas,
     league_platoon_odds_ratio,
     rate_version,
     shrink_batter_k_pa,
@@ -39,6 +40,25 @@ def _league() -> LeagueKPa:
         by_bats={"R": 0.22},
         by_bats_hand={("R", "R"): 0.26, ("R", "L"): 0.18},
     )
+
+
+def test_league_keeps_two_way_drops_relievers() -> None:
+    pas = pd.DataFrame(
+        [
+            {"game_pk": 1, "batter_id": 592773, "is_pitcher_in_game": 1},
+            {"game_pk": 1, "batter_id": 623205, "is_pitcher_in_game": 1},
+            {"game_pk": 1, "batter_id": 660271, "is_pitcher_in_game": 1},
+        ]
+    )
+    nines = pd.DataFrame(
+        [
+            {"game_pk": 1, "batter_id": 592773, "slot_is_pitcher": 1},
+            {"game_pk": 1, "batter_id": 660271, "slot_is_pitcher": 0},
+        ]
+    )
+    eligible = league_eligible_pas(pas, nines)
+    assert len(eligible) == 1
+    assert int(eligible.iloc[0]["batter_id"]) == 660271
 
 
 def test_is_strikeout_derived_from_event_set() -> None:

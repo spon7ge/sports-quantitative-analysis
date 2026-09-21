@@ -32,6 +32,19 @@ def is_strikeout(
     return int(str(event_type) in events)
 
 
+def league_eligible_pas(pas: pd.DataFrame, nines: pd.DataFrame) -> pd.DataFrame:
+    two_way = nines.loc[
+        nines["slot_is_pitcher"] == 0, ["game_pk", "batter_id"]
+    ].drop_duplicates()
+    tagged = pas.merge(
+        two_way.assign(_two_way=1),
+        on=["game_pk", "batter_id"],
+        how="left",
+    )
+    keep = (tagged["is_pitcher_in_game"] == 0) | (tagged["_two_way"] == 1)
+    return pas.loc[keep.to_numpy()].copy()
+
+
 def rate_version(config: MlbConfig) -> str:
     payload = {
         "exclude_pitcher_batters": "pbp_pitcher_ids_minus_two_way",
