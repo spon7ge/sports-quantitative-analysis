@@ -430,12 +430,25 @@ def test_shuffle_keeps_player_games_and_streams_are_not_identical():
     np.testing.assert_allclose(first[1], second[0])
     assert abs(np.corrcoef(first[0], first[1])[0, 1]) < 0.05
     assert not np.allclose(first[0], first[1])
-    labeled = sample_minutes(grids[:1], groups[:1], groups[:1], ["a"], ["g1"], TABLES, seed=7, draws=64)
     from hashlib import sha256
-    material = f"7|{canonical_id('a')}|{canonical_id('g1')}".encode()
-    unlabeled_seed = int.from_bytes(sha256(material).digest()[:8], "little")
-    unlabeled = np.random.default_rng(unlabeled_seed).random(64)
-    assert not np.allclose(labeled[0], unlabeled)
+
+    def stream_uniforms(label):
+        material = f"7|{label}{canonical_id('a')}|{canonical_id('g1')}".encode()
+        stream_seed = int.from_bytes(sha256(material).digest()[:8], "little")
+        return np.random.default_rng(stream_seed).random(64)
+
+    labeled_u = stream_uniforms("minutes|")
+    unlabeled_u = stream_uniforms("")
+    assert not np.allclose(labeled_u, unlabeled_u)
+    labeled = sample_minutes(grids[:1], groups[:1], groups[:1], ["a"], ["g1"], TABLES, seed=7, draws=64)
+    expected = quantile_minutes(
+        labeled_u.reshape(1, -1),
+        grids[:1],
+        groups[:1],
+        groups[:1],
+        TABLES,
+    )
+    np.testing.assert_allclose(labeled, expected)
 
 
 def test_median_draw_tracks_each_rows_q50_and_missing_id_raises():
