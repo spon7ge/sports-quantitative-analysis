@@ -21,9 +21,11 @@ from models.shared.baselines import (
 )
 from models.shared.metrics import pinball_50, score_quantile_fold
 from models.shared.minutes_sampler import (
+    HOLDOUT_START,
     KNOT_FLOOR,
     QUANTILE_LEVELS,
     MinuteTailTables,
+    build_tail_tables,
     prepare_quantile_grid,
     quantile_minutes,
 )
@@ -45,6 +47,8 @@ __all__ = [
     "evaluate_holdout_vs_naive",
     "fit_quantile_linear",
     "fit_quantile_models",
+    "build_tail_tables",
+    "HOLDOUT_START",
     "KNOT_FLOOR",
     "load_model_bundle",
     "MinuteTailTables",

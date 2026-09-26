@@ -10,11 +10,25 @@ from src.models.settlement import maximum_minutes
 
 QUANTILE_LEVELS = (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
 KNOT_FLOOR = 1e-3
+HOLDOUT_START = np.datetime64("2025-10-21")
+_DEFAULT_GROUPING = {"lower": "starting", "upper": "starting"}
+_MISS_RATE_LO = 0.04
+_MISS_RATE_HI = 0.06
 
 
 @dataclass
 class MinuteTailTables:
     arrays: dict[tuple[str, int], np.ndarray]
+    floor: float = KNOT_FLOOR
+    quantile_levels: tuple[float, ...] = QUANTILE_LEVELS
+    early_stop: str = "train_tail"
+    train_tail_frac: float = 0.10
+    holdout_start: str = "2025-10-21"
+    grouping: dict[str, str] | None = None
+    groups: tuple[int, ...] = (0, 1)
+    folds: tuple[int, ...] = ()
+    fold_ranges: dict | None = None
+    oof: object | None = None
 
 
 def prepare_quantile_grid(grids: np.ndarray) -> np.ndarray:
@@ -84,3 +98,96 @@ def quantile_minutes(u, grids, lower_groups, upper_groups, tables) -> np.ndarray
         )
     cap = maximum_minutes("nba")
     return np.clip(out, 0.0, cap)
+
+
+def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTables:
+    """Build pinned lower/upper empirical tables from out-of-fold misses."""
+    rules = dict(_DEFAULT_GROUPING) if grouping is None else dict(grouping)
+    if rules != _DEFAULT_GROUPING:
+        raise ValueError("unknown grouping")
+
+    if not ((oof["early_stop"] == "train_tail").all() and (oof["train_tail_frac"] == 0.10).all()):
+        raise ValueError("train_tail")
+
+    present = set(oof["fold_id"].tolist())
+    missing = [fold_id for fold_id in folds if fold_id not in present]
+    if missing:
+        raise ValueError(f"fold missing: {missing}")
+
+    starting = oof["starting"].to_numpy()
+    if not np.issubdtype(np.asarray(starting).dtype, np.number):
+        raise ValueError("starting")
+    if not np.isin(starting, [0, 1]).all():
+        raise ValueError("starting")
+
+    minutes = oof["minutes"].to_numpy(dtype=float)
+    if not np.all(minutes > 0):
+        raise ValueError("y > 0")
+
+    game_dates = np.asarray(oof["game_date"], dtype="datetime64[ns]")
+    if not np.all(game_dates < HOLDOUT_START):
+        raise ValueError("2025-10-21")
+
+    knot_cols = [f"q_{level:.2f}" for level in QUANTILE_LEVELS]
+    prepared = prepare_quantile_grid(oof[knot_cols].to_numpy(dtype=float))
+
+    selected_mask = oof["fold_id"].isin(list(folds)).to_numpy()
+    selected = oof.loc[selected_mask].copy()
+    prepared_sel = prepared[selected_mask]
+    q05_sel = prepared_sel[:, 0]
+    q95_sel = prepared_sel[:, -1]
+    y_sel = selected["minutes"].to_numpy(dtype=float)
+    starting_sel = selected["starting"].to_numpy(dtype=int)
+    fold_sel = selected["fold_id"].to_numpy()
+
+    for fold_id in folds:
+        fold_mask = fold_sel == fold_id
+        y_fold = y_sel[fold_mask]
+        q05_fold = q05_sel[fold_mask]
+        q95_fold = q95_sel[fold_mask]
+        lower_rate = float(np.mean(y_fold < q05_fold))
+        upper_rate = float(np.mean(y_fold > q95_fold))
+        if not (_MISS_RATE_LO <= lower_rate <= _MISS_RATE_HI and _MISS_RATE_LO <= upper_rate <= _MISS_RATE_HI):
+            raise ValueError(
+                f"miss rate outside [0.04, 0.06] for fold {fold_id}: "
+                f"lower={lower_rate:.4f} upper={upper_rate:.4f}"
+            )
+
+    buckets: dict[tuple[str, int], list[float]] = {
+        ("lower", 0): [],
+        ("lower", 1): [],
+        ("upper", 0): [],
+        ("upper", 1): [],
+    }
+    for index in range(len(selected)):
+        group = int(starting_sel[index])
+        y = y_sel[index]
+        if y < q05_sel[index]:
+            buckets[("lower", group)].append(y / q05_sel[index])
+        if y > q95_sel[index]:
+            buckets[("upper", group)].append(y - q95_sel[index])
+
+    arrays: dict[tuple[str, int], np.ndarray] = {}
+    for key, values in buckets.items():
+        tail, _group = key
+        if tail == "lower":
+            values = [*values, 1.0]
+        else:
+            values = [*values, 0.0]
+        if len(values) == 1:
+            raise ValueError(f"pin-only table for {key}")
+        arrays[key] = np.sort(np.asarray(values, dtype=float))
+
+    return MinuteTailTables(
+        arrays=arrays,
+        floor=KNOT_FLOOR,
+        quantile_levels=QUANTILE_LEVELS,
+        early_stop="train_tail",
+        train_tail_frac=0.10,
+        holdout_start="2025-10-21",
+        grouping=rules,
+        groups=(0, 1),
+        folds=tuple(folds),
+        fold_ranges=fold_ranges,
+        oof=selected,
+    )

@@ -1,10 +1,13 @@
 import numpy as np
+import pandas as pd
 import pytest
 
 from models.shared.minutes_sampler import (
+    HOLDOUT_START,
     KNOT_FLOOR,
     QUANTILE_LEVELS,
     MinuteTailTables,
+    build_tail_tables,
     prepare_quantile_grid,
     quantile_minutes,
 )
@@ -102,3 +105,133 @@ def test_bad_u_knot_count_and_unknown_group_raise():
         quantile_minutes(np.array([[1.1]]), _grid(SORTED), np.array([1]), np.array([1]), TABLES)
     with pytest.raises(ValueError, match="group"):
         quantile_minutes(np.array([[0.025]]), _grid(SORTED), np.array([2]), np.array([1]), TABLES)
+
+
+def _knot_frame(n, q05=10.0, q95=30.0):
+    frame = pd.DataFrame(index=np.arange(n))
+    for level in QUANTILE_LEVELS:
+        if level <= 0.05:
+            value = q05
+        elif level >= 0.95:
+            value = q95
+        else:
+            value = q05 + (q95 - q05) * (level - 0.05) / 0.90
+        frame[f"q_{level:.2f}"] = value
+    return frame
+
+
+def _valid_oof():
+    """100 rows, fold 1, pooled tail rate 5%. Group 1 has only r=0.5 and e=10."""
+    starter = _knot_frame(20)
+    starter["minutes"] = 20.0
+    starter.loc[0, "minutes"] = 5.0
+    starter.loc[1, "minutes"] = 40.0
+    starter["starting"] = 1
+    bench = _knot_frame(80)
+    bench["minutes"] = 20.0
+    bench.loc[0:3, "minutes"] = 2.0
+    bench.loc[4:7, "minutes"] = 36.0
+    bench["starting"] = 0
+    oof = pd.concat([starter, bench], ignore_index=True)
+    oof["fold_id"] = 1
+    oof["game_date"] = pd.Timestamp("2024-01-15")
+    oof["early_stop"] = "train_tail"
+    oof["train_tail_frac"] = 0.10
+    ranges = {1: {"train_start": "2023-10-01", "train_end": "2024-01-01", "val_start": "2024-01-02", "val_end": "2024-01-15"}}
+    return oof, ranges
+
+
+def test_builder_pins_and_tail_limits_come_from_build_tail_tables():
+    oof, ranges = _valid_oof()
+    tables = build_tail_tables(oof, folds=[1], fold_ranges=ranges)
+    lower = tables.arrays[("lower", 1)]
+    upper = tables.arrays[("upper", 1)]
+    assert lower[-1] == 1
+    assert upper[0] == 0
+    assert set(np.round(lower, 5)) == {0.5, 1.0}
+    assert set(np.round(upper, 5)) == {0.0, 10.0}
+    row = oof.iloc[[0]]
+    grids = row[[f"q_{level:.2f}" for level in QUANTILE_LEVELS]].to_numpy(dtype=float)
+    eps = 1e-6
+    got = quantile_minutes(
+        np.array([[0.05 - eps, 0.95 + eps]]),
+        grids,
+        np.array([1]),
+        np.array([1]),
+        tables,
+    )
+    q05 = prepare_quantile_grid(grids)[0, 0]
+    q95 = prepare_quantile_grid(grids)[0, -1]
+    assert abs(got[0, 0] - q05) / q05 < 1e-3
+    assert abs(got[0, 1] - q95) <= 1e-3
+    stripped = MinuteTailTables(arrays=dict(tables.arrays))
+    stripped.arrays[("lower", 1)] = lower[:-1]
+    stripped.arrays[("upper", 1)] = upper[1:]
+    bare = quantile_minutes(
+        np.array([[0.05 - eps, 0.95 + eps]]),
+        grids,
+        np.array([1]),
+        np.array([1]),
+        stripped,
+    )
+    assert bare[0, 0] == pytest.approx(0.5 * q05)
+    assert bare[0, 1] == pytest.approx(q95 + 10)
+
+
+def test_missing_requested_fold_raises_before_miss_rate():
+    oof, ranges = _valid_oof()
+    oof["fold_id"] = 4
+    oof["minutes"] = 20.0
+    with pytest.raises(ValueError, match="fold"):
+        build_tail_tables(oof, folds=[1, 2, 3, 4], fold_ranges=ranges)
+
+
+def test_miss_rate_outside_band_raises():
+    oof, ranges = _valid_oof()
+    oof["minutes"] = 1.0
+    with pytest.raises(ValueError, match="miss rate"):
+        build_tail_tables(oof, folds=[1], fold_ranges=ranges)
+
+
+def test_group_missing_from_the_data_raises_at_build():
+    oof, ranges = _valid_oof()
+    oof = oof.loc[oof["starting"] == 1].reset_index(drop=True)
+    oof["minutes"] = 20.0
+    oof.loc[0, "minutes"] = 5.0
+    oof.loc[1, "minutes"] = 40.0
+    with pytest.raises(ValueError, match="pin"):
+        build_tail_tables(oof, folds=[1], fold_ranges=ranges)
+
+
+def test_builder_rejects_a_non_finite_knot():
+    oof, ranges = _valid_oof()
+    oof.loc[0, "q_0.50"] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        build_tail_tables(oof, folds=[1], fold_ranges=ranges)
+
+
+def test_builder_rejects_bad_rows_and_rules():
+    oof, ranges = _valid_oof()
+    non_positive = oof.copy()
+    non_positive.loc[0, "minutes"] = 0
+    with pytest.raises(ValueError, match="y > 0"):
+        build_tail_tables(non_positive, folds=[1], fold_ranges=ranges)
+    late = oof.copy()
+    late["game_date"] = HOLDOUT_START
+    with pytest.raises(ValueError, match="2025-10-21"):
+        build_tail_tables(late, folds=[1], fold_ranges=ranges)
+    optimistic = oof.copy()
+    optimistic["early_stop"] = "validation"
+    with pytest.raises(ValueError, match="train_tail"):
+        build_tail_tables(optimistic, folds=[1], fold_ranges=ranges)
+    bad_role = oof.copy()
+    bad_role.loc[0, "starting"] = 2
+    with pytest.raises(ValueError, match="starting"):
+        build_tail_tables(bad_role, folds=[1], fold_ranges=ranges)
+    with pytest.raises(ValueError, match="grouping"):
+        build_tail_tables(
+            oof,
+            folds=[1],
+            fold_ranges=ranges,
+            grouping={"lower": "q50_tier", "upper": "starting"},
+        )
