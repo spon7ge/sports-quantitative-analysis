@@ -55,11 +55,12 @@ def test_quantile_minutes_hits_all_eleven_stored_levels():
 
 def test_lower_tail_scales_with_q05_and_upper_tail_shifts_with_q95():
     u = np.array([[0.025, 0.975]])
-    base = quantile_minutes(u, _grid(SORTED), np.array([1]), np.array([1]), TABLES)
-    doubled = SORTED.copy()
-    doubled[0] = 20
+    grid = np.array([5, *SORTED[1:]], dtype=float)
+    base = quantile_minutes(u, _grid(grid), np.array([1]), np.array([1]), TABLES)
+    doubled = grid.copy()
+    doubled[0] = 2 * grid[0]
     scaled = quantile_minutes(u, _grid(doubled), np.array([1]), np.array([1]), TABLES)
-    shifted = SORTED.copy()
+    shifted = grid.copy()
     shifted[-1] = 35
     moved = quantile_minutes(u, _grid(shifted), np.array([1]), np.array([1]), TABLES)
     np.testing.assert_allclose(scaled[0, 0], 2 * base[0, 0])

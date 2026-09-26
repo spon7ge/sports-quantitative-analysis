@@ -66,13 +66,9 @@ def quantile_minutes(u, grids, lower_groups, upper_groups, tables) -> np.ndarray
         raise ValueError("u must have shape (rows, draws)")
     if not np.isfinite(uniforms).all() or np.any(uniforms < 0) or np.any(uniforms > 1):
         raise ValueError("u outside [0, 1]")
-    raw = np.asarray(grids, dtype=float)
-    if raw.ndim == 1:
-        raw = raw.reshape(1, -1)
     prepared = prepare_quantile_grid(grids)
     if prepared.shape[0] != uniforms.shape[0]:
         raise ValueError("grids and u must have the same number of rows")
-    floored = np.maximum(raw, KNOT_FLOOR)
     lower_ids = np.asarray(lower_groups)
     upper_ids = np.asarray(upper_groups)
     out = np.empty_like(uniforms, dtype=float)
@@ -80,8 +76,8 @@ def quantile_minutes(u, grids, lower_groups, upper_groups, tables) -> np.ndarray
         out[index] = _row_quantile(
             uniforms[index],
             prepared[index],
-            floored[index, 0],
-            floored[index, -1],
+            prepared[index, 0],
+            prepared[index, -1],
             int(lower_ids[index]),
             int(upper_ids[index]),
             tables,
