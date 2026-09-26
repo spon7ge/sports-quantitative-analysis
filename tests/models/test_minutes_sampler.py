@@ -8,8 +8,11 @@ from models.shared.minutes_sampler import (
     QUANTILE_LEVELS,
     MinuteTailTables,
     build_tail_tables,
+    groups_for_frame,
+    load_tail_sidecar,
     prepare_quantile_grid,
     quantile_minutes,
+    save_tail_sidecar,
 )
 
 
@@ -295,3 +298,61 @@ def test_train_tail_walk_forward_stops_on_training_dates_and_keeps_every_fold(mo
     assert "q_0.50" in oof.columns
     assert len(oof) == int(frame["game_date"].isin(frame["game_date"].unique()[5:7]).sum())
     assert result["models_last"]["q_0.50"].eval_rows < 5
+
+
+def _four_fold_tables():
+    frames = []
+    ranges = {}
+    for fold in (1, 2, 3, 4):
+        oof, one_range = _valid_oof()
+        oof["fold_id"] = fold
+        oof["game_date"] = pd.Timestamp("2024-01-01") + pd.Timedelta(days=fold)
+        frames.append(oof)
+        ranges[fold] = {
+            "train_start": "2023-10-01",
+            "train_end": f"2024-01-0{fold}",
+            "val_start": f"2024-01-1{fold}",
+            "val_end": f"2024-01-2{fold}",
+        }
+    oof = pd.concat(frames, ignore_index=True)
+    return build_tail_tables(oof, folds=[1, 2, 3, 4], fold_ranges=ranges)
+
+
+def test_loader_accepts_folds_1_through_4_only(tmp_path):
+    tables = _four_fold_tables()
+    path = save_tail_sidecar(tables, tmp_path / "tails.joblib")
+    loaded = load_tail_sidecar(path)
+    assert loaded.folds == (1, 2, 3, 4)
+    partial, ranges = _valid_oof()
+    partial_tables = build_tail_tables(partial, folds=[1], fold_ranges=ranges)
+    partial_path = save_tail_sidecar(partial_tables, tmp_path / "partial.joblib")
+    with pytest.raises(ValueError, match="fold"):
+        load_tail_sidecar(partial_path)
+
+
+def test_loader_rejects_a_different_floor_or_level_list(tmp_path):
+    tables = _four_fold_tables()
+    path = save_tail_sidecar(tables, tmp_path / "tails.joblib")
+    payload = __import__("joblib").load(path)
+    payload["floor"] = 0.01
+    __import__("joblib").dump(payload, path)
+    with pytest.raises(ValueError, match="floor"):
+        load_tail_sidecar(path)
+    payload = __import__("joblib").load(save_tail_sidecar(tables, tmp_path / "levels.joblib"))
+    payload["quantile_levels"] = list(np.linspace(0.05, 0.95, 11))
+    __import__("joblib").dump(payload, tmp_path / "levels.joblib")
+    with pytest.raises(ValueError, match="quantile"):
+        load_tail_sidecar(tmp_path / "levels.joblib")
+
+
+def test_missing_starting_raises_at_draw_time_and_is_not_bench():
+    tables = _four_fold_tables()
+    with pytest.raises(ValueError, match="starting"):
+        groups_for_frame(pd.Series([pd.NA, 1]), tables)
+    lower, upper = groups_for_frame(pd.Series([0, 1]), tables)
+    np.testing.assert_array_equal(lower, [0, 1])
+    np.testing.assert_array_equal(upper, [0, 1])
+    tables.grouping = {"lower": "q50_tier", "upper": "starting"}
+    with pytest.raises(ValueError, match="grouping"):
+        groups_for_frame(pd.Series([0, 1]), tables)
+

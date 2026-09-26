@@ -26,8 +26,11 @@ from models.shared.minutes_sampler import (
     QUANTILE_LEVELS,
     MinuteTailTables,
     build_tail_tables,
+    groups_for_frame,
+    load_tail_sidecar,
     prepare_quantile_grid,
     quantile_minutes,
+    save_tail_sidecar,
 )
 from models.shared.splits import date_walk_forward_folds, prepare_splits, season_holdout_split
 from models.shared.train import (
@@ -48,9 +51,11 @@ __all__ = [
     "fit_quantile_linear",
     "fit_quantile_models",
     "build_tail_tables",
+    "groups_for_frame",
     "HOLDOUT_START",
     "KNOT_FLOOR",
     "load_model_bundle",
+    "load_tail_sidecar",
     "MinuteTailTables",
     "prepare_quantile_grid",
     "QUANTILE_LEVELS",
@@ -65,6 +70,7 @@ __all__ = [
     "run_timeseries_cv",
     "run_walk_forward",
     "save_model_bundle",
+    "save_tail_sidecar",
     "score_quantile_fold",
     "season_holdout_split",
     "tune_xgb_quantile",

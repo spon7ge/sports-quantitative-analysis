@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
+import joblib
 import numpy as np
+import pandas as pd
 
 from src.models.settlement import maximum_minutes
 
@@ -191,3 +194,62 @@ def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTa
         fold_ranges=fold_ranges,
         oof=selected,
     )
+
+
+def save_tail_sidecar(tables: MinuteTailTables, path) -> Path:
+    """Persist a MinuteTailTables payload. Does not require four folds."""
+    out = Path(path)
+    payload = {
+        "arrays": tables.arrays,
+        "floor": tables.floor,
+        "quantile_levels": tables.quantile_levels,
+        "early_stop": tables.early_stop,
+        "train_tail_frac": tables.train_tail_frac,
+        "holdout_start": tables.holdout_start,
+        "grouping": tables.grouping,
+        "groups": tables.groups,
+        "folds": tables.folds,
+        "fold_ranges": tables.fold_ranges,
+        "oof": tables.oof,
+    }
+    joblib.dump(payload, out)
+    return out
+
+
+def load_tail_sidecar(path) -> MinuteTailTables:
+    """Load a sidecar and reject anything that is not the pinned four-fold contract."""
+    payload = joblib.load(path)
+    if payload.get("floor") != KNOT_FLOOR:
+        raise ValueError("floor")
+    if tuple(payload.get("quantile_levels", ())) != QUANTILE_LEVELS:
+        raise ValueError("quantile")
+    if tuple(payload.get("folds", ())) != (1, 2, 3, 4):
+        raise ValueError("fold")
+    grouping = payload.get("grouping") or {}
+    if grouping.get("lower") != "starting" or grouping.get("upper") != "starting":
+        raise ValueError("grouping")
+    return MinuteTailTables(
+        arrays=payload["arrays"],
+        floor=payload["floor"],
+        quantile_levels=tuple(payload["quantile_levels"]),
+        early_stop=payload.get("early_stop", "train_tail"),
+        train_tail_frac=payload.get("train_tail_frac", 0.10),
+        holdout_start=payload.get("holdout_start", "2025-10-21"),
+        grouping=dict(grouping),
+        groups=tuple(payload.get("groups", (0, 1))),
+        folds=tuple(payload["folds"]),
+        fold_ranges=payload.get("fold_ranges"),
+        oof=payload.get("oof"),
+    )
+
+
+def groups_for_frame(starting, tables: MinuteTailTables) -> tuple[np.ndarray, np.ndarray]:
+    """Map draw-time starting flags to lower/upper group ids."""
+    rules = tables.grouping or {}
+    if rules.get("lower") != "starting" or rules.get("upper") != "starting":
+        raise ValueError("grouping")
+    values = pd.to_numeric(starting, errors="coerce")
+    if values.isna().any() or not values.isin([0, 1]).all():
+        raise ValueError("starting")
+    groups = values.astype(int).to_numpy()
+    return groups, groups.copy()
