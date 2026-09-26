@@ -235,3 +235,63 @@ def test_builder_rejects_bad_rows_and_rules():
             fold_ranges=ranges,
             grouping={"lower": "q50_tier", "upper": "starting"},
         )
+
+
+from models.shared import train as train_mod
+from models.shared.train import fit_quantile_models, run_walk_forward
+
+
+class _FakeBooster:
+    def __init__(self, **kwargs):
+        self.eval_rows = None
+
+    def fit(self, X, y, eval_set=None, verbose=False):
+        self.eval_rows = len(eval_set[0][0])
+
+    def predict(self, X):
+        return np.arange(len(X), dtype=float)
+
+
+def test_train_tail_one_date_raises_before_any_booster(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("booster constructed")
+
+    monkeypatch.setattr(train_mod, "XGBRegressor", boom)
+    X = pd.DataFrame({"a": [1.0]})
+    y = pd.Series([2.0])
+    with pytest.raises(ValueError, match="two training dates"):
+        fit_quantile_models(
+            X, y, X, y,
+            xgb_params={"n_estimators": 1},
+            quantiles=[0.5],
+            early_stop="train_tail",
+            train_dates=pd.to_datetime(["2024-01-01"]),
+        )
+
+
+def test_train_tail_walk_forward_stops_on_training_dates_and_keeps_every_fold(monkeypatch):
+    monkeypatch.setattr(train_mod, "XGBRegressor", _FakeBooster)
+    dates = pd.date_range("2024-01-01", periods=10, freq="D")
+    rows = []
+    for day in dates:
+        for player in (1, 2):
+            rows.append({"game_date": day, "a": 1.0, "minutes": 10.0, "starting": player % 2})
+    frame = pd.DataFrame(rows)
+    X = frame[["a"]]
+    y = frame["minutes"]
+    result = run_walk_forward(
+        X, y, frame,
+        xgb_params={"n_estimators": 1},
+        quantiles=[0.5],
+        n_folds=1,
+        train_frac=0.5,
+        step_frac=0.2,
+        early_stop="train_tail",
+    )
+    oof = result["oof"]
+    assert set(oof["fold_id"]) == {1}
+    assert (oof["early_stop"] == "train_tail").all()
+    assert 1 in result["fold_ranges"]
+    assert "q_0.50" in oof.columns
+    assert len(oof) == int(frame["game_date"].isin(frame["game_date"].unique()[5:7]).sum())
+    assert result["models_last"]["q_0.50"].eval_rows < 5
