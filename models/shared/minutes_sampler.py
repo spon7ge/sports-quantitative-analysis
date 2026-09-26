@@ -194,12 +194,10 @@ def tail_bin_shares(y, edge_values, *, tail) -> pd.DataFrame:
     elif tail == "upper":
         misses = actual > edges[:, 0]
         for bin_index in range(n_bins):
-            if bin_index == 0:
+            if bin_index == n_bins - 1:
                 in_bin = actual > edges[:, -1]
             else:
-                lo = edges[:, n_bins - bin_index - 1]
-                hi = edges[:, n_bins - bin_index]
-                in_bin = (actual > lo) & (actual <= hi)
+                in_bin = (actual > edges[:, bin_index]) & (actual <= edges[:, bin_index + 1])
             counts[bin_index] = float(np.sum(in_bin))
     else:
         raise ValueError(f"unknown tail {tail}")

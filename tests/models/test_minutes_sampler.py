@@ -396,6 +396,14 @@ def test_upper_tail_bin_shares_are_a_fraction_of_misses():
     assert report["share_of_misses"].tolist() == pytest.approx([0.2, 0.2, 0.2, 0.2, 0.2])
 
 
+def test_upper_tail_bins_order_from_knot_outward():
+    # Two misses in bin 1 (q95 < y <= Q(0.96)); one in each later bin; one non-miss.
+    y = np.array([30.5, 31.5, 33, 35, 37, 39, 20], dtype=float)
+    edges = np.array([30, 32, 34, 36, 38], dtype=float)
+    report = tail_bin_shares(y, np.broadcast_to(edges, (7, 5)), tail="upper")
+    assert report["share_of_misses"].tolist() == pytest.approx([2 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6])
+
+
 def test_ids_strip_before_digit_check_and_share_a_draw_vector():
     assert canonical_id(" 0021900001 ") == canonical_id(21900001) == "21900001"
     grids = np.vstack([SORTED, SORTED + 15])
