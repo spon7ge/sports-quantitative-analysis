@@ -30,9 +30,12 @@ from models.shared.minutes_sampler import (
     groups_for_frame,
     load_tail_sidecar,
     prepare_quantile_grid,
+    probability_below_line,
     quantile_minutes,
+    row_crps,
     sample_minutes,
     save_tail_sidecar,
+    tail_bin_shares,
 )
 from models.shared.splits import date_walk_forward_folds, prepare_splits, season_holdout_split
 from models.shared.train import (
@@ -61,8 +64,10 @@ __all__ = [
     "load_tail_sidecar",
     "MinuteTailTables",
     "prepare_quantile_grid",
+    "probability_below_line",
     "QUANTILE_LEVELS",
     "quantile_minutes",
+    "row_crps",
     "sample_minutes",
     "monotonize_quantiles",
     "pinball_50",
@@ -77,5 +82,6 @@ __all__ = [
     "save_tail_sidecar",
     "score_quantile_fold",
     "season_holdout_split",
+    "tail_bin_shares",
     "tune_xgb_quantile",
 ]

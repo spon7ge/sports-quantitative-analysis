@@ -358,6 +358,42 @@ def test_missing_starting_raises_at_draw_time_and_is_not_bench():
 
 
 from models.shared.minutes_sampler import canonical_id, sample_minutes
+from models.shared.metrics import pinball_loss
+from models.shared.minutes_sampler import probability_below_line, row_crps, tail_bin_shares
+
+
+def test_probability_below_line_inverts_q_without_draws():
+    grids = _grid(SORTED)
+    groups = np.array([1])
+    at_median = probability_below_line(grids, groups, groups, TABLES, line=20)
+    assert at_median[0] == pytest.approx(0.50)
+    # Group 1 lower table starts at 0.5, so Q(0) = 0.5 * q05 = 5.
+    assert probability_below_line(grids, groups, groups, TABLES, line=5)[0] == 0
+    assert probability_below_line(grids, groups, groups, TABLES, line=80)[0] == 1
+
+
+def test_row_crps_at_the_eleven_levels_is_twice_mean_pinball():
+    y = np.array([21.0])
+    u = np.asarray(QUANTILE_LEVELS, dtype=float)
+    q = np.broadcast_to(SORTED, (1, 11)).copy()
+    got = row_crps(y, q, u)
+    manual = [pinball_loss(y, np.array([knot]), level) for level, knot in zip(u, SORTED)]
+    assert got[0] == pytest.approx(2 * np.mean(manual))
+
+
+def test_tail_bin_shares_are_a_fraction_of_misses():
+    y = np.array([1, 2, 3, 4, 5, 20, 20, 20, 20, 20], dtype=float)
+    edges = np.array([1.5, 2.5, 3.5, 4.5, 6.0])
+    report = tail_bin_shares(y, np.broadcast_to(edges, (10, 5)), tail="lower")
+    assert report["share_of_misses"].tolist() == pytest.approx([0.2, 0.2, 0.2, 0.2, 0.2])
+    assert report["share_of_rows"].sum() == pytest.approx(0.5)
+
+
+def test_upper_tail_bin_shares_are_a_fraction_of_misses():
+    y = np.array([31, 33, 35, 37, 39, 20], dtype=float)
+    edges = np.array([30, 32, 34, 36, 38], dtype=float)
+    report = tail_bin_shares(y, np.broadcast_to(edges, (6, 5)), tail="upper")
+    assert report["share_of_misses"].tolist() == pytest.approx([0.2, 0.2, 0.2, 0.2, 0.2])
 
 
 def test_ids_strip_before_digit_check_and_share_a_draw_vector():

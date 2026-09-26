@@ -108,6 +108,116 @@ def quantile_minutes(u, grids, lower_groups, upper_groups, tables) -> np.ndarray
     return np.clip(out, 0.0, cap)
 
 
+def _row_breakpoints(prepared, lower_group, upper_group, tables):
+    """Build (u, q) knots for one row's Q, including both tails."""
+    q05 = float(prepared[0])
+    q95 = float(prepared[-1])
+    lower_table = _lookup(tables, "lower", lower_group)
+    upper_table = _lookup(tables, "upper", upper_group)
+    n_lower = len(lower_table)
+    n_upper = len(upper_table)
+    lower_grid = np.linspace(0.0, 1.0, n_lower)
+    upper_grid = np.linspace(0.0, 1.0, n_upper)
+    lower_u = lower_grid[:-1] * 0.05
+    lower_q = q05 * empirical_quantile(lower_grid[:-1], lower_table)
+    middle_u = np.asarray(QUANTILE_LEVELS, dtype=float)
+    middle_q = np.asarray(prepared, dtype=float)
+    upper_u = 0.95 + upper_grid[1:] * 0.05
+    upper_q = q95 + empirical_quantile(upper_grid[1:], upper_table)
+    u = np.concatenate([lower_u, middle_u, upper_u])
+    q = np.concatenate([lower_q, middle_q, upper_q])
+    return u, q
+
+
+def _invert_q(u, q, line: float) -> float:
+    """P(M < L) = inf{u : Q(u) >= L}."""
+    if line <= q[0]:
+        return 0.0
+    if line > q[-1]:
+        return 1.0
+    index = int(np.searchsorted(q, line, side="left"))
+    q0 = float(q[index - 1])
+    q1 = float(q[index])
+    u0 = float(u[index - 1])
+    u1 = float(u[index])
+    if q1 == q0:
+        return u0
+    return u0 + (line - q0) / (q1 - q0) * (u1 - u0)
+
+
+def probability_below_line(grids, lower_groups, upper_groups, tables, line) -> np.ndarray:
+    """Price P(M < line) by inverting each row's Q. No draws."""
+    prepared = prepare_quantile_grid(grids)
+    lower_ids = np.asarray(lower_groups)
+    upper_ids = np.asarray(upper_groups)
+    threshold = float(line)
+    out = np.empty(prepared.shape[0], dtype=float)
+    for index in range(prepared.shape[0]):
+        u, q = _row_breakpoints(
+            prepared[index],
+            int(lower_ids[index]),
+            int(upper_ids[index]),
+            tables,
+        )
+        out[index] = _invert_q(u, q, threshold)
+    return out
+
+
+def row_crps(y, q_at_u, u) -> np.ndarray:
+    """Per-row CRPS from pinball at levels u. Does not average across rows."""
+    actual = np.asarray(y, dtype=float)
+    knots = np.asarray(q_at_u, dtype=float)
+    levels = np.asarray(u, dtype=float)
+    if knots.ndim == 1:
+        knots = knots.reshape(1, -1)
+    residual = actual.reshape(-1, 1) - knots
+    loss = np.where(residual >= 0, levels * residual, (levels - 1.0) * residual)
+    return 2.0 * np.mean(loss, axis=1)
+
+
+def tail_bin_shares(y, edge_values, *, tail) -> pd.DataFrame:
+    """Fraction of rows and of tail misses falling in each edge bin."""
+    actual = np.asarray(y, dtype=float)
+    edges = np.asarray(edge_values, dtype=float)
+    if edges.ndim == 1:
+        edges = edges.reshape(1, -1)
+    n_rows, n_bins = edges.shape
+    counts = np.zeros(n_bins, dtype=float)
+    if tail == "lower":
+        misses = actual < edges[:, -1]
+        for bin_index in range(n_bins):
+            if bin_index == 0:
+                in_bin = actual < edges[:, 0]
+            else:
+                in_bin = (actual >= edges[:, bin_index - 1]) & (actual < edges[:, bin_index])
+            counts[bin_index] = float(np.sum(in_bin))
+    elif tail == "upper":
+        misses = actual > edges[:, 0]
+        for bin_index in range(n_bins):
+            if bin_index == 0:
+                in_bin = actual > edges[:, -1]
+            else:
+                lo = edges[:, n_bins - bin_index - 1]
+                hi = edges[:, n_bins - bin_index]
+                in_bin = (actual > lo) & (actual <= hi)
+            counts[bin_index] = float(np.sum(in_bin))
+    else:
+        raise ValueError(f"unknown tail {tail}")
+    miss_count = float(np.sum(misses))
+    share_of_rows = counts / float(n_rows)
+    if miss_count == 0:
+        share_of_misses = np.full(n_bins, np.nan, dtype=float)
+    else:
+        share_of_misses = counts / miss_count
+    return pd.DataFrame(
+        {
+            "bin": np.arange(1, n_bins + 1),
+            "share_of_rows": share_of_rows,
+            "share_of_misses": share_of_misses,
+        }
+    )
+
+
 def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTables:
     """Build pinned lower/upper empirical tables from out-of-fold misses."""
     rules = dict(_DEFAULT_GROUPING) if grouping is None else dict(grouping)
