@@ -356,3 +356,53 @@ def test_missing_starting_raises_at_draw_time_and_is_not_bench():
     with pytest.raises(ValueError, match="grouping"):
         groups_for_frame(pd.Series([0, 1]), tables)
 
+
+from models.shared.minutes_sampler import canonical_id, sample_minutes
+
+
+def test_ids_strip_before_digit_check_and_share_a_draw_vector():
+    assert canonical_id(" 0021900001 ") == canonical_id(21900001) == "21900001"
+    grids = np.vstack([SORTED, SORTED + 15])
+    groups = np.array([1, 1])
+    kwargs = dict(
+        grids=grids,
+        lower_groups=groups,
+        upper_groups=groups,
+        tables=TABLES,
+        seed=42,
+        draws=32,
+    )
+    padded = sample_minutes(player_ids=["p", "p"], game_ids=[" 0021900001 ", "g2"], **kwargs)
+    plain = sample_minutes(player_ids=["p", "p"], game_ids=[21900001, "g2"], **kwargs)
+    np.testing.assert_allclose(padded, plain)
+
+
+def test_shuffle_keeps_player_games_and_streams_are_not_identical():
+    grids = np.vstack([SORTED, SORTED + 15])
+    groups = np.array([1, 0])
+    first = sample_minutes(grids, groups, groups, ["a", "b"], ["g1", "g2"], TABLES, seed=7, draws=10_000)
+    second = sample_minutes(grids[::-1], groups[::-1], groups[::-1], ["b", "a"], ["g2", "g1"], TABLES, seed=7, draws=10_000)
+    np.testing.assert_allclose(first[0], second[1])
+    np.testing.assert_allclose(first[1], second[0])
+    assert abs(np.corrcoef(first[0], first[1])[0, 1]) < 0.05
+    assert not np.allclose(first[0], first[1])
+    labeled = sample_minutes(grids[:1], groups[:1], groups[:1], ["a"], ["g1"], TABLES, seed=7, draws=64)
+    from hashlib import sha256
+    material = f"7|{canonical_id('a')}|{canonical_id('g1')}".encode()
+    unlabeled_seed = int.from_bytes(sha256(material).digest()[:8], "little")
+    unlabeled = np.random.default_rng(unlabeled_seed).random(64)
+    assert not np.allclose(labeled[0], unlabeled)
+
+
+def test_median_draw_tracks_each_rows_q50_and_missing_id_raises():
+    low = SORTED.copy()
+    high = SORTED.copy()
+    high[:] = SORTED + 15
+    grids = np.vstack([low, high])
+    groups = np.array([1, 1])
+    draws = sample_minutes(grids, groups, groups, ["a", "b"], ["g1", "g2"], TABLES, seed=3, draws=10_000)
+    assert abs(np.median(draws[0]) - low[5]) < abs(np.median(draws[0]) - high[5])
+    assert abs(np.median(draws[1]) - high[5]) < abs(np.median(draws[1]) - low[5])
+    with pytest.raises(ValueError, match="id"):
+        sample_minutes(grids[:1], groups[:1], groups[:1], [None], ["g1"], TABLES, seed=1, draws=4)
+

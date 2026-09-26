@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 import joblib
@@ -10,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 from src.models.settlement import maximum_minutes
+
+_INT_STRING = re.compile(r"^[+-]?\d+$")
 
 QUANTILE_LEVELS = (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
 KNOT_FLOOR = 1e-3
@@ -253,3 +258,59 @@ def groups_for_frame(starting, tables: MinuteTailTables) -> tuple[np.ndarray, np
         raise ValueError("starting")
     groups = values.astype(int).to_numpy()
     return groups, groups.copy()
+
+
+def canonical_id(value) -> str:
+    """Normalize player/game ids for stable per-row RNG streams."""
+    if value is None:
+        raise ValueError("id")
+    if isinstance(value, float) and math.isnan(value):
+        raise ValueError("id")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("id")
+        if _INT_STRING.fullmatch(stripped):
+            return str(int(stripped))
+        return stripped
+    if pd.isna(value):
+        raise ValueError("id")
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        if float(value).is_integer():
+            return str(int(value))
+        raise ValueError("id")
+    text = str(value).strip()
+    if not text:
+        raise ValueError("id")
+    if _INT_STRING.fullmatch(text):
+        return str(int(text))
+    return text
+
+
+def sample_minutes(
+    grids,
+    lower_groups,
+    upper_groups,
+    player_ids,
+    game_ids,
+    tables,
+    *,
+    seed=42,
+    draws=10_000,
+) -> np.ndarray:
+    """Draw uniforms on a labeled minutes stream, then map through Q."""
+    players = list(player_ids)
+    games = list(game_ids)
+    if len(players) != len(games):
+        raise ValueError("id")
+    uniforms = np.empty((len(players), int(draws)), dtype=float)
+    for index, (player_id, game_id) in enumerate(zip(players, games)):
+        material = (
+            f"{seed}|minutes|{canonical_id(player_id)}|{canonical_id(game_id)}"
+        ).encode("utf-8")
+        digest = sha256(material).digest()
+        rng = np.random.default_rng(int.from_bytes(digest[:8], "little"))
+        uniforms[index] = rng.random(int(draws))
+    return quantile_minutes(uniforms, grids, lower_groups, upper_groups, tables)
