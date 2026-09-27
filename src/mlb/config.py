@@ -48,7 +48,7 @@ class MlbConfig:
     prediction_interval: float = 0.80
     lines: tuple[float, ...] = (4.5, 5.5, 6.5)
     early_exit_bf: int = 15
-    pitcher_k_prior_strength: float = 175.0
+    pitcher_k_prior_strength: float = 100.0
     batter_k_prior_strength: float = 225.0
     batter_hand_prior_strength: float = 400.0
     rate_limit_seconds: float = 1.0
@@ -57,6 +57,7 @@ class MlbConfig:
     workload_min_train_starts: int = 24
     workload_l2: float = 1.0
     strikeout_l2: float = 2.0
+    strikeout_free_bf_coef: bool = False
     forecast_horizon_hours: float = 2.0
     quote_latency_seconds: float = 0.0
     folds: tuple[FoldWindow, ...] = field(
@@ -134,7 +135,7 @@ def load_config(path: str | Path | None = None) -> MlbConfig:
         lines=tuple(float(x) for x in raw.get("lines", (4.5, 5.5, 6.5))),
         early_exit_bf=int(raw.get("early_exit_bf", 15)),
         pitcher_k_prior_strength=float(
-            raw.get("pitcher_k_prior_strength", 175.0)
+            raw.get("pitcher_k_prior_strength", 100.0)
         ),
         batter_k_prior_strength=float(
             raw.get("batter_k_prior_strength", 225.0)
@@ -150,6 +151,7 @@ def load_config(path: str | Path | None = None) -> MlbConfig:
         ),
         workload_l2=float(raw.get("workload_l2", 1.0)),
         strikeout_l2=float(raw.get("strikeout_l2", 2.0)),
+        strikeout_free_bf_coef=bool(raw.get("strikeout_free_bf_coef", False)),
         forecast_horizon_hours=float(
             raw.get("forecast_horizon_hours", 2.0)
         ),

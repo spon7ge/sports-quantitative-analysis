@@ -6,10 +6,21 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from src.mlb.cli import build_parser, main
+from src.mlb.cli import _ingest_progress, build_parser, main
 from src.mlb.config import load_config
 from src.mlb.schemas import GAME_VERSION_COLUMNS, ID_MAP_COLUMNS, coerce_frame
 from src.mlb.storage import MlbStore
+
+
+def test_ingest_progress_prints_position_and_eta(capsys: pytest.CaptureFixture[str]) -> None:
+    report = _ingest_progress("play-by-play", 10)
+    report(1, 529406)
+    report(2, 529407)
+    err = capsys.readouterr().err
+    assert "play-by-play 1/10 (10.0%) game_pk=529406" in err
+    assert "eta calculating" in err
+    assert "play-by-play 2/10 (20.0%) game_pk=529407" in err
+    assert "eta calculating" not in err.split("game_pk=529407", 1)[1]
 
 
 def test_help_lists_subcommands() -> None:

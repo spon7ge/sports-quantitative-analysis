@@ -7,9 +7,12 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
 import pandas as pd
 from src.mlb.config import load_config
+from src.mlb.schemas import TABLE_SCHEMAS, empty_frame
+from src.mlb.storage import MlbStore
 from src.mlb.pipeline.http import HttpClient
 from src.mlb.pipeline.ingest import (
     ingest_chadwick,
@@ -23,6 +26,15 @@ from src.mlb.schemas import ID_MAP_COLUMNS, PITCH_EVENT_COLUMNS
 def _tmp_config(tmp_path):
     cfg = load_config()
     return replace(cfg, data_dir=tmp_path / "data", artifact_dir=tmp_path / "artifacts")
+
+
+def test_write_table_replaces_the_previous_file(tmp_path) -> None:
+    store = MlbStore(_tmp_config(tmp_path))
+    empty = empty_frame(TABLE_SCHEMAS["id_map"])
+    store.write_table("id_map", empty)
+    store.write_table("id_map", empty)
+    files = list(store.table_path("id_map").rglob("*.parquet"))
+    assert [path.name for path in files] == ["part-0.parquet"]
 
 
 def test_snapshot_raw_writes_payload_and_hash(tmp_path) -> None:
@@ -107,3 +119,29 @@ def test_http_client_sleeps_and_sends_user_agent(tmp_path) -> None:
         config.user_agent in request.headers.values()
         or request.get_header("User-agent") == config.user_agent
     )
+    context = urlopen.call_args.kwargs["context"]
+    assert context is not None
+    assert context.get_ca_certs()  # python.org installs have no default CA bundle
+    assert urlopen.call_args.kwargs["timeout"] == 30
+
+
+def test_http_client_retries_transient_timeout(tmp_path) -> None:
+    config = replace(_tmp_config(tmp_path), rate_limit_seconds=0.0)
+    client = HttpClient(config)
+    ok = MagicMock()
+    ok.read.return_value = b"ok"
+    ok.__enter__.return_value = ok
+    ok.__exit__.return_value = False
+    timeout = URLError(TimeoutError("[Errno 60] Operation timed out"))
+    with (
+        patch("src.mlb.pipeline.http.time.sleep") as sleep,
+        patch(
+            "src.mlb.pipeline.http.urlopen",
+            side_effect=[timeout, timeout, ok],
+        ) as urlopen,
+    ):
+        body = client("https://statsapi.mlb.com/api/v1.1/game/1/feed/live")
+    assert body == b"ok"
+    assert urlopen.call_count == 3
+    backoffs = [call.args[0] for call in sleep.call_args_list if call.args[0] > 0]
+    assert backoffs == [1.0, 2.0]

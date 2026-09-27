@@ -12,16 +12,11 @@ from src.features.points import (
     CURRENT_PLUS_PTS_MEAN_10,
     CURRENT_POINTS_41,
     CURRENT_POINTS_FEATURES,
+    DIRECT_POINTS_FEATURES,
     LEAN_POINTS_37,
     LEAN_POINTS_FEATURES,
     POINTS_SAMPLER_FEATURES,
     add_points_features,
-)
-from src.models.xgboost_models.points import (
-    DEFAULT_POINTS_FEATURES,
-    DIRECT_POINTS_FEATURES,
-    XGBoostPointsModel,
-    add_predicted_minutes_oof,
 )
 
 
@@ -361,51 +356,29 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         self,
     ) -> None:
         overlap = FORBIDDEN_FEATURE_COLUMNS.intersection(
-            DEFAULT_POINTS_FEATURES
+            CURRENT_POINTS_FEATURES
         )
         self.assertEqual(overlap, set())
-        self.assertNotIn("dnp_rate_10", DEFAULT_POINTS_FEATURES)
+        self.assertNotIn("dnp_rate_10", CURRENT_POINTS_FEATURES)
         self.assertIn(
             "predicted_minutes_oof",
-            DEFAULT_POINTS_FEATURES,
+            CURRENT_POINTS_FEATURES,
         )
         self.assertIn(
             "expected_points_rate",
-            DEFAULT_POINTS_FEATURES,
+            CURRENT_POINTS_FEATURES,
         )
         self.assertNotIn(
             "predicted_minutes_oof",
             DIRECT_POINTS_FEATURES,
         )
 
-        model = XGBoostPointsModel(league="nba")
-        self.assertEqual(
-            model.feature_columns,
-            DEFAULT_POINTS_FEATURES,
-        )
-        self.assertEqual(
-            model.regressor.objective,
-            "reg:squarederror",
-        )
-
 
 class PointsFeatureContractTests(unittest.TestCase):
-    def test_default_equals_current_41(self) -> None:
-        self.assertEqual(
-            DEFAULT_POINTS_FEATURES,
-            list(CURRENT_POINTS_FEATURES),
-        )
+    def test_current_contract_is_41_columns(self) -> None:
         self.assertEqual(len(CURRENT_POINTS_FEATURES), 41)
         self.assertEqual(len(CURRENT_POINTS_41), 41)
-        model = XGBoostPointsModel(league="nba")
-        self.assertEqual(
-            model.feature_columns,
-            list(CURRENT_POINTS_FEATURES),
-        )
-        self.assertEqual(
-            model.feature_contract_name,
-            "current41",
-        )
+        self.assertEqual(CURRENT_POINTS_41, CURRENT_POINTS_FEATURES)
 
     def test_lean_keeps_volume_stack(self) -> None:
         self.assertEqual(len(LEAN_POINTS_FEATURES), 37)
@@ -466,84 +439,14 @@ class PointsFeatureContractTests(unittest.TestCase):
     ) -> None:
         forbidden = {"minutes", "min", "start_position"}
         for contract in (
-            DEFAULT_POINTS_FEATURES,
             CURRENT_POINTS_FEATURES,
+            DIRECT_POINTS_FEATURES,
             LEAN_POINTS_FEATURES,
         ):
             self.assertEqual(
                 forbidden.intersection(contract),
                 set(),
             )
-
-    def test_custom_feature_list_is_named_custom(
-        self,
-    ) -> None:
-        model = XGBoostPointsModel(
-            league="nba",
-            feature_columns=["pts_mean_3"],
-        )
-        self.assertEqual(
-            model.feature_contract_name,
-            "custom",
-        )
-
-
-class PredictedMinutesOofTests(unittest.TestCase):
-    def test_oof_minutes_are_not_actual_game_minutes(self) -> None:
-        frame = _rows(
-            [
-                _player_row(1, "2024-01-01", 10, pts=8, game_id=1),
-                _player_row(1, "2024-01-03", 20, pts=16, game_id=2),
-                _player_row(1, "2024-01-05", 30, pts=24, game_id=3),
-                _player_row(1, "2024-01-07", 40, pts=32, game_id=4),
-            ]
-        )
-        featured = add_points_features(frame)
-        train = featured.index[featured["game_id"].isin([1, 2])]
-        valid = featured.index[featured["game_id"].isin([3, 4])]
-        spy = _SpyMinutesModel()
-
-        stacked = add_predicted_minutes_oof(
-            featured,
-            minutes_model_factory=lambda: spy,
-            splits=[(train, valid)],
-        )
-        later = stacked.loc[
-            stacked["game_id"].isin([3, 4])
-        ]
-
-        self.assertTrue(
-            later["predicted_minutes_oof"].eq(15.0).all()
-        )
-        self.assertFalse(
-            later["predicted_minutes_oof"].eq(
-                later["target_minutes"]
-            ).any()
-        )
-        self.assertEqual(spy.fitted_game_ids, [{1, 2}])
-        self.assertAlmostEqual(
-            later.iloc[0]["expected_points_rate"],
-            15.0 * later.iloc[0]["pts_per_min_10"],
-        )
-
-
-class _SpyMinutesModel:
-    def __init__(self) -> None:
-        self.fitted_game_ids: list[set] = []
-
-    def fit(
-        self,
-        frame: pd.DataFrame,
-        *,
-        target_column: str = "minutes",
-        date_column: str = "game_date",
-    ) -> _SpyMinutesModel:
-        self.fitted_game_ids.append(set(frame["game_id"]))
-        return self
-
-    def predict_mean(self, rows: pd.DataFrame) -> np.ndarray:
-        return np.full(len(rows), 15.0)
-
 
 def _player_row(
     player_id: int,

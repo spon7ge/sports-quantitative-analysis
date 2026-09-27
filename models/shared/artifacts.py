@@ -60,6 +60,35 @@ def load_model_bundle(path: str | Path) -> dict[str, Any]:
     return bundle
 
 
+_TRAINING_PARAM_KEYS = (
+    "objective",
+    "n_estimators",
+    "max_depth",
+    "learning_rate",
+    "subsample",
+    "colsample_bytree",
+    "reg_alpha",
+    "reg_lambda",
+    "min_child_weight",
+    "n_jobs",
+    "random_state",
+    "early_stopping_rounds",
+)
+
+
+def quantile_training_params(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Fold-model hyperparameters from a saved bundle.
+
+    ``quantile_alpha`` is omitted so each quantile can set its own level.
+    """
+    model = bundle["quantile_models"]["q_0.50"]
+    raw = model.get_params()
+    missing = [key for key in _TRAINING_PARAM_KEYS if key not in raw]
+    if missing:
+        raise KeyError(f"bundle is missing training params: {missing}")
+    return {key: raw[key] for key in _TRAINING_PARAM_KEYS}
+
+
 def monotonize_quantiles(
     preds: Mapping[str, np.ndarray],
 ) -> dict[str, np.ndarray]:

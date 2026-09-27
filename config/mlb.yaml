@@ -10,15 +10,16 @@ tail_mass_threshold: 0.001
 prediction_interval: 0.80
 lines: [4.5, 5.5, 6.5]
 early_exit_bf: 15
-pitcher_k_prior_strength: 175.0
+pitcher_k_prior_strength: 100.0
 batter_k_prior_strength: 225.0
 batter_hand_prior_strength: 400.0
-rate_limit_seconds: 1.0
+rate_limit_seconds: 0.9
 user_agent: nba-quant-mlb-research/1.0
 posterior_draws: 64
 workload_min_train_starts: 24
 workload_l2: 1.0
 strikeout_l2: 2.0
+strikeout_free_bf_coef: false
 forecast_horizon_hours: 2.0
 quote_latency_seconds: 0.0
 frozen_eval_start: "2023-01-01"

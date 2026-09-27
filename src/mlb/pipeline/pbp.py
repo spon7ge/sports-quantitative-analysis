@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,7 @@ def ingest_play_by_play(
     game_pks: list[int],
     http: HttpFn | None = None,
     people: pd.DataFrame | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> pd.DataFrame:
     """Ingest game PAs, retaining the latest wall-clock version of each PA."""
     store = MlbStore(config)
@@ -101,7 +103,9 @@ def ingest_play_by_play(
     if people is None:
         people = store.read_table("id_map")
     frames: list[pd.DataFrame] = []
-    for game_pk in game_pks:
+    for done, game_pk in enumerate(game_pks, start=1):
+        if progress is not None:
+            progress(done, int(game_pk))
         params = {"game_pk": int(game_pk)}
         ingested_at = _now_utc()
         if http is None:

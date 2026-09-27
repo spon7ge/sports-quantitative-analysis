@@ -2,6 +2,9 @@ data/bronze/
 data/silver/
 data/research/
 data/mlb/
+data/props/
+data/odds/*.json
+src/data/
 artifacts/mlb/
 .ipynb_checkpoints/
 __pycache__/
@@ -11,3 +14,4 @@ artifacts/models/
 .pytest_cache/
 .venv/
 .env
+.worktrees/

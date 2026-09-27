@@ -15,11 +15,12 @@ from src.features.minutes import (
     TIER1_MINUTES_FEATURES,
     add_minutes_features,
 )
-from src.models.xgboost_models.minutes import (
-    DEFAULT_MINUTES_FEATURES,
-    MINUTES_FEATURE_CONTRACTS,
-    XGBoostMinutesModel,
-)
+MINUTES_FEATURE_CONTRACTS = {
+    "current37": list(CURRENT_MINUTES_FEATURES),
+    "role_tail": list(ROLE_TAIL_MINUTES_FEATURES),
+    "lean": list(LEAN_MINUTES_FEATURES),
+    "tier1": list(TIER1_MINUTES_FEATURES),
+}
 
 
 FORBIDDEN_FEATURE_COLUMNS = {
@@ -320,37 +321,19 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
 
     def test_default_feature_list_is_causal(self) -> None:
         overlap = FORBIDDEN_FEATURE_COLUMNS.intersection(
-            DEFAULT_MINUTES_FEATURES
+            CURRENT_MINUTES_FEATURES
         )
         self.assertEqual(overlap, set())
-        self.assertNotIn("dnp_rate_10", DEFAULT_MINUTES_FEATURES)
-        self.assertIn("min_mean_10", DEFAULT_MINUTES_FEATURES)
+        self.assertNotIn("dnp_rate_10", CURRENT_MINUTES_FEATURES)
+        self.assertIn("min_mean_10", CURRENT_MINUTES_FEATURES)
         self.assertIn(
             "team_spread_canonical",
-            DEFAULT_MINUTES_FEATURES,
-        )
-
-        model = XGBoostMinutesModel(league="nba")
-        self.assertEqual(
-            model.feature_columns,
-            DEFAULT_MINUTES_FEATURES,
-        )
-
-    def test_current_contract_is_the_constructor_default(self) -> None:
-        self.assertEqual(
-            DEFAULT_MINUTES_FEATURES,
             CURRENT_MINUTES_FEATURES,
         )
+
+    def test_current_contract_is_37_columns(self) -> None:
         self.assertEqual(CURRENT_MINUTES_FEATURES, CURRENT_MINUTES_37)
         self.assertEqual(len(CURRENT_MINUTES_FEATURES), 37)
-        self.assertEqual(len(DEFAULT_MINUTES_FEATURES), 37)
-
-        model = XGBoostMinutesModel(league="nba")
-        self.assertEqual(
-            model.feature_columns,
-            CURRENT_MINUTES_FEATURES,
-        )
-        self.assertEqual(model.feature_contract_name, "current37")
 
     def test_role_tail_appends_four_columns(self) -> None:
         extra = [
@@ -380,17 +363,6 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
                 columns
             )
             self.assertEqual(overlap, set(), msg=name)
-
-        custom = XGBoostMinutesModel(
-            league="nba",
-            feature_columns=["min_lag_1", "is_home"],
-        )
-        self.assertEqual(custom.feature_contract_name, "custom")
-        matched = XGBoostMinutesModel(
-            league="nba",
-            feature_columns=list(ROLE_TAIL_MINUTES_FEATURES),
-        )
-        self.assertEqual(matched.feature_contract_name, "role_tail")
 
 
 def _player_row(

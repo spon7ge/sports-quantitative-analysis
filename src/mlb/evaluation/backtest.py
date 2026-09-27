@@ -132,6 +132,120 @@ def _score_predictions(
     return scores
 
 
+def _loss_vectors(predictions: pd.DataFrame, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    pmf = _pmf_matrix(predictions)
+    y_arr = np.asarray(y, dtype=float)
+    return (
+        np.asarray(pmf_nll(pmf, y_arr), dtype=float),
+        np.asarray(discrete_crps(pmf, y_arr), dtype=float),
+    )
+
+
+def _newey_west_se(diffs: np.ndarray, lags: int | None = None) -> float:
+    series = np.asarray(diffs, dtype=float)
+    series = series[np.isfinite(series)]
+    n = int(series.size)
+    if n < 2:
+        return float("nan")
+    centered = series - float(series.mean())
+    if lags is None:
+        lags = max(1, int(n ** (1.0 / 3.0)))
+    lags = min(int(lags), n - 1)
+    gamma0 = float(np.dot(centered, centered) / n)
+    lrv = gamma0
+    for lag in range(1, lags + 1):
+        gamma = float(np.dot(centered[lag:], centered[:-lag]) / n)
+        weight = 1.0 - lag / (lags + 1)
+        lrv += 2.0 * weight * gamma
+    return float(np.sqrt(max(lrv, 0.0) / n))
+
+
+def paired_loss_stats(diffs: np.ndarray) -> dict[str, Any]:
+    """Mean paired loss delta, iid SE, Newey-West DM statistic, and 95% CI."""
+    series = np.asarray(diffs, dtype=float).reshape(-1)
+    series = series[np.isfinite(series)]
+    n = int(series.size)
+    if n == 0:
+        return {
+            "n": 0,
+            "mean_diff": float("nan"),
+            "paired_se": float("nan"),
+            "hac_se": float("nan"),
+            "dm_stat": float("nan"),
+            "ci_low": float("nan"),
+            "ci_high": float("nan"),
+            "inside_noise": True,
+        }
+    mean_diff = float(series.mean())
+    if n == 1:
+        paired_se = float("nan")
+    else:
+        paired_se = float(series.std(ddof=1) / np.sqrt(n))
+    hac_se = _newey_west_se(series)
+    if not np.isfinite(hac_se) or hac_se == 0.0:
+        dm_stat = 0.0 if mean_diff == 0.0 else float(np.copysign(np.inf, mean_diff))
+        half = 0.0
+    else:
+        dm_stat = float(mean_diff / hac_se)
+        half = 1.96 * hac_se
+    ci_low = mean_diff - half
+    ci_high = mean_diff + half
+    return {
+        "n": n,
+        "mean_diff": mean_diff,
+        "paired_se": paired_se,
+        "hac_se": float(hac_se) if np.isfinite(hac_se) else float("nan"),
+        "dm_stat": dm_stat,
+        "ci_low": float(ci_low),
+        "ci_high": float(ci_high),
+        "inside_noise": bool(ci_low <= 0.0 <= ci_high),
+    }
+
+
+def format_paired_comparison_table(frame: pd.DataFrame) -> str:
+    """Print model vs ``shrunk_kbf`` paired deltas with an inside-noise marker."""
+    if frame is None or frame.empty:
+        return "no paired comparisons"
+    lines = [
+        "Paired deltas vs shrunk_kbf (candidate - reference; negative = better)",
+    ]
+    vs = frame.loc[frame["reference"].astype(str) == "shrunk_kbf"].copy()
+    if vs.empty:
+        vs = frame.copy()
+    for metric in ("pmf_nll", "discrete_crps"):
+        part = vs.loc[vs["metric"] == metric]
+        if part.empty:
+            continue
+        lines.append("")
+        lines.append(f"=== {metric} ===")
+        lines.append(
+            f"{'fold':<12} {'model vs shrunk_kbf':<28} {'n':>6} "
+            f"{'diff':>10} {'paired_se':>10} {'dm':>8} {'95% CI':>24} {'flag':>14}"
+        )
+        ordered = part.sort_values(["fold", "model"], kind="mergesort")
+        for row in ordered.itertuples(index=False):
+            flag = "INSIDE_NOISE" if bool(row.inside_noise) else ""
+            ci = f"[{float(row.ci_low):.4f}, {float(row.ci_high):.4f}]"
+            label = f"{row.model} vs {row.reference}"
+            dm = row.dm_stat
+            dm_txt = f"{dm:8.2f}" if np.isfinite(dm) else f"{dm:>8}"
+            lines.append(
+                f"{str(row.fold):<12} {label:<28} {int(row.n):>6} "
+                f"{float(row.mean_diff):10.5f} {float(row.paired_se):10.5f} "
+                f"{dm_txt} {ci:>24} {flag:>14}"
+            )
+    return "\n".join(lines)
+
+
+def _date_order(frame: pd.DataFrame, mask: np.ndarray) -> np.ndarray:
+    n = int(np.asarray(mask).sum())
+    order = np.arange(n, dtype=int)
+    if "game_date" not in frame.columns:
+        return order
+    dates = pd.to_datetime(frame.loc[mask, "game_date"], errors="coerce")
+    return np.argsort(dates.to_numpy(), kind="mergesort")
+
+
 def _skeleton_feature_rows(
     tables: dict[str, pd.DataFrame], config: MlbConfig
 ) -> pd.DataFrame:
@@ -456,6 +570,7 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
     fold_records: list[dict[str, Any]] = []
     score_rows: list[dict[str, Any]] = []
     baseline_score_rows: list[dict[str, Any]] = []
+    paired_rows: list[dict[str, Any]] = []
     prediction_parts: list[pd.DataFrame] = []
 
     for (train_idx, test_idx), window in zip(folds, config.folds, strict=False):
@@ -523,10 +638,14 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
 
         y = pd.to_numeric(test["strikeouts"], errors="coerce").to_numpy(dtype=float)
         finite = np.isfinite(y)
+        fold_losses: dict[str, dict[str, np.ndarray]] = {}
         if finite.any():
-            scores = _score_predictions(
-                fold_pred.loc[finite].reset_index(drop=True), y[finite], config, rng
-            )
+            order = _date_order(test, finite)
+            scored_model = fold_pred.loc[finite].reset_index(drop=True).iloc[order]
+            y_model = y[finite][order]
+            nll_model, crps_model = _loss_vectors(scored_model, y_model)
+            fold_losses["strikeout_nb"] = {"pmf_nll": nll_model, "discrete_crps": crps_model}
+            scores = _score_predictions(scored_model, y_model, config, rng)
             scores["fold"] = window.name
             scores["model"] = "strikeout_nb"
             scores["method"] = str(fold_records[-1].get("method", "glm"))
@@ -534,10 +653,8 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
             for name, frame in baselines.items():
                 aligned = frame.reset_index(drop=True)
                 if "strikeouts" in test.columns and len(aligned) == len(test):
-                    yy = y
-                    mask = finite
-                    scored = aligned.loc[mask].reset_index(drop=True)
-                    y_use = yy[mask]
+                    scored = aligned.loc[finite].reset_index(drop=True).iloc[order]
+                    y_use = y_model
                 elif "strikeouts" in aligned.columns:
                     y_use = pd.to_numeric(
                         aligned["strikeouts"], errors="coerce"
@@ -545,6 +662,11 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
                     mask = np.isfinite(y_use)
                     scored = aligned.loc[mask].reset_index(drop=True)
                     y_use = y_use[mask]
+                    alt_order = _date_order(
+                        scored, np.ones(len(scored), dtype=bool)
+                    )
+                    scored = scored.iloc[alt_order]
+                    y_use = y_use[alt_order]
                 else:
                     continue
                 if len(scored) == 0:
@@ -553,6 +675,28 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
                 bscores["fold"] = window.name
                 bscores["model"] = name
                 baseline_score_rows.append(bscores)
+                nll_b, crps_b = _loss_vectors(scored, y_use)
+                fold_losses[name] = {"pmf_nll": nll_b, "discrete_crps": crps_b}
+            reference = fold_losses.get("shrunk_kbf")
+            if reference is not None:
+                for model_name, losses in fold_losses.items():
+                    if model_name == "shrunk_kbf":
+                        continue
+                    for metric in ("pmf_nll", "discrete_crps"):
+                        left = losses[metric]
+                        right = reference[metric]
+                        if left.shape != right.shape:
+                            continue
+                        stats = paired_loss_stats(left - right)
+                        stats.update(
+                            {
+                                "fold": window.name,
+                                "model": model_name,
+                                "reference": "shrunk_kbf",
+                                "metric": metric,
+                            }
+                        )
+                        paired_rows.append(stats)
 
     predictions = (
         pd.concat(prediction_parts, ignore_index=True)
@@ -563,6 +707,9 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
     baseline_scores = (
         pd.DataFrame(baseline_score_rows) if baseline_score_rows else pd.DataFrame()
     )
+    paired_scores = pd.DataFrame(paired_rows) if paired_rows else pd.DataFrame()
+    if not paired_scores.empty:
+        LOGGER.info("\n%s", format_paired_comparison_table(paired_scores))
 
     market = pd.DataFrame()
     if quotes is not None and not quotes.empty and not predictions.empty:
@@ -592,6 +739,7 @@ def run_backtest(tables: dict[str, pd.DataFrame], config: MlbConfig) -> dict[str
         "folds": fold_records,
         "scores": scores,
         "baseline_scores": baseline_scores,
+        "paired_scores": paired_scores,
         "predictions": predictions,
         "market": market,
     }

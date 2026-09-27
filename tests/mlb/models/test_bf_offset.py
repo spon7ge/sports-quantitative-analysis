@@ -76,6 +76,50 @@ def test_expected_k_scales_with_predicted_bf_oof(mlb_config) -> None:
     assert float(np.mean(np.abs(ratio - 2.0) < 0.1)) > 0.9
 
 
+def test_free_bf_coef_default_keeps_hard_offset(mlb_config) -> None:
+    train = _k_frame()
+    model = fit_strikeouts(train, mlb_config)
+    assert model.uses_bf_offset is True
+    assert "log_predicted_bf_oof" not in model.feature_names
+    assert getattr(mlb_config, "strikeout_free_bf_coef", False) is False
+
+
+def test_free_bf_coef_moves_log_bf_into_design(mlb_config) -> None:
+    train = _k_frame()
+    config = replace(mlb_config, strikeout_free_bf_coef=True)
+    model = fit_strikeouts(train, config)
+    assert model.uses_bf_offset is False
+    assert model.feature_names[0] == "log_predicted_bf_oof"
+    assert "log_predicted_bf_oof" not in model.centers
+    assert model.extra.get("log_bf_coef") is not None
+    assert np.isfinite(model.extra["log_bf_coef"])
+    if model.cov is not None:
+        assert np.isfinite(model.extra.get("log_bf_se", np.nan))
+    base = train.copy()
+    base["predicted_bf_oof"] = 20.0
+    doubled = base.copy()
+    doubled["predicted_bf_oof"] = 40.0
+    mu_base = predict_strikeout_pmf(model, base, config)["expected_k"].to_numpy()
+    mu_doubled = predict_strikeout_pmf(model, doubled, config)["expected_k"].to_numpy()
+    ratio = float(np.median(mu_doubled / np.clip(mu_base, 1e-8, None)))
+    expected = 2.0 ** float(model.extra["log_bf_coef"])
+    assert ratio == pytest.approx(expected, rel=0.08)
+
+
+def test_free_bf_coef_is_unpenalized(mlb_config) -> None:
+    train = _k_frame(n=80, seed=11)
+    config = replace(mlb_config, strikeout_free_bf_coef=True, strikeout_l2=80.0)
+    model = fit_strikeouts(train, config)
+    log_bf = float(model.extra["log_bf_coef"])
+    others = [
+        abs(float(model.coef[i + 1]))
+        for i, name in enumerate(model.feature_names)
+        if name != "log_predicted_bf_oof"
+    ]
+    assert abs(log_bf) > 0.25
+    assert abs(log_bf) > max(others) * 0.5
+
+
 def test_game_n_batters_faced_is_not_exposure(mlb_config) -> None:
     train = _k_frame()
     model_a = fit_strikeouts(train, mlb_config)

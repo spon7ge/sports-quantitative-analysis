@@ -34,6 +34,10 @@ from src.mlb.schemas import (
 
 LOGGER = logging.getLogger(__name__)
 
+LOG_BF_FEATURE = "log_predicted_bf_oof"
+
+LOG_BF_FEATURE = "log_predicted_bf_oof"
+
 
 @dataclass
 class StrikeoutModel:
@@ -146,6 +150,24 @@ def _log_glm_diagnostics(fold: str, diag: dict[str, Any], *, error: bool = False
         LOGGER.info(message)
 
 
+def _attach_log_bf(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out[LOG_BF_FEATURE] = bf_exposure_offset(out)
+    return out
+
+
+def _coef_se(cov: np.ndarray | None, index: int) -> float:
+    if cov is None:
+        return float("nan")
+    arr = np.asarray(cov, dtype=float)
+    if arr.ndim != 2 or index >= arr.shape[0] or index >= arr.shape[1]:
+        return float("nan")
+    variance = float(arr[index, index])
+    if not np.isfinite(variance) or variance < 0.0:
+        return float("nan")
+    return float(np.sqrt(variance))
+
+
 def fit_strikeouts(
     train: pd.DataFrame,
     config: MlbConfig,
@@ -158,6 +180,7 @@ def fit_strikeouts(
     selection = select_usable_features(prepared, STRIKEOUT_FEATURE_COLUMNS)
     offset = bf_exposure_offset(prepared)
     offset_stats = offset_fit_diagnostics(prepared, offset)
+    free_bf = bool(getattr(config, "strikeout_free_bf_coef", False))
     if not selection.retained:
         diag = build_glm_diagnostics(
             coef=[],
@@ -180,10 +203,22 @@ def fit_strikeouts(
     centers, scales = compute_standardization(
         prepared, selection.retained, selection.medians
     )
+    feature_names = selection.retained
+    medians = dict(selection.medians)
+    fit_offset: np.ndarray | None = offset
+    unpenalized_indices: tuple[int, ...] = ()
+    if free_bf:
+        prepared = _attach_log_bf(prepared)
+        feature_names = (LOG_BF_FEATURE, *selection.retained)
+        medians[LOG_BF_FEATURE] = float(np.median(prepared[LOG_BF_FEATURE].to_numpy()))
+        if not np.isfinite(medians[LOG_BF_FEATURE]):
+            medians[LOG_BF_FEATURE] = 0.0
+        fit_offset = None
+        unpenalized_indices = (1,)
     x = design_matrix(
         prepared,
-        selection.retained,
-        selection.medians,
+        feature_names,
+        medians,
         centers=centers,
         scales=scales,
     )
@@ -200,21 +235,22 @@ def fit_strikeouts(
             x,
             l2=float(config.strikeout_l2),
             default_mu=5.0,
-            feature_names=selection.retained,
+            feature_names=feature_names,
             fold=fold,
             unavailable_columns=dropped,
-            offset=offset,
+            offset=fit_offset,
             require_convergence=True,
+            unpenalized_indices=unpenalized_indices,
         )
     except GlmFitError as exc:
         coef = np.asarray((exc.diagnostics or {}).get("coef", []), dtype=float)
         diag = build_glm_diagnostics(
             coef=coef,
-            feature_names=selection.retained,
+            feature_names=feature_names,
             method=str((exc.diagnostics or {}).get("method", "glm")),
             converged=(exc.diagnostics or {}).get("converged"),
             iterations=(exc.diagnostics or {}).get("fit_iterations"),
-            retained=selection.retained,
+            retained=feature_names,
             dropped=selection.dropped,
             offset_stats=offset_stats,
         )
@@ -222,7 +258,7 @@ def fit_strikeouts(
         exc.diagnostics = diag
         raise
     coef, alpha, cov, method = fit.coef, fit.alpha, fit.cov, fit.method
-    rank, condition, constant = _design_diagnostics(x, selection.retained)
+    rank, condition, constant = _design_diagnostics(x, feature_names)
     if constant:
         raise GlmFitError(
             "fitted design still contains unreported zero-variance columns",
@@ -242,14 +278,21 @@ def fit_strikeouts(
         train_end = str(dates.max().date())
     diag = build_glm_diagnostics(
         coef=coef,
-        feature_names=selection.retained,
+        feature_names=feature_names,
         method=method,
         converged=fit.converged,
         iterations=fit.iterations,
-        retained=selection.retained,
+        retained=feature_names,
         dropped=selection.dropped,
         offset_stats=offset_stats,
     )
+    log_bf_coef = float("nan")
+    log_bf_se = float("nan")
+    if free_bf and LOG_BF_FEATURE in feature_names:
+        log_idx = 1 + list(feature_names).index(LOG_BF_FEATURE)
+        if log_idx < np.asarray(coef).size:
+            log_bf_coef = float(coef[log_idx])
+            log_bf_se = _coef_se(cov, log_idx)
     _log_glm_diagnostics(fold, diag)
     extra = {
         "dropped_features": dict(selection.dropped),
@@ -262,17 +305,20 @@ def fit_strikeouts(
         "condition_number": float(condition),
         "method": method,
         "fold": fold,
-        "feature_names": list(selection.retained),
-        "uses_bf_offset": True,
+        "feature_names": list(feature_names),
+        "uses_bf_offset": not free_bf,
         "glm_diagnostics": diag,
         "converged": fit.converged,
         "fit_iterations": fit.iterations,
+        "log_bf_coef": log_bf_coef,
+        "log_bf_se": log_bf_se,
+        "strikeout_free_bf_coef": free_bf,
     }
     return StrikeoutModel(
-        feature_names=selection.retained,
+        feature_names=feature_names,
         coef=np.asarray(coef, dtype=float),
         alpha=float(alpha),
-        medians=selection.medians,
+        medians=medians,
         method=method,
         cov=cov,
         model_version=str(config.model_version),
@@ -286,7 +332,7 @@ def fit_strikeouts(
         matrix_rank=int(rank),
         condition_number=float(condition),
         fold=fold,
-        uses_bf_offset=True,
+        uses_bf_offset=not free_bf,
     )
 
 
@@ -386,6 +432,8 @@ def predict_strikeout_pmf(
 ) -> pd.DataFrame:
     """Predict the K PMF and fill contract prediction columns."""
     prepared = prepare_strikeout_frame(frame)
+    if LOG_BF_FEATURE in model.feature_names:
+        prepared = _attach_log_bf(prepared)
     x = design_matrix(
         prepared,
         model.feature_names,

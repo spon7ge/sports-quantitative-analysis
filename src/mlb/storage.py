@@ -7,8 +7,6 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from src.mlb.config import MlbConfig
 from src.mlb.schemas import TABLE_SCHEMAS, coerce_frame, validate_frame
@@ -33,14 +31,13 @@ class MlbStore:
         coerced = coerce_frame(frame, schema)
         path = self.table_path(name)
         path.mkdir(parents=True, exist_ok=True)
-        table = pa.Table.from_pandas(coerced, preserve_index=False)
-        pq.write_to_dataset(
-            table,
-            root_path=str(path),
-            existing_data_behavior="overwrite_or_ignore",
-        )
         single = path / "part-0.parquet"
-        coerced.to_parquet(single, index=False)
+        temporary = path / ".part-0.parquet.tmp"
+        coerced.to_parquet(temporary, index=False)
+        temporary.replace(single)
+        for leftover in path.rglob("*.parquet"):
+            if leftover.resolve() != single.resolve():
+                leftover.unlink()
         return path
 
     def read_table(self, name: str) -> pd.DataFrame:

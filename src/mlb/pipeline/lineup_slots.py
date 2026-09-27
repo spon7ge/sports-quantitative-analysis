@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -443,6 +444,7 @@ def ingest_lineup_slots(
     game_pks: list[int],
     provenance: str,
     http: HttpFn | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> pd.DataFrame:
     """Fetch complete starting nines, freeze cutoff-safe rates, and persist them."""
     from src.mlb.pipeline.ingest import snapshot_raw
@@ -462,7 +464,9 @@ def ingest_lineup_slots(
     skip_rows: list[dict[str, Any]] = []
     seasons: set[int] = set()
 
-    for game_pk in game_pks:
+    for done, game_pk in enumerate(game_pks, start=1):
+        if progress is not None:
+            progress(done, int(game_pk))
         params = {"game_pk": int(game_pk)}
         payload = (
             _local_lineup_payload(config, int(game_pk))

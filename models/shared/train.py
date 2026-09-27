@@ -13,7 +13,7 @@ from xgboost import XGBRegressor
 from models.shared.metrics import DEFAULT_MIN_TIERS, score_quantile_fold
 from models.shared.splits import date_walk_forward_folds
 
-DEFAULT_QUANTILES = [0.10, 0.50, 0.90]
+DEFAULT_QUANTILES = [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
 
 
 def fit_quantile_models(
@@ -210,7 +210,7 @@ def run_walk_forward(
     n_dates = len(unique_dates)
     train_window = round(n_dates * train_frac)
     step_size = round(n_dates * step_frac)
-    tier_map = dict(tiers or DEFAULT_MIN_TIERS)
+    tier_map = dict(DEFAULT_MIN_TIERS if tiers is None else tiers)
 
     print(f"Unique game dates in pool : {n_dates}")
     print(f"Training window           : {train_window} dates (~{train_window / n_dates:.0%})")

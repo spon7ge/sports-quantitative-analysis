@@ -238,6 +238,7 @@ def fit_nb2(
     feature_names: tuple[str, ...] = (),
     fold: str = "",
     unavailable_columns: tuple[str, ...] = (),
+    unpenalized_indices: tuple[int, ...] = (),
     offset: np.ndarray | None = None,
 ) -> Nb2Fit:
     """Penalized NB2 MLE. Fail closed unless ``fail_closed=False``.
@@ -300,6 +301,9 @@ def fit_nb2(
                     penalty = np.full(p + 1, float(l2))
                     penalty[0] = 0.0
                     penalty[-1] = 0.0
+                    for idx in unpenalized_indices:
+                        if 0 <= int(idx) < p:
+                            penalty[int(idx)] = 0.0
                     try:
                         result = model.fit_regularized(
                             alpha=penalty,

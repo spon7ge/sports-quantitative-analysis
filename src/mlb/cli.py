@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.mlb.config import DEFAULT_CONFIG_PATH, MlbConfig, load_config
-from src.mlb.evaluation.backtest import run_backtest
+from src.mlb.evaluation.backtest import format_paired_comparison_table, run_backtest
 from src.mlb.evaluation.market import compare_market
 from src.mlb.evaluation.report import write_daily_report
 from src.mlb.fixtures import load_fixture_tables
@@ -263,6 +264,38 @@ def _cmd_snapshot_lineups(args: argparse.Namespace, config: MlbConfig) -> int:
     return 0
 
 
+def _format_duration(seconds: float) -> str:
+    total = int(max(0, round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _ingest_progress(label: str, total: int) -> Callable[[int, int], None]:
+    """Print one stderr line per game: position, elapsed time, and ETA."""
+    started = time.perf_counter()
+
+    def report(done: int, game_pk: int) -> None:
+        elapsed = time.perf_counter() - started
+        finished = done - 1
+        if finished > 0 and elapsed > 0:
+            eta = _format_duration((total - finished) * (elapsed / finished))
+        else:
+            eta = "calculating"
+        print(
+            f"{label} {done}/{total} ({100.0 * done / total:.1f}%) "
+            f"game_pk={game_pk} elapsed {_format_duration(elapsed)} eta {eta}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return report
+
+
 def _season_game_pks(
     config: MlbConfig, *, start_season: int, end_season: int
 ) -> list[int]:
@@ -300,6 +333,7 @@ def _cmd_ingest_play_by_play(args: argparse.Namespace, config: MlbConfig) -> int
         game_pks=game_pks,
         http=_http_client(args, config),
         people=MlbStore(config).read_table("id_map"),
+        progress=_ingest_progress("play-by-play", len(game_pks)),
     )
     print(f"ingest-play-by-play returned {0 if frame is None else len(frame)} rows")
     return 0
@@ -384,6 +418,7 @@ def _cmd_ingest_lineup_slots(args: argparse.Namespace, config: MlbConfig) -> int
         game_pks=game_pks,
         provenance="boxscore_00",
         http=_http_client(args, config),
+        progress=_ingest_progress("lineup-slots", len(game_pks)),
     )
     for season in range(args.start_season, args.end_season + 1):
         coverage_path = config.artifact_dir / f"lineup_coverage_{season}.json"
@@ -535,12 +570,18 @@ def _cmd_backtest(args: argparse.Namespace, config: MlbConfig) -> int:
             "baseline_scores": result["baseline_scores"].to_dict(orient="records")
             if isinstance(result["baseline_scores"], pd.DataFrame)
             else result["baseline_scores"],
+            "paired_scores": result["paired_scores"].to_dict(orient="records")
+            if isinstance(result.get("paired_scores"), pd.DataFrame)
+            else result.get("paired_scores"),
         },
     )
     print(f"Wrote predictions {pred_path}")
     print(f"Wrote scores {scores_path}")
     if isinstance(result["scores"], pd.DataFrame) and not result["scores"].empty:
         print(result["scores"].to_string(index=False))
+    paired = result.get("paired_scores")
+    if isinstance(paired, pd.DataFrame) and not paired.empty:
+        print(format_paired_comparison_table(paired))
     market = result.get("market")
     if isinstance(market, pd.DataFrame) and not market.empty:
         market_path = store.config.artifact_dir / "market_comparison.parquet"

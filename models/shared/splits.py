@@ -20,12 +20,12 @@ def season_holdout_split(
     """Split a frame into train pool vs locked holdout season (sorted by date)."""
     train = (
         df[df[season_col] != holdout_season]
-        .sort_values(date_col)
+        .sort_values(date_col, kind="mergesort")
         .reset_index(drop=True)
     )
     holdout = (
         df[df[season_col] == holdout_season]
-        .sort_values(date_col)
+        .sort_values(date_col, kind="mergesort")
         .reset_index(drop=True)
     )
     return train, holdout
@@ -120,12 +120,12 @@ def prepare_splits(
 
     train_df = (
         train_pool[keep_cols]
-        .sort_values("game_date")
+        .sort_values("game_date", kind="mergesort")
         .reset_index(drop=True)
     )
     holdout_df = (
         holdout[keep_cols]
-        .sort_values("game_date")
+        .sort_values("game_date", kind="mergesort")
         .reset_index(drop=True)
     )
     X = train_df[features].copy()

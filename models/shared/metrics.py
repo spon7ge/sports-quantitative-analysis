@@ -6,6 +6,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
+import pandas as pd
+
+from models.shared.oos import QUANTILE_LEVELS, capped_rate
 
 # Default minutes bands (override per league/prop if needed).
 DEFAULT_MIN_TIERS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
@@ -151,9 +154,131 @@ def score_quantile_fold(
 
     # Tiers describe the pregame minute projection, not the realized outcome.
     tier_values = median if median is not None else actual
-    if verbose and median is not None:
+    tier_source = DEFAULT_MIN_TIERS if tiers is None else tiers
+    if verbose and median is not None and tier_source:
         print("  minute tiers by predicted q50")
-    for tier, fn in (tiers or DEFAULT_MIN_TIERS).items():
+    for tier, fn in tier_source.items():
         _slice(np.asarray(fn(tier_values), dtype=bool), tier)
 
     return metrics
+
+
+# Cuts on predicted minutes q50. Realized minutes are not a tier.
+MINUTE_Q50_TIERS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("<15", None, 15.0),
+    ("15-24", 15.0, 24.0),
+    ("24-31", 24.0, 31.0),
+    ("31+", 31.0, None),
+)
+
+_COVERAGE_BANDS: tuple[tuple[str, float, float, float], ...] = (
+    ("Q20-Q80", 0.20, 0.80, 0.60),
+    ("Q10-Q90", 0.10, 0.90, 0.80),
+    ("Q05-Q95", 0.05, 0.95, 0.90),
+)
+
+
+def calibration_by_minutes_tier(
+    frame: pd.DataFrame,
+    *,
+    tolerance: float = 0.02,
+    rate_cap: float = 6.0,
+) -> pd.DataFrame:
+    """Knot shares and interval coverage by predicted minutes q50.
+
+    Pre-holdout OOS and holdout are separate. A check is flagged when
+    ``abs(empirical - ideal)`` is greater than ``tolerance`` (2 percentage
+    points). The rate target is the capped points-per-minute label.
+    """
+    predicted_q50 = frame["minutes_q_0.50"].to_numpy(dtype=float)
+    is_holdout = frame["is_holdout"].astype(bool).to_numpy()
+    outcomes = {
+        "minutes": frame["minutes"].to_numpy(dtype=float),
+        "rate": capped_rate(frame["pts"], frame["minutes"], cap=rate_cap),
+    }
+    splits = (
+        ("pre-holdout OOS", ~is_holdout),
+        ("holdout", is_holdout),
+    )
+    rows: list[dict[str, Any]] = []
+    for target, outcome in outcomes.items():
+        knots = {
+            level: frame[f"{target}_q_{level:.2f}"].to_numpy(dtype=float)
+            for level in QUANTILE_LEVELS
+        }
+        for split, split_mask in splits:
+            for tier, low, high in MINUTE_Q50_TIERS:
+                mask = split_mask & _tier_mask(predicted_q50, low, high)
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                y = outcome[mask]
+                for level in QUANTILE_LEVELS:
+                    empirical = float(np.mean(y <= knots[level][mask]))
+                    rows.append(
+                        _calibration_row(
+                            target=target,
+                            split=split,
+                            tier=tier,
+                            n=n,
+                            check=f"q{level:.2f}",
+                            ideal=float(level),
+                            empirical=empirical,
+                            tolerance=tolerance,
+                        )
+                    )
+                for name, low_q, high_q, ideal in _COVERAGE_BANDS:
+                    inside = (y >= knots[low_q][mask]) & (y <= knots[high_q][mask])
+                    rows.append(
+                        _calibration_row(
+                            target=target,
+                            split=split,
+                            tier=tier,
+                            n=n,
+                            check=name,
+                            ideal=ideal,
+                            empirical=float(np.mean(inside)),
+                            tolerance=tolerance,
+                        )
+                    )
+    return pd.DataFrame(rows)
+
+
+def _tier_mask(
+    predicted_q50: np.ndarray,
+    low: float | None,
+    high: float | None,
+) -> np.ndarray:
+    mask = np.ones(len(predicted_q50), dtype=bool)
+    if low is not None:
+        mask &= predicted_q50 >= low
+    if high is not None:
+        mask &= predicted_q50 < high
+    return mask
+
+
+def _calibration_row(
+    *,
+    target: str,
+    split: str,
+    tier: str,
+    n: int,
+    check: str,
+    ideal: float,
+    empirical: float,
+    tolerance: float,
+) -> dict[str, Any]:
+    gap = empirical - ideal
+    # A gap that lands on the tolerance (2pp) is not a miss. Float noise
+    # around that boundary stays unflagged.
+    return {
+        "target": target,
+        "split": split,
+        "tier": tier,
+        "n": n,
+        "check": check,
+        "ideal": ideal,
+        "empirical": empirical,
+        "gap": gap,
+        "flag": abs(gap) - tolerance > 1e-9,
+    }
