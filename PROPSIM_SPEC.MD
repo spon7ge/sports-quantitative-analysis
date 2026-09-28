@@ -82,6 +82,7 @@ models/shared/metrics.py              pinball, interval coverage
 models/saved_models/                  quantile bundles and tail sidecars
 notebooks/nba/minutes/min_nba_model.ipynb
 notebooks/nba/points/pts_nba_model.ipynb
+notebooks/nba/points/pmf_eval.ipynb
 tests/
 ```
 
