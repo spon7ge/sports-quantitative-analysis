@@ -82,6 +82,7 @@ class Nb2Fit:
     method: str
     converged: bool | None = None
     iterations: int | None = None
+    dispersion_estimated: bool = True
 
 
 @dataclass
@@ -218,12 +219,12 @@ def _optimizer_status(result: Any) -> tuple[bool | None, int | None]:
 
 def _extract_nb2_params(
     result: Any, p: int
-) -> tuple[np.ndarray, float, np.ndarray]:
+) -> tuple[np.ndarray, float, np.ndarray, bool]:
     params = np.asarray(result.params, dtype=float).reshape(-1)
     if params.size == p + 1:
-        return params[:-1], float(params[-1]), params
+        return params[:-1], float(params[-1]), params, True
     if params.size == p:
-        return params, 1e-4, params
+        return params, 1e-4, params, False
     raise ValueError(f"unexpected GLM parameter count {params.size}")
 
 
@@ -282,13 +283,13 @@ def fit_nb2(
         if fail_closed:
             _fail("insufficient rows or empty design for GLM")
         coef, alpha, cov = _moments_nb(y_arr, p, default_mu, offset=offset_arr)
-        return Nb2Fit(coef, alpha, cov, "moments")
+        return Nb2Fit(coef, alpha, cov, "moments", dispersion_estimated=True)
 
     if rank < p or constant:
         if fail_closed:
             _fail("rank-deficient or constant design matrix")
         coef, alpha, cov = _moments_nb(y_arr, p, default_mu, offset=offset_arr)
-        return Nb2Fit(coef, alpha, cov, "moments")
+        return Nb2Fit(coef, alpha, cov, "moments", dispersion_estimated=True)
 
     try:
         model = NegativeBinomial(y_arr, x_arr, offset=offset_arr)
@@ -328,13 +329,15 @@ def fit_nb2(
                 if result is None:
                     result = model.fit(disp=0, maxiter=200, warn_convergence=False)
         try:
-            coef, alpha, params = _extract_nb2_params(result, p)
+            coef, alpha, params, dispersion_estimated = _extract_nb2_params(result, p)
         except ValueError as exc:
             _fail(str(exc), cause=exc)
         if not np.all(np.isfinite(coef)) or not np.isfinite(alpha):
             result = model.fit(disp=0, maxiter=200, warn_convergence=False)
             try:
-                coef, alpha, params = _extract_nb2_params(result, p)
+                coef, alpha, params, dispersion_estimated = _extract_nb2_params(
+                    result, p
+                )
             except ValueError as exc:
                 _fail(str(exc), cause=exc)
         if not np.all(np.isfinite(coef)) or not np.isfinite(alpha):
@@ -382,6 +385,7 @@ def fit_nb2(
             "glm",
             converged=converged,
             iterations=iterations,
+            dispersion_estimated=dispersion_estimated,
         )
     except GlmFitError:
         raise
@@ -389,7 +393,7 @@ def fit_nb2(
         if fail_closed:
             _fail("GLM fit failed", cause=exc)
         coef, alpha, cov = _moments_nb(y_arr, p, default_mu, offset=offset_arr)
-        return Nb2Fit(coef, alpha, cov, "moments")
+        return Nb2Fit(coef, alpha, cov, "moments", dispersion_estimated=True)
 
 
 def _logit_moments(y: np.ndarray, n_params: int) -> np.ndarray:
