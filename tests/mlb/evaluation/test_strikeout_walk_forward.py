@@ -116,9 +116,11 @@ def _patch_strikeout_fit(monkeypatch, strikeout_fit):
     real_fit = strikeout_walk_forward.fit_walk_forward_nb2
     seen = {}
 
-    def fake_fit(train, target, features, binary, l2, offset=None):
+    def fake_fit(train, target, features, binary, l2, offset=None, require_convergence=False):
         if target != "strikeouts":
+            assert require_convergence is False
             return real_fit(train, target, features, binary, l2, offset=offset)
+        seen["require_convergence"] = require_convergence
         seen["seasons"] = set(train["season"])
         seen["offset"] = offset
         seen["predicted_bf_oof"] = train["predicted_bf_oof"].to_numpy(dtype=float)
@@ -144,6 +146,7 @@ def test_scored_block_uses_the_bf_offset_and_reports_a_pmf(monkeypatch):
     seen = _patch_strikeout_fit(monkeypatch, intercept_only)
     frame = _walk(2020, score_strikeouts=True, with_2020=True)
     assert seen["seasons"] == {2019}
+    assert seen["require_convergence"] is True
     np.testing.assert_allclose(seen["offset"], np.log(seen["predicted_bf_oof"]))
     block_2020 = frame.loc[frame["season"] == 2020]
     assert (block_2020["fit_status"] == "ok").all()

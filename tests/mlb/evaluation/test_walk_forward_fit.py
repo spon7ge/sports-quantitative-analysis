@@ -32,6 +32,29 @@ def test_fit_records_an_estimated_dispersion_and_predicts_positive_means():
     assert np.all(pred > 0)
 
 
+def test_require_convergence_reaches_fit_nb2_and_defaults_off(monkeypatch):
+    from src.mlb.models.workload import Nb2Fit
+
+    seen = []
+
+    def fake_fit(*args, **kwargs):
+        seen.append(kwargs["require_convergence"])
+        return Nb2Fit(
+            coef=np.array([1.0, 0.0]),
+            alpha=0.1,
+            cov=None,
+            method="glm",
+            dispersion_estimated=True,
+        )
+
+    monkeypatch.setattr("src.mlb.evaluation.walk_forward_fit.fit_nb2", fake_fit)
+    frame = pd.DataFrame({"home_flag": [1, 0, 1], "y": [4, 5, 6]})
+    args = dict(target="y", features=("home_flag",), binary=("home_flag",), l2=1.0)
+    fit_walk_forward_nb2(frame, **args)
+    fit_walk_forward_nb2(frame, **args, require_convergence=True)
+    assert seen == [False, True]
+
+
 def test_parameter_count_fallback_raises(monkeypatch):
     from src.mlb.models.workload import Nb2Fit
 

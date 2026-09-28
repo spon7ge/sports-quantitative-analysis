@@ -1,10 +1,22 @@
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
+import src.mlb
 from src.mlb.evaluation.walk_forward_calendar import (
     calendar_from_schedule,
+    load_regular_season_calendar,
     validate_regular_season_calendar,
 )
+
+CHECKED_IN_CALENDAR = Path(src.mlb.__file__).parent / "data" / "regular_season_calendar.csv"
+
+
+def test_checked_in_calendar_loads_2018_through_2025():
+    calendar = load_regular_season_calendar(CHECKED_IN_CALENDAR)
+    assert set(range(2018, 2026)) <= set(calendar["season"])
+    validate_regular_season_calendar(calendar, seasons=range(2018, 2026))
 
 
 def test_calendar_keeps_final_regular_season_games_only():

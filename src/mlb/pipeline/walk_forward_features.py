@@ -93,14 +93,20 @@ def _previous_start_utc(earlier: pd.DataFrame) -> pd.Timestamp | None:
 
 
 def _rest_median(history: pd.DataFrame, rest_cap: float) -> float:
-    """Median capped rest gap in ``history``; NaN when no gap exists."""
+    """Median capped rest gap in ``history``; NaN when no finite gap exists.
+
+    A missing ``scheduled_start_utc`` makes its gaps non-finite, so they are skipped.
+    """
     capped: list[float] = []
     for _, starts in history.groupby("pitcher_id", sort=False):
         for date, sched in zip(starts["game_date"], starts["scheduled_start_utc"]):
             previous = _previous_start_utc(starts[starts["game_date"] < date])
-            if previous is None:
+            if previous is None or pd.isna(previous) or pd.isna(sched):
                 continue
-            capped.append(min((sched - previous).total_seconds() / 86400.0, rest_cap))
+            gap = (sched - previous).total_seconds() / 86400.0
+            if not np.isfinite(gap):
+                continue
+            capped.append(min(gap, rest_cap))
     if not capped:
         return float("nan")
     return float(np.median(capped))

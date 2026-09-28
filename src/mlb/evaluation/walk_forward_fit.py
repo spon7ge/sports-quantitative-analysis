@@ -41,6 +41,7 @@ def fit_walk_forward_nb2(
     binary: tuple[str, ...],
     l2: float,
     offset: np.ndarray | None = None,
+    require_convergence: bool = False,
 ) -> WalkForwardFit:
     retained: list[str] = []
     dropped: list[str] = []
@@ -75,7 +76,14 @@ def fit_walk_forward_nb2(
     names = tuple(retained)
     x = design_matrix(train, names, medians, centers=centers, scales=scales)
     y = _numeric(train, target).to_numpy(dtype=float)
-    fit = fit_nb2(y, x, l2=float(l2), feature_names=names, offset=offset)
+    fit = fit_nb2(
+        y,
+        x,
+        l2=float(l2),
+        feature_names=names,
+        offset=offset,
+        require_convergence=require_convergence,
+    )
     if fit.dispersion_estimated is False:
         raise UnestimatedDispersion(
             "negative-binomial dispersion was not estimated; "

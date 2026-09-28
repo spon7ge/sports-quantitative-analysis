@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,7 @@ from src.mlb.models.nb_scores import (
 )
 from src.mlb.models.pmf import negative_binomial_pmf
 from src.mlb.models.shrinkage import shrink_rate
+from src.mlb.models.workload import GlmFitError
 from src.mlb.pipeline.walk_forward_features import (
     NB_RATE_FEATURES,
     OUTPUT_COLUMNS,
@@ -37,6 +38,7 @@ WORKLOAD_BINARY = ("home_flag", "no_prior_regular_start", "long_layoff_flag")
 WORKLOAD_L2 = 1.0
 STRIKEOUT_BINARY = ("home_flag",)
 STRIKEOUT_L2 = 2.0
+STRIKEOUT_MIN_TRAIN_ROWS = 3
 OFFSET_FLOOR = 1e-6
 PMF_K_MAX = 15
 TAIL_MASS_THRESHOLD = 0.001
@@ -109,15 +111,30 @@ def _distinct_features(train: pd.DataFrame, features: tuple[str, ...]) -> tuple[
     return tuple(kept)
 
 
+def _fit_distinct(
+    train: pd.DataFrame,
+    target: str,
+    features: tuple[str, ...],
+    binary: tuple[str, ...],
+    l2: float,
+    **kwargs,
+):
+    """Fit on distinct features; duplicates dropped here join ``dropped_features``."""
+    kept = _distinct_features(train, features)
+    duplicates = tuple(column for column in features if column not in kept)
+    model = fit_walk_forward_nb2(train, target, kept, binary, l2, **kwargs)
+    return replace(model, dropped_features=duplicates + tuple(model.dropped_features))
+
+
 def _fit_workload(history: pd.DataFrame):
     train = history[_finite(history, WORKLOAD_FEATURES)]
     if len(train) < WORKLOAD_MIN_TRAIN_STARTS:
         return None, STATUS_INSUFFICIENT
     try:
-        model = fit_walk_forward_nb2(
+        model = _fit_distinct(
             train,
             "batters_faced",
-            _distinct_features(train, WORKLOAD_FEATURES),
+            WORKLOAD_FEATURES,
             WORKLOAD_BINARY,
             WORKLOAD_L2,
         )
@@ -136,16 +153,17 @@ def _score_strikeouts(history: pd.DataFrame, rows: pd.DataFrame) -> str:
         & history["predicted_bf_oof"].notna()
         & _finite(history, NB_RATE_FEATURES)
     ]
-    if train.empty:
+    if len(train) < STRIKEOUT_MIN_TRAIN_ROWS:
         return STATUS_INSUFFICIENT
     try:
-        model = fit_walk_forward_nb2(
+        model = _fit_distinct(
             train,
             "strikeouts",
-            _distinct_features(train, NB_RATE_FEATURES),
+            NB_RATE_FEATURES,
             STRIKEOUT_BINARY,
             STRIKEOUT_L2,
             offset=_offset(train["predicted_bf_oof"]),
+            require_convergence=True,
         )
     except UnestimatedDispersion:
         return STATUS_UNESTIMATED
@@ -368,7 +386,7 @@ def select_2020(starts: pd.DataFrame, calendar: pd.DataFrame) -> Lock:
                     through_season=TUNING_SEASON,
                     score_strikeouts=False,
                 )
-            except UnestimatedDispersion:
+            except (UnestimatedDispersion, GlmFitError):
                 continue
             if not _workload_valid(frame, TUNING_SEASON):
                 continue
@@ -384,7 +402,10 @@ def select_2020(starts: pd.DataFrame, calendar: pd.DataFrame) -> Lock:
     best_strikeout: tuple[float, float, pd.DataFrame] | None = None
     for m in M_GRID:
         candidate = _resmooth(kept, m)
-        nll = _tuning_nll(candidate)
+        try:
+            nll = _tuning_nll(candidate)
+        except GlmFitError:
+            continue
         if not np.isfinite(nll):
             continue
         if best_strikeout is None or nll < best_strikeout[0]:
@@ -487,8 +508,15 @@ def score_locked_seasons(
     lock: Lock,
     seasons,
 ) -> pd.DataFrame:
-    """One report row per walk-forward block in ``seasons`` plus a pooled aggregate row."""
+    """One report row per walk-forward block in ``seasons`` plus one pooled row per role.
+
+    ``attrs["reliability"]`` holds reliability bins for the pooled reported rows and,
+    separately, the pooled holdout rows, one frame per role with a ``line`` column.
+    """
     seasons = sorted(int(s) for s in seasons)
+    unknown = [s for s in seasons if s not in SEASON_ROLES]
+    if unknown:
+        raise ValueError(f"seasons outside {min(SEASON_ROLES)}-{max(SEASON_ROLES)}: {unknown}")
     frame = walk_blocks(
         starts,
         calendar,
@@ -505,7 +533,7 @@ def score_locked_seasons(
     for label in labels:
         block = in_scope[in_scope["walk_forward_block"] == label]
         season = int(block["season"].iloc[0])
-        role = SEASON_ROLES.get(season, "reported")
+        role = SEASON_ROLES[season]
         if role in ABORTING_ROLES and (block["fit_status"] == STATUS_UNESTIMATED).any():
             raise UnestimatedDispersion(
                 f"strikeout dispersion was not estimated for {role} block {label}"
@@ -524,18 +552,38 @@ def score_locked_seasons(
             **block_metrics(block),
         })
 
-    if labels:
-        last_open = in_scope.loc[in_scope["walk_forward_block"] == labels[-1], "game_date"].min()
+    roles = in_scope["season"].map(SEASON_ROLES)
+    for role in dict.fromkeys(SEASON_ROLES[s] for s in seasons):
+        pooled = in_scope[roles == role]
+        if pooled.empty:
+            continue
+        role_labels = sorted(pooled["walk_forward_block"].unique(), key=_block_order)
+        last_open = pooled.loc[pooled["walk_forward_block"] == role_labels[-1], "game_date"].min()
         union_train = frame[frame["game_date"] < last_open]
         records.append({
             "walk_forward_block": "all",
-            "role": "aggregate",
+            "role": role,
             "train_start": union_train["game_date"].min() if not union_train.empty else None,
             "train_end": union_train["game_date"].max() if not union_train.empty else None,
-            "validation_start": in_scope["game_date"].min(),
-            "validation_end": in_scope["game_date"].max(),
+            "validation_start": pooled["game_date"].min(),
+            "validation_end": pooled["game_date"].max(),
             "n_train": len(union_train),
-            "n_validation": len(in_scope),
-            **block_metrics(in_scope),
+            "n_validation": len(pooled),
+            **block_metrics(pooled),
         })
-    return pd.DataFrame.from_records(records, columns=REPORT_COLUMNS)
+
+    report = pd.DataFrame.from_records(records, columns=REPORT_COLUMNS)
+    report.attrs["reliability"] = {
+        role: _pooled_reliability(in_scope[roles == role]) for role in ABORTING_ROLES
+    }
+    return report
+
+
+def _pooled_reliability(pooled: pd.DataFrame) -> pd.DataFrame:
+    """``reliability_bins`` at each over line, stacked with a ``line`` column."""
+    frames = []
+    for line in OVER_LINES:
+        bins = reliability_bins(pooled, line)
+        bins.insert(0, "line", line)
+        frames.append(bins)
+    return pd.concat(frames, ignore_index=True)

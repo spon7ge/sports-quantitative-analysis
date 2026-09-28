@@ -65,6 +65,23 @@ def test_first_start_rest_is_the_median_of_capped_training_rest():
     assert row["days_rest_capped"] == 14
 
 
+def test_missing_start_time_does_not_poison_the_rest_median():
+    history = pd.DataFrame(
+        [
+            _start(pitcher_id=7, game_pk=1, game_date="2021-04-01"),
+            _start(pitcher_id=7, game_pk=2, game_date="2021-04-06", scheduled_start_utc=None),
+            _start(pitcher_id=7, game_pk=3, game_date="2021-04-11", scheduled_start_utc="2021-04-11T20:00:00Z"),
+            _start(pitcher_id=8, game_pk=4, game_date="2021-04-02", scheduled_start_utc="2021-04-02T20:00:00Z"),
+            _start(pitcher_id=8, game_pk=5, game_date="2021-04-07", scheduled_start_utc="2021-04-07T20:00:00Z"),
+        ]
+    )
+    block = pd.DataFrame([_start(pitcher_id=9, game_pk=6, game_date="2021-05-01")])
+    out = feature_block(history, block, m=50, kappa=3, rest_cap=14)
+    row = out.iloc[0]
+    assert row["rest_median_capped"] == 5.0
+    assert row["days_rest_capped"] == 5.0
+
+
 def test_opponent_season_to_date_falls_back_to_cross_season_last10():
     history = pd.DataFrame(
         [
