@@ -183,6 +183,11 @@ def feature_block(
         opp_season = opp_earlier[opp_earlier["season"] == row["season"]]
         ok10, obf10 = float(opp_last10["strikeouts"].sum()), float(opp_last10["batters_faced"].sum())
         oks, obfs = float(opp_season["strikeouts"].sum()), float(opp_season["batters_faced"].sum())
+        opp_k_rate_last10 = shrink_rate(ok10, obf10, league, m)
+        if len(opp_season) == 0:
+            opp_k_rate_season = opp_k_rate_last10
+        else:
+            opp_k_rate_season = shrink_rate(oks, obfs, league, m)
 
         records.append(
             {
@@ -202,8 +207,8 @@ def feature_block(
                 "pitcher_k_per_bf_last3_smoothed": shrink_rate(k3, bf3, league, m),
                 "pitcher_k_per_bf_last10_smoothed": k_rate_last10,
                 "pitcher_k_per_bf_season_to_date_smoothed": k_rate_season,
-                "opponent_k_rate_vs_starters_last10_smoothed": shrink_rate(ok10, obf10, league, m),
-                "opponent_k_rate_vs_starters_season_to_date_smoothed": shrink_rate(oks, obfs, league, m),
+                "opponent_k_rate_vs_starters_last10_smoothed": opp_k_rate_last10,
+                "opponent_k_rate_vs_starters_season_to_date_smoothed": opp_k_rate_season,
                 "opponent_prior_starts_observed": len(opp_last10),
                 "pitcher_k_last3": k3,
                 "pitcher_bf_last3": bf3,

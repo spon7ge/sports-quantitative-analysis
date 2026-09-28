@@ -63,3 +63,69 @@ def test_first_start_rest_is_the_median_of_capped_training_rest():
     row = out.iloc[0]
     assert row["no_prior_regular_start"] == 1
     assert row["days_rest_capped"] == 14
+
+
+def test_opponent_season_to_date_falls_back_to_cross_season_last10():
+    history = pd.DataFrame(
+        [
+            _start(
+                pitcher_id=7,
+                game_pk=0,
+                season=2021,
+                game_date="2021-04-01",
+                opponent_team_id=99,
+                strikeouts=1,
+                batters_faced=20,
+            ),
+            _start(
+                pitcher_id=7,
+                game_pk=99,
+                season=2021,
+                game_date="2021-04-15",
+                scheduled_start_utc="2021-04-15T20:00:00Z",
+                opponent_team_id=99,
+                strikeouts=1,
+                batters_faced=20,
+            ),
+            _start(
+                pitcher_id=2,
+                game_pk=1,
+                season=2021,
+                game_date="2021-09-01",
+                opponent_team_id=10,
+                strikeouts=2,
+                batters_faced=20,
+            ),
+            _start(
+                pitcher_id=3,
+                game_pk=2,
+                season=2021,
+                game_date="2021-09-10",
+                scheduled_start_utc="2021-09-10T20:00:00Z",
+                opponent_team_id=10,
+                strikeouts=8,
+                batters_faced=20,
+            ),
+        ]
+    )
+    block = pd.DataFrame(
+        [
+            _start(
+                pitcher_id=1,
+                game_pk=100,
+                season=2022,
+                game_date="2022-04-01",
+                opponent_team_id=10,
+                strikeouts=5,
+                batters_faced=20,
+            )
+        ]
+    )
+    out = feature_block(history, block, m=50, kappa=3, rest_cap=30)
+    row = out.iloc[0]
+    league = row["league_k_per_bf_prior"]
+    last10 = row["opponent_k_rate_vs_starters_last10_smoothed"]
+    season_to_date = row["opponent_k_rate_vs_starters_season_to_date_smoothed"]
+    assert season_to_date == last10
+    assert last10 != league
+    assert season_to_date != league
