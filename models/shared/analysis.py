@@ -81,7 +81,7 @@ def analyze_correlations(
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    corr_matrix = df[features].corr().abs()
+    corr_matrix = df[features].corr(numeric_only=True).abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
 
