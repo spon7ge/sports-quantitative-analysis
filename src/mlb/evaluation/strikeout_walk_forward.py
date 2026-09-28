@@ -321,26 +321,36 @@ def _resmooth(frame: pd.DataFrame, m: float) -> pd.DataFrame:
     return out
 
 
-def _tuning_nll(frame: pd.DataFrame) -> float:
-    """Pooled 2020 strikeout NLL from a fit on earlier rows that carry a BF offset."""
-    offset_rows = frame[frame["predicted_bf_oof"].notna()]
-    scored = offset_rows[offset_rows["season"] == TUNING_SEASON]
-    train = offset_rows[offset_rows["season"] < TUNING_SEASON]
-    if train.empty:
-        train = scored
-    if scored.empty:
-        return float("nan")
-    features = _distinct_features(train, tuple(c for c in NB_RATE_FEATURES if c in train.columns))
-    model = fit_walk_forward_nb2(
-        train,
-        "strikeouts",
-        features,
-        STRIKEOUT_BINARY,
-        STRIKEOUT_L2,
-        offset=_offset(train["predicted_bf_oof"]),
+def _workload_valid(frame: pd.DataFrame, season: int) -> bool:
+    rows = frame[frame["season"] == season]
+    return bool(
+        not rows.empty
+        and not (rows["fit_status"] == STATUS_UNESTIMATED).any()
+        and rows["predicted_bf_oof"].notna().all()
     )
-    mu = predict_walk_forward_mean(model, scored, offset=_offset(scored["predicted_bf_oof"]))
-    return nb2_nll(scored["strikeouts"].to_numpy(dtype=int), mu, model.alpha)
+
+
+def _tuning_nll(frame: pd.DataFrame) -> float:
+    """Pooled 2020 strikeout NLL, each block fit only on rows dated before it opens.
+
+    NaN when a block has no legal training rows or an unestimated dispersion.
+    """
+    tuning = frame[frame["season"] == TUNING_SEASON]
+    if tuning.empty:
+        return float("nan")
+    scored_blocks: list[pd.DataFrame] = []
+    for label in sorted(tuning["walk_forward_block"].unique(), key=_block_order):
+        rows = tuning[tuning["walk_forward_block"] == label].copy()
+        history = frame[frame["game_date"] < rows["game_date"].min()]
+        if _score_strikeouts(history, rows) != STATUS_OK:
+            return float("nan")
+        scored_blocks.append(rows)
+    scored = pd.concat(scored_blocks, ignore_index=True)
+    return nb2_nll(
+        scored["strikeouts"].to_numpy(dtype=int),
+        scored["predicted_strikeout_mean"].to_numpy(dtype=float),
+        scored["negative_binomial_dispersion"].to_numpy(dtype=float),
+    )
 
 
 def select_2020(starts: pd.DataFrame, calendar: pd.DataFrame) -> Lock:
@@ -360,6 +370,8 @@ def select_2020(starts: pd.DataFrame, calendar: pd.DataFrame) -> Lock:
                 )
             except UnestimatedDispersion:
                 continue
+            if not _workload_valid(frame, TUNING_SEASON):
+                continue
             mae = _workload_mae(frame, TUNING_SEASON)
             if not np.isfinite(mae):
                 continue
@@ -372,10 +384,7 @@ def select_2020(starts: pd.DataFrame, calendar: pd.DataFrame) -> Lock:
     best_strikeout: tuple[float, float, pd.DataFrame] | None = None
     for m in M_GRID:
         candidate = _resmooth(kept, m)
-        try:
-            nll = _tuning_nll(candidate)
-        except UnestimatedDispersion:
-            continue
+        nll = _tuning_nll(candidate)
         if not np.isfinite(nll):
             continue
         if best_strikeout is None or nll < best_strikeout[0]:
