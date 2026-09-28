@@ -359,7 +359,14 @@ def test_missing_starting_raises_at_draw_time_and_is_not_bench():
 
 from models.shared.minutes_sampler import canonical_id, sample_minutes
 from models.shared.metrics import pinball_loss
-from models.shared.minutes_sampler import probability_below_line, row_crps, tail_bin_shares
+from models.shared.minutes_sampler import (
+    cdf,
+    cdf_left,
+    ppf,
+    probability_below_line,
+    row_crps,
+    tail_bin_shares,
+)
 
 
 def test_probability_below_line_inverts_q_without_draws():
@@ -449,6 +456,57 @@ def test_shuffle_keeps_player_games_and_streams_are_not_identical():
         TABLES,
     )
     np.testing.assert_allclose(labeled, expected)
+
+
+def test_ppf_matches_existing_draws_and_inverts_with_the_cap():
+    """ppf and cdf are new. quantile_minutes, line prices, and draws stay put."""
+    grids = _grid(SORTED)
+    groups = np.array([1])
+    levels = np.asarray(QUANTILE_LEVELS, dtype=float).reshape(1, -1)
+    got = ppf(levels, grids, groups, groups, TABLES)
+    np.testing.assert_allclose(
+        got[0],
+        [10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30],
+    )
+    probe = np.array([[0.0, 0.025, 0.05, 0.5, 0.95, 0.975, 1.0]])
+    np.testing.assert_allclose(
+        ppf(probe, grids, groups, groups, TABLES)[0],
+        [5.0, 7.5, 10.0, 20.0, 30.0, 35.0, 40.0],
+    )
+    np.testing.assert_allclose(
+        quantile_minutes(probe, grids, groups, groups, TABLES),
+        ppf(probe, grids, groups, groups, TABLES),
+    )
+    for line, expected in ((5, 0.0), (10, 0.05), (20, 0.5), (30, 0.95), (40, 1.0), (80, 1.0)):
+        assert probability_below_line(grids, groups, groups, TABLES, line=line)[0] == pytest.approx(expected)
+        assert cdf_left(np.array([[line]]), grids, groups, groups, TABLES)[0, 0] == pytest.approx(expected)
+    draws = sample_minutes(grids, groups, groups, ["a"], ["g1"], TABLES, seed=7, draws=4)
+    np.testing.assert_allclose(
+        draws[0],
+        [21.09991409394517, 20.312157049378342, 29.853987075207534, 12.808499258847153],
+    )
+
+    tall = SORTED.copy()
+    tall[-1] = 80
+    tall_grid = _grid(tall)
+    # Unclipped price above the played cap stays the legacy inverse.
+    assert probability_below_line(tall_grid, groups, groups, TABLES, line=70)[0] == pytest.approx(0.9403846153846154)
+    capped = ppf(np.array([[0.99]]), tall_grid, groups, groups, TABLES)
+    assert capped[0, 0] == 63
+    assert cdf(np.array([[63.0]]), tall_grid, groups, groups, TABLES)[0, 0] == 1
+    assert cdf_left(np.array([[70.0]]), tall_grid, groups, groups, TABLES)[0, 0] == 1
+
+    rng = np.random.default_rng(11)
+    tied = SORTED.copy()
+    tied[3:7] = 18
+    rows = np.vstack([SORTED, tied, tall])
+    row_groups = np.array([1, 1, 1])
+    u = rng.random((3, 128))
+    y = ppf(u, rows, row_groups, row_groups, TABLES)
+    left = cdf_left(y, rows, row_groups, row_groups, TABLES)
+    right = cdf(y, rows, row_groups, row_groups, TABLES)
+    assert np.all(left <= u + 1e-8)
+    assert np.all(u <= right + 1e-8)
 
 
 def test_median_draw_tracks_each_rows_q50_and_missing_id_raises():

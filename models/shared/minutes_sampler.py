@@ -145,6 +145,115 @@ def _invert_q(u, q, line: float) -> float:
     return u0 + (line - q0) / (q1 - q0) * (u1 - u0)
 
 
+def _clip_breakpoints(u, q, lo, hi):
+    """Knots of clip(Q, lo, hi). Crossings are inserted so the clip is exact."""
+    u = np.asarray(u, dtype=float)
+    q = np.asarray(q, dtype=float)
+    if not (lo <= hi):
+        raise ValueError("cap")
+    out_u: list[float] = []
+    out_q: list[float] = []
+
+    def append(point_u: float, point_q: float) -> None:
+        clipped = float(np.clip(point_q, lo, hi))
+        if out_u and point_u < out_u[-1]:
+            raise ValueError("quantile knots decreased in u")
+        if out_u and point_u == out_u[-1]:
+            out_q[-1] = clipped
+            return
+        if out_q and clipped < out_q[-1] - 1e-8:
+            raise ValueError("clipped quantile function decreased")
+        out_u.append(float(point_u))
+        out_q.append(clipped)
+
+    append(float(u[0]), float(q[0]))
+    for index in range(1, len(u)):
+        u0 = float(u[index - 1])
+        u1 = float(u[index])
+        q0 = float(q[index - 1])
+        q1 = float(q[index])
+        if q0 != q1:
+            for level in (lo, hi):
+                if (q0 < level < q1) or (q1 < level < q0):
+                    t = (level - q0) / (q1 - q0)
+                    append(u0 + t * (u1 - u0), level)
+        append(u1, q1)
+    clipped_u = np.asarray(out_u, dtype=float)
+    clipped_q = np.asarray(out_q, dtype=float)
+    if np.any(np.diff(clipped_q) < -1e-8):
+        raise ValueError("clipped quantile function decreased")
+    np.maximum.accumulate(clipped_q, out=clipped_q)
+    return clipped_u, clipped_q
+
+
+def _cdf_left_from_knots(u, q, y) -> np.ndarray:
+    """inf {t : Q(t) >= y} on a nondecreasing piecewise-linear Q."""
+    y = np.asarray(y, dtype=float)
+    flat = y.reshape(-1)
+    out = np.empty(flat.shape, dtype=float)
+    below = flat <= q[0]
+    above = flat > q[-1]
+    middle = ~below & ~above
+    out[below] = 0.0
+    out[above] = 1.0
+    if np.any(middle):
+        yy = flat[middle]
+        index = np.clip(np.searchsorted(q, yy, side="left"), 1, len(q) - 1)
+        q_lo = q[index - 1]
+        q_hi = q[index]
+        u_lo = u[index - 1]
+        u_hi = u[index]
+        span = q_hi - q_lo
+        frac = np.zeros(yy.shape, dtype=float)
+        rising = span > 0
+        frac[rising] = (yy[rising] - q_lo[rising]) / span[rising]
+        out[middle] = u_lo + np.clip(frac, 0.0, 1.0) * (u_hi - u_lo)
+    return out.reshape(y.shape)
+
+
+def _cdf_from_knots(u, q, y) -> np.ndarray:
+    """inf {t : Q(t) > y} on a nondecreasing piecewise-linear Q."""
+    y = np.asarray(y, dtype=float)
+    flat = y.reshape(-1)
+    out = np.empty(flat.shape, dtype=float)
+    below = flat < q[0]
+    above = flat >= q[-1]
+    middle = ~below & ~above
+    out[below] = 0.0
+    out[above] = 1.0
+    if np.any(middle):
+        yy = flat[middle]
+        index = np.clip(np.searchsorted(q, yy, side="right"), 1, len(q) - 1)
+        q_lo = q[index - 1]
+        q_hi = q[index]
+        u_lo = u[index - 1]
+        u_hi = u[index]
+        span = q_hi - q_lo
+        frac = np.zeros(yy.shape, dtype=float)
+        rising = (yy > q_lo) & (span > 0)
+        frac[rising] = (yy[rising] - q_lo[rising]) / span[rising]
+        out[middle] = u_lo + frac * (u_hi - u_lo)
+    return out.reshape(y.shape)
+
+
+def _reshape_outcomes(y, n_rows: int) -> tuple[np.ndarray, bool]:
+    values = np.asarray(y, dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("non-finite outcome")
+    if values.ndim == 1:
+        if values.shape[0] != n_rows:
+            raise ValueError("grids and y must have the same number of rows")
+        return values.reshape(n_rows, 1), True
+    if values.ndim != 2 or values.shape[0] != n_rows:
+        raise ValueError("grids and y must have the same number of rows")
+    return values, False
+
+
+def _minutes_knots(prepared_row, lower_group, upper_group, tables):
+    u, q = _row_breakpoints(prepared_row, int(lower_group), int(upper_group), tables)
+    return _clip_breakpoints(u, q, 0.0, maximum_minutes("nba"))
+
+
 def probability_below_line(grids, lower_groups, upper_groups, tables, line) -> np.ndarray:
     """Price P(M < line) by inverting each row's Q. No draws."""
     prepared = prepare_quantile_grid(grids)
@@ -422,3 +531,49 @@ def sample_minutes(
         rng = np.random.default_rng(int.from_bytes(digest[:8], "little"))
         uniforms[index] = rng.random(int(draws))
     return quantile_minutes(uniforms, grids, lower_groups, upper_groups, tables)
+
+
+def ppf(u, grids, lower_groups, upper_groups, tables) -> np.ndarray:
+    """Quantile function. ``u`` is caller-supplied. No RNG."""
+    return quantile_minutes(u, grids, lower_groups, upper_groups, tables)
+
+
+def _apply_minutes_inverse(y, grids, lower_groups, upper_groups, tables, inverse):
+    prepared = prepare_quantile_grid(grids)
+    values, squeeze = _reshape_outcomes(y, prepared.shape[0])
+    lower_ids = np.asarray(lower_groups)
+    upper_ids = np.asarray(upper_groups)
+    out = np.empty(values.shape, dtype=float)
+    for index in range(prepared.shape[0]):
+        knots_u, knots_q = _minutes_knots(
+            prepared[index],
+            int(lower_ids[index]),
+            int(upper_ids[index]),
+            tables,
+        )
+        out[index] = inverse(knots_u, knots_q, values[index])
+    if squeeze:
+        return out[:, 0]
+    return out
+
+
+def cdf_left(y, grids, lower_groups, upper_groups, tables) -> np.ndarray:
+    """P(M < y) for the clipped quantile function. No RNG."""
+    return _apply_minutes_inverse(y, grids, lower_groups, upper_groups, tables, _cdf_left_from_knots)
+
+
+def cdf(y, grids, lower_groups, upper_groups, tables) -> np.ndarray:
+    """P(M <= y) for the clipped quantile function. No RNG."""
+    return _apply_minutes_inverse(y, grids, lower_groups, upper_groups, tables, _cdf_from_knots)
+
+
+def randomized_pit(y, atom_u, grids, lower_groups, upper_groups, tables) -> np.ndarray:
+    """PIT on a flat piece. ``atom_u`` is caller-supplied. No RNG."""
+    left = cdf_left(y, grids, lower_groups, upper_groups, tables)
+    right = cdf(y, grids, lower_groups, upper_groups, tables)
+    draw = np.asarray(atom_u, dtype=float)
+    if draw.shape != left.shape:
+        raise ValueError("u")
+    if not np.isfinite(draw).all() or np.any(draw < 0) or np.any(draw > 1):
+        raise ValueError("u outside [0, 1]")
+    return left + draw * (right - left)
