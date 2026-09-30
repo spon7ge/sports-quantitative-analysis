@@ -262,6 +262,82 @@ def tune_xgb_quantile(
     }
 
 
+def tune_lgb_quantile(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    n_trials: int = 40,
+    n_splits: int = 4,
+    quantile_alpha: float = 0.50,
+    seed: int = 42,
+    fixed_params: dict | None = None,
+    show_progress_bar: bool = True,
+) -> dict[str, Any]:
+    """Optuna-tune one LightGBM quantile model via TimeSeriesSplit pinball loss.
+
+    Use train-pool ``X`` / ``y`` only — never the locked holdout.
+    Returns merged ``best_params`` (ready for ``LGB_PARAMS``), ``best_value``,
+    and the Optuna ``study``. ``alpha`` is not part of ``best_params``.
+    """
+    import optuna
+
+    from models.shared.metrics import pinball_loss
+
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same length")
+    if len(X) <= n_splits:
+        raise ValueError(f"len(X)={len(X)} must be greater than n_splits={n_splits}")
+    if not 0.0 < quantile_alpha < 1.0:
+        raise ValueError("quantile_alpha must be inside (0, 1)")
+
+    fixed = {
+        "objective": "quantile",
+        "n_jobs": -1,
+        "random_state": seed,
+        "verbose": -1,
+        "bagging_freq": 1,
+        "early_stopping_rounds": 50,
+        **(fixed_params or {}),
+    }
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    def objective(trial: Any) -> float:
+        params = {
+            **fixed,
+            "n_estimators": trial.suggest_int("n_estimators", 500, 2000),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 127),
+            "max_depth": trial.suggest_int("max_depth", 3, 12),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 5.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 5.0, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 200),
+        }
+        losses: list[float] = []
+        for train_idx, val_idx in tscv.split(X):
+            X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            model = _fit_lgb_regressor(params, quantile_alpha, X_tr, y_tr, X_val, y_val)
+            losses.append(pinball_loss(y_val, model.predict(X_val), quantile_alpha))
+        return float(np.mean(losses))
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=show_progress_bar)
+
+    best_params = {**fixed, **study.best_params}
+    print(f"Best pinball (mean TSCV, q={quantile_alpha}): {study.best_value:.4f}")
+    print("Best params:", study.best_params)
+    return {
+        "best_params": best_params,
+        "best_value": study.best_value,
+        "study": study,
+    }
+
+
 def run_walk_forward(
     X: pd.DataFrame,
     y: pd.Series,

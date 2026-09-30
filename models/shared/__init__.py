@@ -45,6 +45,7 @@ from models.shared.train import (
     run_timeseries_cv,
     run_walk_forward,
     tune_xgb_quantile,
+    tune_lgb_quantile,
 )
 
 __all__ = [
@@ -86,4 +87,5 @@ __all__ = [
     "season_holdout_split",
     "tail_bin_shares",
     "tune_xgb_quantile",
+    "tune_lgb_quantile",
 ]

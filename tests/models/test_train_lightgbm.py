@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from models.shared import train as train_mod
-from models.shared.train import fit_quantile_lightgbm
+from models.shared.train import fit_quantile_lightgbm, tune_lgb_quantile
 
 
 class _FakeLGBM:
@@ -110,3 +110,66 @@ def test_train_tail_one_date_raises_before_any_booster(monkeypatch):
             early_stop="train_tail",
             train_dates=pd.to_datetime(["2024-01-01"]),
         )
+
+
+def test_tune_locks_fixed_settings_and_q50_alpha(monkeypatch):
+    constructed: list[float] = []
+
+    class _RecordingLGBM(_FakeLGBM):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            constructed.append(kwargs["alpha"])
+
+        def predict(self, X):
+            return np.full(len(X), 10.0)
+
+    monkeypatch.setattr(train_mod, "LGBMRegressor", _RecordingLGBM)
+    monkeypatch.setattr(
+        train_mod,
+        "early_stopping",
+        lambda rounds, verbose=False: ("early_stopping", rounds, verbose),
+    )
+    X, y = _frame(8)
+    result = tune_lgb_quantile(
+        X, y, n_trials=1, n_splits=2, seed=42, show_progress_bar=False,
+    )
+    params = result["best_params"]
+    assert "alpha" not in params
+    assert params["objective"] == "quantile"
+    assert params["n_jobs"] == -1
+    assert params["random_state"] == 42
+    assert params["verbose"] == -1
+    assert params["bagging_freq"] == 1
+    assert params["early_stopping_rounds"] == 50
+    assert set(constructed) == {0.50}
+    assert isinstance(result["best_value"], float)
+
+
+def test_tune_fixed_params_override_defaults(monkeypatch):
+    monkeypatch.setattr(train_mod, "LGBMRegressor", _FakeLGBM)
+    monkeypatch.setattr(
+        train_mod,
+        "early_stopping",
+        lambda rounds, verbose=False: ("early_stopping", rounds, verbose),
+    )
+    X, y = _frame(8)
+    result = tune_lgb_quantile(
+        X, y,
+        n_trials=1,
+        n_splits=2,
+        show_progress_bar=False,
+        fixed_params={"verbose": 0},
+    )
+    assert result["best_params"]["verbose"] == 0
+
+
+def test_tune_rejects_bad_inputs():
+    X, y = _frame(4)
+    with pytest.raises(ValueError, match="same length"):
+        tune_lgb_quantile(X, y.iloc[:3], n_trials=1, n_splits=2)
+    with pytest.raises(ValueError, match="n_splits"):
+        tune_lgb_quantile(X.iloc[:2], y.iloc[:2], n_trials=1, n_splits=2)
+    with pytest.raises(ValueError, match="quantile_alpha"):
+        tune_lgb_quantile(X, y, n_trials=1, n_splits=2, quantile_alpha=0.0)
+    with pytest.raises(ValueError, match="quantile_alpha"):
+        tune_lgb_quantile(X, y, n_trials=1, n_splits=2, quantile_alpha=1.0)
