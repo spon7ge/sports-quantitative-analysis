@@ -198,7 +198,7 @@ def run_walk_forward(
     train_frac: float = 0.50,
     step_frac: float = 0.10,
     quantiles: Sequence[float] | None = None,
-    early_stop: str = "validation",
+    early_stop: str = "train_tail",
     train_tail_frac: float = 0.10,
 ) -> dict[str, Any]:
     """Phase 2 — date-based walk-forward validation (production simulation)."""

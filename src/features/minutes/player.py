@@ -231,6 +231,15 @@ def add_usage_features(
         prior_sum(result, "_assists_obs", PLAYER_KEY, 10),
         minutes_sum_10,
     )
+    result["_pf_obs"] = numeric_column(
+        result,
+        "pf",
+        fallback="fouls",
+    )
+    result["fouls_per_36_10"] = 36 * ratio(
+        prior_sum(result, "_pf_obs", PLAYER_KEY, 10),
+        minutes_sum_10,
+    )
     return result
 
 

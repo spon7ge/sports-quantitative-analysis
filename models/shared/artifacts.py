@@ -24,6 +24,7 @@ def save_model_bundle(
     features: list[str],
     artifact_stem: str,
     naive_holdout_results: dict[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
     save_dir: str | Path | None = None,
 ) -> Path:
     """Persist quantile models + metrics under ``models/saved_models/``."""
@@ -45,6 +46,7 @@ def save_model_bundle(
         "naive_baseline": naive_holdout_results,
         "train_end": train_df["game_date"].max(),
         "val_end": holdout_df["game_date"].max(),
+        "metadata": dict(metadata) if metadata is not None else None,
     }
 
     save_path = out_dir / f"{artifact_stem}_{holdout_df['game_date'].max().date()}.joblib"

@@ -1,0 +1,7 @@
+baseball datasets:
+- baseball savant
+- statcast csv
+- mlb stats api
+- retrosheet 
+- chadwick
+- ladman database

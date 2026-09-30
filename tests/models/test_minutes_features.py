@@ -319,6 +319,48 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
             113.25,
         )
 
+    def test_fouls_per_36_uses_only_prior_games(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1, "2024-01-01", 30, game_id=1, pf=3
+                ),
+                _player_row(
+                    1, "2024-01-03", 20, game_id=2, pf=4
+                ),
+                _player_row(
+                    1, "2024-01-05", 36, game_id=3, pf=6
+                ),
+            ]
+        )
+        featured = add_minutes_features(frame)
+        third = featured.loc[
+            featured["game_id"].eq(3)
+        ].iloc[0]
+        self.assertAlmostEqual(
+            third["fouls_per_36_10"],
+            36 * 7 / 50,
+        )
+        first = featured.loc[
+            featured["game_id"].eq(1)
+        ].iloc[0]
+        self.assertTrue(np.isnan(first["fouls_per_36_10"]))
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(3), "pf"] = 0
+        mutated.loc[mutated["game_id"].eq(3), "minutes"] = 99
+        mutated.loc[mutated["game_id"].eq(3), "min"] = 99
+        mutated.loc[
+            mutated["game_id"].eq(3), "min_sec"
+        ] = "99:00"
+        mutated_third = add_minutes_features(mutated).loc[
+            lambda rows: rows["game_id"].eq(3)
+        ].iloc[0]
+        self.assertAlmostEqual(
+            mutated_third["fouls_per_36_10"],
+            third["fouls_per_36_10"],
+        )
+
     def test_default_feature_list_is_causal(self) -> None:
         overlap = FORBIDDEN_FEATURE_COLUMNS.intersection(
             CURRENT_MINUTES_FEATURES
@@ -382,6 +424,7 @@ def _player_row(
     opp_net_rating: float = -1.0,
     player_team_spread: float = -3.0,
     game_total: float = 220.0,
+    pf: float = 2,
 ) -> dict:
     return {
         "player_id": player_id,
@@ -399,6 +442,7 @@ def _player_row(
         "pass": 20,
         "fga": 12,
         "assists": 4,
+        "pf": pf,
         "reb": 5,
         "stl": 1,
         "blk": 1,
