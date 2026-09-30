@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
+from lightgbm import LGBMRegressor, early_stopping
 from xgboost import XGBRegressor
 
 from models.shared.metrics import DEFAULT_MIN_TIERS, score_quantile_fold
@@ -75,6 +76,81 @@ def fit_quantile_models(
         key = f"q_{q:.2f}"
         models[key] = m
         preds[key] = m.predict(predict_X)
+    return models, preds
+
+
+def _fit_lgb_regressor(params: dict, alpha: float, X_fit, y_fit, X_es, y_es):
+    """Fit one quantile LightGBM model. ``alpha`` is not taken from ``params``."""
+    if "alpha" in params:
+        raise ValueError("alpha is set per quantile, not in lgb_params")
+    cleaned = dict(params)
+    rounds = cleaned.pop("early_stopping_rounds", None)
+    model = LGBMRegressor(**cleaned, alpha=alpha)
+    fit_kwargs: dict[str, Any] = {"eval_set": [(X_es, y_es)]}
+    if rounds is not None:
+        fit_kwargs["callbacks"] = [early_stopping(int(rounds), verbose=False)]
+    model.fit(X_fit, y_fit, **fit_kwargs)
+    return model
+
+
+def fit_quantile_lightgbm(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    *,
+    quantiles: Sequence[float] | None = None,
+    lgb_params: dict | None = None,
+    early_stop: str = "validation",
+    train_dates: pd.Series | np.ndarray | Sequence | None = None,
+    train_tail_frac: float = 0.10,
+    X_predict: pd.DataFrame | None = None,
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """Train one LightGBM quantile model per quantile; return models + preds."""
+    if early_stop == "train_tail":
+        if train_dates is None:
+            raise ValueError("train_tail requires train_dates")
+        dates = pd.to_datetime(np.asarray(train_dates))
+        if len(dates) != len(X_train):
+            raise ValueError("train_dates must align with X_train rows")
+        unique_dates = pd.unique(dates)
+        n_unique = len(unique_dates)
+        if n_unique < 2:
+            raise ValueError("train_tail requires at least two training dates")
+        n_stop = int(np.floor(n_unique * train_tail_frac))
+        if n_stop < 1:
+            n_stop = 1
+        if n_stop >= n_unique:
+            raise ValueError(
+                f"train_tail n_stop={n_stop} must be strictly less than "
+                f"n_unique={n_unique}"
+            )
+        stop_dates = set(unique_dates[-n_stop:])
+        fit_mask = ~pd.Series(dates).isin(stop_dates).to_numpy()
+        stop_mask = pd.Series(dates).isin(stop_dates).to_numpy()
+        X_fit = X_train.iloc[fit_mask] if hasattr(X_train, "iloc") else X_train[fit_mask]
+        y_fit = y_train.iloc[fit_mask] if hasattr(y_train, "iloc") else y_train[fit_mask]
+        X_es = X_train.iloc[stop_mask] if hasattr(X_train, "iloc") else X_train[stop_mask]
+        y_es = y_train.iloc[stop_mask] if hasattr(y_train, "iloc") else y_train[stop_mask]
+        predict_X = X_val if X_predict is None else X_predict
+    elif early_stop == "validation":
+        X_fit, y_fit = X_train, y_train
+        X_es, y_es = X_val, y_val
+        predict_X = X_val if X_predict is None else X_predict
+    else:
+        raise ValueError(f"unknown early_stop={early_stop!r}")
+
+    if lgb_params is None:
+        raise ValueError("lgb_params is required (define in the prop notebook)")
+    quantiles = list(quantiles or DEFAULT_QUANTILES)
+    params = dict(lgb_params)
+    models: dict[str, Any] = {}
+    preds: dict[str, np.ndarray] = {}
+    for q in quantiles:
+        model = _fit_lgb_regressor(params, q, X_fit, y_fit, X_es, y_es)
+        key = f"q_{q:.2f}"
+        models[key] = model
+        preds[key] = np.asarray(model.predict(predict_X), dtype=float)
     return models, preds
 
 
