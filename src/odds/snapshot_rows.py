@@ -95,6 +95,18 @@ def underdog_picks_to_rows(
 
 _FANDUEL_SIDE_SUFFIX = re.compile(r"\s+(over|under)$", re.IGNORECASE)
 _FANDUEL_STAT_TO_MARKET = {
+    "points": "player_points",
+    "rebounds": "player_rebounds",
+    "assists": "player_assists",
+    "three_pointers_made": "player_threes",
+    "steals": "player_steals",
+    "blocks": "player_blocks",
+    "turnovers": "player_turnovers",
+    "points_rebounds_assists": "player_pts_rebs_asts",
+    "points_rebounds": "player_pts_rebs",
+    "points_assists": "player_pts_asts",
+    "rebounds_assists": "player_rebs_asts",
+    "steals_blocks": "player_steals_blocks",
     "hits": "player_hits",
     "extra_base_hits": "player_extra_base_hits",
     "home_runs": "player_home_runs",
@@ -386,7 +398,14 @@ _SELENIUM_STAT_TO_MARKET = {
     "points": "player_points",
     "assists": "player_assists",
     "rebounds": "player_rebounds",
+    "three_pointers": "player_threes",
+    "steals": "player_steals",
+    "blocks": "player_blocks",
+    "turnovers": "player_turnovers",
     "points_rebounds_assists": "player_pts_rebs_asts",
+    "points_rebounds": "player_pts_rebs",
+    "points_assists": "player_pts_asts",
+    "rebounds_assists": "player_rebs_asts",
     # Baseball (MLB) — selenium JSON ``stat`` → odds.mlb_pinnacle.market_type
     "hits": "player_hits",
     "home_runs": "player_home_runs",

@@ -1,17 +1,18 @@
 """
-Underdog Fantasy pick'em scraper — MLB edition (refactored for debuggability).
+Underdog Fantasy pick'em scraper — NBA edition.
 
-Fetches MLB pick'em lines from Underdog Fantasy API and exports clean JSON.
+Fetches NBA pick'em lines from Underdog Fantasy API and exports clean JSON.
 Includes detailed logging at each step to make debugging easy.
 
 Usage:
-    python underdog_scraper_mlb.py
+    python -m src.scrapers.nba.nba_underdog
 
 Environment variables:
     UNDERDOG_OUTPUT: Override default output path (must end in .json);
                      sport slug is appended when saving multiple leagues
     UNDERDOG_URL: Override API endpoint
     LOG_LEVEL: Set logging level (DEBUG, INFO, WARNING, ERROR)
+    UNDERDOG_SKIP_DB: Skip the Supabase upsert when set
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any
@@ -33,16 +33,16 @@ import requests
 
 try:
     from .paths import ensure_repo_on_path
-except ImportError:  # python mlb_underdog.py from this directory
+except ImportError:  # python nba_underdog.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
-_DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "underdogs", "mlb")
+_DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "underdogs", "nba")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "sport_allowlist": ["MLB"],
+    "sport_allowlist": ["NBA"],
     # beta/v5 returns 426 upgrade_required; current public pick'em API is /v1.
     "ud_pickem_url": "https://api.underdogfantasy.com/v1/over_under_lines",
     "headers": {
@@ -158,7 +158,7 @@ def get_sport_allowlist(cfg: dict[str, Any]) -> frozenset[str] | None:
     Returns:
         Frozenset of sport IDs to keep, or None to disable filtering.
     """
-    raw = cfg.get("sport_allowlist", ["MLB"])
+    raw = cfg.get("sport_allowlist", ["NBA"])
 
     if raw is None:
         logger.info("Sport allowlist is None — will keep all sports")
@@ -424,7 +424,7 @@ def resolve_output_path(sport: str) -> str:
 
     Checks:
     1. UNDERDOG_OUTPUT env var (if .json file) — used as-is for a single sport
-    2. Default: data/props/underdogs/mlb/underdog_{sport}_YYYY-MM-DD_HHMMSS.json
+    2. Default: data/props/underdogs/nba/underdog_{sport}_YYYY-MM-DD_HHMMSS.json
 
     Returns:
         Absolute path to output file
@@ -442,7 +442,7 @@ def resolve_output_path(sport: str) -> str:
             logger.info(f"Using UNDERDOG_OUTPUT: {expanded}")
             return expanded
 
-    # Default path: underdog_mlb_YYYY-MM-DD_HHMMSS.json
+    # Default path: underdog_nba_YYYY-MM-DD_HHMMSS.json
     now = datetime.now(_OUTPUT_TZ)
     filename = now.strftime(f"underdog_{sport_slug}_%Y-%m-%d_%H%M%S.json")
     path = os.path.join(_DEFAULT_OUTPUT_DIR, filename)
@@ -461,10 +461,10 @@ def group_picks_by_sport(picks: list[Pick]) -> dict[str, list[Pick]]:
 
 
 def sport_to_league(sport: str) -> str | None:
-    """Map Underdog sport_id to odds league slug (mlb only)."""
+    """Map Underdog sport_id to odds league slug (nba only)."""
     normalized = sport.strip().upper()
-    if normalized == "MLB":
-        return "mlb"
+    if normalized == "NBA":
+        return "nba"
     return None
 
 
@@ -514,7 +514,7 @@ class UnderdogScraper:
         logger.info("Initialization complete")
 
     def _load_sport_to_supabase(self, sport: str, sport_picks: list[Pick]) -> None:
-        """Upsert one sport batch to odds.mlb_underdogs; JSON save is already done."""
+        """Upsert one sport batch to odds.nba_underdogs; JSON save is already done."""
         league = sport_to_league(sport)
         if league is None:
             logger.info(f"Skipping Supabase load for unmapped sport {sport!r}")
@@ -527,20 +527,20 @@ class UnderdogScraper:
                 league=league,
                 scraped_at=self.scraped_at,
             )
-            logger.info(f"Supabase odds.mlb_underdogs upserted {n} rows ({sport})")
+            logger.info(f"Supabase odds.nba_underdogs upserted {n} rows ({sport})")
         except Exception as e:
             logger.error(f"Supabase underdog load failed (JSON kept): {e}")
 
     def run(self) -> None:
         """Execute the full scrape pipeline."""
         logger.info("=" * 70)
-        logger.info("STARTING UNDERDOG SCRAPER (MLB)")
+        logger.info("STARTING UNDERDOG SCRAPER (NBA)")
         logger.info("=" * 70)
 
         try:
             # Step 1: Fetch
             logger.info("\n[Step 1/3] Fetching data...")
-            url = self.config.get("ud_pickem_url")
+            url = os.environ.get("UNDERDOG_URL", "").strip() or self.config.get("ud_pickem_url")
             headers = self.config.get("headers", {})
             payload = fetch_underdogfantasy(url, headers)
 
@@ -549,14 +549,13 @@ class UnderdogScraper:
             sport_allowlist = get_sport_allowlist(self.config)
             self.picks = extract_picks(payload, sport_allowlist)
 
-            # Step 3: Save one file per sport (underdog_mlb_*, …)
+            # Step 3: Save one file per sport (underdog_nba_*, …)
             logger.info("\n[Step 3/3] Saving to file...")
             self.scraped_at = datetime.now(timezone.utc)
             grouped = group_picks_by_sport(self.picks)
             self.output_paths = []
             if not grouped:
-                # Still write an empty MLB file when allowlist includes it, else first allowlist sport
-                fallback = "MLB"
+                fallback = "NBA"
                 if sport_allowlist:
                     fallback = sorted(sport_allowlist)[0]
                 path = resolve_output_path(fallback)

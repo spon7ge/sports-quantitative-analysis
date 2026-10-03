@@ -208,6 +208,8 @@ def _prizepicks_table(league: str) -> str:
     lg = (league or "").strip().lower()
     if lg == "mlb":
         return "mlb_prizepicks"
+    if lg == "nba":
+        return "nba_prizepicks"
     return "wnba_prizepicks"
 
 
@@ -248,6 +250,8 @@ def _underdog_table(league: str) -> str:
     lg = (league or "").strip().lower()
     if lg == "mlb":
         return "mlb_underdogs"
+    if lg == "nba":
+        return "nba_underdogs"
     return "wnba_underdogs"
 
 
@@ -255,6 +259,8 @@ def _pinnacle_props_table(league: str) -> str:
     lg = (league or "").strip().lower()
     if lg == "mlb":
         return "mlb_pinnacle"
+    if lg == "nba":
+        return "nba_pinnacle"
     if lg == "nfl":
         return "nfl_pinnacle"
     return "wnba_pinnacle"
@@ -297,6 +303,8 @@ def _fanduel_table(league: str) -> str:
     lg = (league or "").strip().lower()
     if lg == "mlb":
         return "mlb_fanduel"
+    if lg == "nba":
+        return "nba_fanduel"
     raise ValueError(f"unsupported fanduel league: {league}")
 
 
@@ -337,6 +345,8 @@ def _draftkings_table(league: str) -> str:
     lg = (league or "").strip().lower()
     if lg == "mlb":
         return "mlb_draftkings"
+    if lg == "nba":
+        return "nba_draftkings"
     raise ValueError(f"unsupported draftkings league: {league}")
 
 
@@ -412,6 +422,8 @@ def _pinnacle_team_table(league: str) -> str:
     lg = (league or "").strip().lower()
     if lg == "mlb":
         return "mlb_pinnacle_team"
+    if lg == "nba":
+        return "nba_pinnacle_team"
     if lg == "nfl":
         return "nfl_pinnacle_team"
     return "wnba_pinnacle_team"
@@ -471,6 +483,8 @@ def _prophetx_props_table(league: str) -> str:
         return "wnba_prophetx"
     if key == "nfl":
         return "nfl_prophetx"
+    if key == "nba":
+        return "nba_prophetx"
     return "mlb_prophetx"
 
 
@@ -511,6 +525,8 @@ def _prophetx_team_table(league: str) -> str:
         return "wnba_prophetx_team"
     if key == "nfl":
         return "nfl_prophetx_team"
+    if key == "nba":
+        return "nba_prophetx_team"
     return "mlb_prophetx_team"
 
 
@@ -571,6 +587,8 @@ def _novig_props_table(league: str) -> str:
         return "wnba_novig"
     if key == "nfl":
         return "nfl_novig"
+    if key == "nba":
+        return "nba_novig"
     return "mlb_novig"
 
 
@@ -580,6 +598,8 @@ def _novig_team_table(league: str) -> str:
         return "wnba_novig_team"
     if key == "nfl":
         return "nfl_novig_team"
+    if key == "nba":
+        return "nba_novig_team"
     return "mlb_novig_team"
 
 
