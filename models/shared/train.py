@@ -154,19 +154,38 @@ def fit_quantile_lightgbm(
     return models, preds
 
 
+def _quantile_backend(
+    xgb_params: dict | None,
+    lgb_params: dict | None,
+) -> tuple[str, Callable[..., tuple[dict[str, Any], dict[str, np.ndarray]]]]:
+    """Return the model name and fitter. Exactly one param dict is allowed."""
+    if (xgb_params is None) == (lgb_params is None):
+        raise ValueError("pass exactly one of xgb_params or lgb_params")
+    if lgb_params is not None:
+        def fit_lgb(*args, **kwargs):
+            return fit_quantile_lightgbm(*args, lgb_params=lgb_params, **kwargs)
+        return "LightGBM", fit_lgb
+
+    def fit_xgb(*args, **kwargs):
+        return fit_quantile_models(*args, xgb_params=xgb_params, **kwargs)
+    return "XGBoost", fit_xgb
+
+
 def run_timeseries_cv(
     X: pd.DataFrame,
     y: pd.Series,
     train_df: pd.DataFrame,
     *,
-    xgb_params: dict,
+    xgb_params: dict | None = None,
+    lgb_params: dict | None = None,
     role_col: str = "starting",
     tiers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
     n_splits: int = 5,
     quantiles: Sequence[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Phase 1 — TimeSeriesSplit for feature / hyperparam comparison."""
-    print("── Phase 1: TimeSeriesSplit ─────────────────────────────────────────")
+    model_name, fit_quantiles = _quantile_backend(xgb_params, lgb_params)
+    print(f"── Phase 1: TimeSeriesSplit ({model_name}) ──────────────────────────")
     tscv = TimeSeriesSplit(n_splits=n_splits)
     results: list[dict[str, Any]] = []
 
@@ -174,9 +193,9 @@ def run_timeseries_cv(
         X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
         starting_val = train_df[role_col].iloc[val_idx].values
-        models, preds = fit_quantile_models(
+        models, preds = fit_quantiles(
             X_tr, y_tr, X_val, y_val,
-            quantiles=quantiles, xgb_params=xgb_params,
+            quantiles=quantiles,
         )
         metrics = score_quantile_fold(
             y_val.values, preds,
@@ -188,10 +207,16 @@ def run_timeseries_cv(
         results.append(metrics)
 
     pinballs = [r["pinball"] for r in results]
-    covs = [r["coverage_80pct"] for r in results]
-    print("\nTimeSeriesSplit Summary")
+    covs = [r.get("coverage_80pct", float("nan")) for r in results]
+    print(f"\nTimeSeriesSplit Summary ({model_name})")
     print(f"  Pinball q50 : {np.mean(pinballs):.3f} ± {np.std(pinballs):.3f}")
-    print(f"  Coverage 80%: {np.mean(covs):.1%} ± {np.std(covs):.1%}  (target 80%)")
+    if np.any(~np.isnan(covs)):
+        print(
+            f"  Coverage 80%: {np.nanmean(covs):.1%} ± {np.nanstd(covs):.1%}  "
+            "(target 80%)"
+        )
+    else:
+        print("  Coverage 80%: n/a (q10/q90 not fit)")
     return results
 
 
@@ -343,7 +368,8 @@ def run_walk_forward(
     y: pd.Series,
     train_df: pd.DataFrame,
     *,
-    xgb_params: dict,
+    xgb_params: dict | None = None,
+    lgb_params: dict | None = None,
     role_col: str = "starting",
     tiers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
     n_folds: int = 4,
@@ -354,7 +380,10 @@ def run_walk_forward(
     train_tail_frac: float = 0.10,
 ) -> dict[str, Any]:
     """Phase 2 — date-based walk-forward validation (production simulation)."""
-    print("\n── Phase 2: Walk-Forward Validation (date-based) ───────────────────")
+    model_name, fit_quantiles = _quantile_backend(xgb_params, lgb_params)
+    print(
+        f"\n── Phase 2: Walk-Forward Validation ({model_name}, date-based) ──────"
+    )
     if not train_df["game_date"].is_monotonic_increasing:
         raise ValueError("train_df must be sorted by game_date")
 
@@ -391,7 +420,6 @@ def run_walk_forward(
 
         fit_kwargs: dict[str, Any] = {
             "quantiles": quantiles,
-            "xgb_params": xgb_params,
             "early_stop": early_stop,
             "train_tail_frac": train_tail_frac,
         }
@@ -399,7 +427,7 @@ def run_walk_forward(
             fit_kwargs["train_dates"] = train_df.loc[train_mask, "game_date"]
             fit_kwargs["X_predict"] = X_val
 
-        models, preds = fit_quantile_models(
+        models, preds = fit_quantiles(
             X_tr, y_tr, X_val, y_val,
             **fit_kwargs,
         )
@@ -519,7 +547,8 @@ def evaluate_holdout(
     *,
     features: Sequence[str],
     target_col: str,
-    xgb_params: dict,
+    xgb_params: dict | None = None,
+    lgb_params: dict | None = None,
     role_col: str = "starting",
     tiers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
     wf_results: list[dict[str, Any]] | None = None,
@@ -528,6 +557,7 @@ def evaluate_holdout(
     es_frac: float = 0.90,
 ) -> dict[str, Any]:
     """Blind holdout evaluation on the held-out season."""
+    _, fit_quantiles = _quantile_backend(xgb_params, lgb_params)
     features = list(features)
     print(f"── {fold_label} ─────────────────────────────────────────────────")
     print(
@@ -547,11 +577,13 @@ def evaluate_holdout(
     X_es_val = X_train_full.iloc[es_cutoff:]
     y_es_val = y_train_full.iloc[es_cutoff:]
 
-    models_ho, _ = fit_quantile_models(
+    models_ho, _ = fit_quantiles(
         X_es_train, y_es_train, X_es_val, y_es_val,
-        quantiles=quantiles, xgb_params=xgb_params,
+        quantiles=quantiles,
     )
-    preds_ho = {k: models_ho[k].predict(X_ho) for k in models_ho}
+    preds_ho = {
+        k: np.asarray(models_ho[k].predict(X_ho), dtype=float) for k in models_ho
+    }
 
     ho_metrics = score_quantile_fold(
         y_ho.values, preds_ho,

@@ -8,6 +8,11 @@ playwright==1.62.0
 selenium==4.49.0
 xgboost==3.4.1
 lightgbm==4.7.0
+# ngboost declares lifelines, which pins pandas<3. Install the wheel only:
+#   pip install --no-deps ngboost==0.5.11
+ngboost==0.5.11
+sympy==1.14.0
+mpmath==1.4.1
 scikit-learn==1.9.0
 optuna==5.0.0
 matplotlib==3.11.1

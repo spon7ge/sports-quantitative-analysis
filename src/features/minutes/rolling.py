@@ -68,6 +68,73 @@ def prior_roll(
     return _drop_group_level(rolled)
 
 
+def prior_quantile(
+    frame: pd.DataFrame,
+    column: str,
+    by: list[str],
+    window: int,
+    quantile: float,
+    min_periods: int = 5,
+) -> pd.Series:
+    shifted = prior_shift(frame, column, by)
+    rolled = shifted.groupby(
+        group_keys(frame, by),
+        sort=False,
+    ).rolling(
+        window,
+        min_periods=min_periods,
+    ).quantile(quantile)
+    return _drop_group_level(rolled)
+
+
+def prior_trim_mean(
+    frame: pd.DataFrame,
+    column: str,
+    by: list[str],
+    window: int,
+    *,
+    low: float = 0.20,
+    high: float = 0.80,
+    min_periods: int = 5,
+) -> pd.Series:
+    shifted = prior_shift(frame, column, by)
+    return shifted.groupby(
+        group_keys(frame, by),
+        sort=False,
+    ).transform(
+        lambda series: _window_trim_mean(
+            series.to_numpy(dtype=float),
+            window,
+            low,
+            high,
+            min_periods,
+        )
+    )
+
+
+def prior_outside_bounds(
+    frame: pd.DataFrame,
+    column: str,
+    by: list[str],
+    window: int,
+    min_periods: int = 3,
+) -> pd.Series:
+    """1 when the last game sits outside the min/max of the games before it."""
+    keys = group_keys(frame, by)
+    last = prior_shift(frame, column, by)
+    older = last.groupby(keys, sort=False).shift(1)
+    grouped = older.groupby(keys, sort=False)
+    floor = _drop_group_level(
+        grouped.rolling(window, min_periods=min_periods).min()
+    )
+    ceiling = _drop_group_level(
+        grouped.rolling(window, min_periods=min_periods).max()
+    )
+    outside = (last < floor) | (last > ceiling)
+    known = floor.notna() & ceiling.notna() & last.notna()
+    return outside.astype(float).where(known)
+
+
 def prior_sum(
     frame: pd.DataFrame,
     column: str,
@@ -127,6 +194,29 @@ def ratio(
     denominator: pd.Series,
 ) -> pd.Series:
     return numerator / denominator.replace(0, np.nan)
+
+
+def _window_trim_mean(
+    values: np.ndarray,
+    window: int,
+    low: float,
+    high: float,
+    min_periods: int,
+) -> np.ndarray:
+    out = np.full(len(values), np.nan)
+    for end in range(len(values)):
+        start = 0 if end < window else end - window + 1
+        chunk = values[start:end + 1]
+        finite = chunk[np.isfinite(chunk)]
+        if len(finite) < min_periods:
+            continue
+        lo = float(np.quantile(finite, low))
+        hi = float(np.quantile(finite, high))
+        kept = finite[(finite >= lo) & (finite <= hi)]
+        if len(kept) == 0:
+            continue
+        out[end] = float(kept.mean())
+    return out
 
 
 def _drop_group_level(series: pd.Series) -> pd.Series:

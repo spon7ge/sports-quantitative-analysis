@@ -80,6 +80,8 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
         self.assertEqual(third["min_lag_1"], 20)
         self.assertEqual(third["min_mean_3"], 15)
         self.assertEqual(third["min_mean_10"], 15)
+        alpha = 1 - np.exp(np.log(0.5) / 10)
+        self.assertAlmostEqual(third["min_ewm_hl_10"], 10 + alpha * 10)
 
         mutated = frame.copy()
         mutated.loc[mutated["game_id"].eq(3), "minutes"] = 99
@@ -97,6 +99,81 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
         self.assertEqual(
             mutated_third["min_mean_3"],
             third["min_mean_3"],
+        )
+        self.assertAlmostEqual(
+            mutated_third["min_ewm_hl_10"],
+            third["min_ewm_hl_10"],
+        )
+
+    def test_typical_band_and_recent_bounds_ignore_the_current_game(
+        self,
+    ) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 10, game_id=1),
+                _player_row(1, "2024-01-03", 20, game_id=2),
+                _player_row(1, "2024-01-05", 30, game_id=3),
+                _player_row(1, "2024-01-07", 40, game_id=4),
+                _player_row(1, "2024-01-09", 100, game_id=5),
+                _player_row(1, "2024-01-11", 32, game_id=6),
+                _player_row(1, "2024-01-13", 28, game_id=7),
+            ]
+        )
+        featured = add_minutes_features(frame)
+        by_game = featured.set_index("game_id")
+        # Priors 10, 20, 30, 40, 100. Linear 20th/80th are 18 and 52.
+        # Games inside that band are 20, 30, 40.
+        row = by_game.loc[6]
+        self.assertAlmostEqual(row["min_p20_20"], 18)
+        self.assertAlmostEqual(row["min_p80_20"], 52)
+        self.assertAlmostEqual(row["min_p80_minus_p20_20"], 34)
+        self.assertAlmostEqual(row["min_trim_mean_20"], 30)
+        self.assertAlmostEqual(row["min_floor_10"], 10)
+        self.assertAlmostEqual(row["min_ceiling_10"], 100)
+        self.assertAlmostEqual(row["min_span_10"], 90)
+        self.assertEqual(row["min_lag_outside_10"], 1)
+        self.assertEqual(by_game.loc[7, "min_lag_outside_10"], 0)
+        self.assertTrue(np.isnan(by_game.loc[1, "min_p20_20"]))
+        self.assertTrue(np.isnan(by_game.loc[1, "min_floor_10"]))
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(6), "minutes"] = 1
+        mutated.loc[mutated["game_id"].eq(6), "min"] = 1
+        mutated.loc[mutated["game_id"].eq(6), "min_sec"] = "1:00"
+        mutated_row = add_minutes_features(mutated).set_index("game_id").loc[6]
+        self.assertAlmostEqual(mutated_row["min_trim_mean_20"], 30)
+        self.assertAlmostEqual(mutated_row["min_span_10"], 90)
+        self.assertEqual(mutated_row["min_lag_outside_10"], 1)
+
+    def test_minutes_volatility_is_prior_dispersion_over_prior_mean(
+        self,
+    ) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 10, game_id=1),
+                _player_row(1, "2024-01-03", 30, game_id=2),
+                _player_row(1, "2024-01-05", 20, game_id=3),
+            ]
+        )
+        featured = add_minutes_features(frame)
+        by_game = featured.set_index("game_id")
+
+        self.assertTrue(np.isnan(by_game.loc[1, "min_vol_10"]))
+        self.assertTrue(np.isnan(by_game.loc[2, "min_vol_10"]))
+        # Priors are 10 and 30. Sample std is sqrt(200); mean is 20.
+        self.assertAlmostEqual(
+            by_game.loc[3, "min_vol_10"],
+            (200 ** 0.5) / 20,
+        )
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(3), "minutes"] = 99
+        mutated.loc[mutated["game_id"].eq(3), "min"] = 99
+        mutated.loc[mutated["game_id"].eq(3), "min_sec"] = "99:00"
+        mutated_featured = add_minutes_features(mutated)
+        self.assertAlmostEqual(
+            mutated_featured.set_index("game_id").loc[3, "min_vol_10"],
+            by_game.loc[3, "min_vol_10"],
         )
 
     def test_start_rate_ignores_current_start_position(self) -> None:
@@ -131,6 +208,49 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
         ].iloc[0]
         self.assertEqual(third["start_rate_10"], 1.0)
         self.assertNotIn("is_starter", featured.columns)
+
+    def test_season_volatility_cap_flags_unstable_roles(self) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 30, game_id=11),
+                _player_row(1, "2024-01-03", 32, game_id=12),
+                _player_row(1, "2024-01-05", 31, game_id=13),
+                _player_row(1, "2024-01-07", 33, game_id=14),
+                _player_row(1, "2024-01-09", 29, game_id=15),
+                _player_row(1, "2024-01-11", 31, game_id=16),
+                _player_row(2, "2024-01-01", 12, game_id=21),
+                _player_row(2, "2024-01-03", 28, game_id=22),
+                _player_row(2, "2024-01-05", 8, game_id=23),
+                _player_row(2, "2024-01-07", 30, game_id=24),
+                _player_row(2, "2024-01-09", 15, game_id=25),
+                _player_row(2, "2024-01-11", 18, game_id=26),
+            ]
+        )
+        featured = add_minutes_features(frame)
+        by_game = featured.set_index("game_id")
+        stable = by_game.loc[16]
+        unstable = by_game.loc[26]
+
+        self.assertAlmostEqual(stable["season_min_vol"], (2.5 ** 0.5) / 31)
+        self.assertEqual(stable["min_unstable"], 0)
+        self.assertAlmostEqual(
+            unstable["season_min_vol"],
+            (96.8 ** 0.5) / 18.6,
+        )
+        self.assertEqual(unstable["min_unstable"], 1)
+        self.assertTrue(np.isnan(by_game.loc[11, "season_min_vol"]))
+        self.assertTrue(np.isnan(by_game.loc[11, "min_unstable"]))
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(26), "minutes"] = 40
+        mutated.loc[mutated["game_id"].eq(26), "min"] = 40
+        mutated.loc[mutated["game_id"].eq(26), "min_sec"] = "40:00"
+        mutated_row = add_minutes_features(mutated).set_index("game_id").loc[26]
+        self.assertEqual(mutated_row["min_unstable"], 1)
+        self.assertAlmostEqual(
+            mutated_row["season_min_vol"],
+            unstable["season_min_vol"],
+        )
 
     def test_trailing_minutes_cross_seasons_season_mean_resets(
         self,

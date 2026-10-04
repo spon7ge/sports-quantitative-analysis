@@ -3,7 +3,13 @@ import pandas as pd
 import pytest
 
 from models.shared import train as train_mod
-from models.shared.train import fit_quantile_lightgbm, tune_lgb_quantile
+from models.shared.train import (
+    evaluate_holdout,
+    fit_quantile_lightgbm,
+    run_timeseries_cv,
+    run_walk_forward,
+    tune_lgb_quantile,
+)
 
 
 class _FakeLGBM:
@@ -161,6 +167,120 @@ def test_tune_fixed_params_override_defaults(monkeypatch):
         fixed_params={"verbose": 0},
     )
     assert result["best_params"]["verbose"] == 0
+
+
+def _dated_frame(n_dates=12):
+    dates = pd.date_range("2024-01-01", periods=n_dates, freq="D")
+    rows = []
+    for day in dates:
+        for player in (1, 2):
+            rows.append({
+                "game_date": day,
+                "a": float(player),
+                "minutes": 10.0 + player,
+                "starting": player % 2,
+            })
+    frame = pd.DataFrame(rows)
+    return frame, frame[["a"]], frame["minutes"]
+
+
+def test_timeseries_cv_fits_lightgbm_on_each_split(monkeypatch):
+    _patch_booster(monkeypatch)
+    frame, X, y = _dated_frame(9)
+    results = run_timeseries_cv(
+        X, y, frame,
+        lgb_params={"n_estimators": 3, "early_stopping_rounds": 2},
+        n_splits=2,
+        quantiles=[0.10, 0.50, 0.90],
+    )
+    assert len(results) == 2
+    assert all(np.isfinite(row["pinball"]) for row in results)
+    assert all(np.isfinite(row["coverage_80pct"]) for row in results)
+
+
+def test_walk_forward_fits_lightgbm_on_the_train_tail(monkeypatch):
+    _patch_booster(monkeypatch)
+    frame, X, y = _dated_frame(10)
+    result = run_walk_forward(
+        X, y, frame,
+        lgb_params={"n_estimators": 3},
+        quantiles=[0.50],
+        n_folds=1,
+        train_frac=0.5,
+        step_frac=0.2,
+        early_stop="train_tail",
+    )
+    oof = result["oof"]
+    assert set(oof["fold_id"]) == {1}
+    assert (oof["early_stop"] == "train_tail").all()
+    assert "q_0.50" in oof.columns
+    assert result["models_last"]["q_0.50"].eval_rows < len(X)
+
+
+def test_holdout_fits_lightgbm_on_the_train_tail_and_predicts_holdout(monkeypatch):
+    seen = {}
+
+    class _Recording(_FakeLGBM):
+        def fit(self, X, y, eval_set=None, callbacks=None):
+            seen["eval_y"] = np.asarray(eval_set[0][1], dtype=float).copy()
+            return super().fit(X, y, eval_set=eval_set, callbacks=callbacks)
+
+    monkeypatch.setattr(train_mod, "LGBMRegressor", _Recording)
+    monkeypatch.setattr(
+        train_mod,
+        "early_stopping",
+        lambda rounds, verbose=False: ("early_stopping", rounds, verbose),
+    )
+    train, _, _ = _dated_frame(10)
+    holdout = train.iloc[:4].copy()
+    holdout["minutes"] = [40.0, 41.0, 42.0, 43.0]
+    result = evaluate_holdout(
+        train,
+        holdout,
+        features=["a"],
+        target_col="minutes",
+        lgb_params={"n_estimators": 3, "early_stopping_rounds": 2},
+        quantiles=[0.10, 0.50, 0.90],
+        es_frac=0.75,
+        wf_results=None,
+    )
+    assert len(result["preds_ho"]["q_0.50"]) == 4
+    assert result["models_ho"]["q_0.50"].kwargs["alpha"] == 0.50
+    assert 40.0 not in set(seen["eval_y"])
+    assert set(seen["eval_y"]).issubset(set(train["minutes"]))
+
+
+def test_holdout_rejects_both_or_neither_model():
+    train, _, _ = _dated_frame(6)
+    holdout = train.iloc[:2].copy()
+    with pytest.raises(ValueError, match="exactly one"):
+        evaluate_holdout(
+            train, holdout, features=["a"], target_col="minutes", quantiles=[0.50],
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        evaluate_holdout(
+            train,
+            holdout,
+            features=["a"],
+            target_col="minutes",
+            xgb_params={"n_estimators": 1},
+            lgb_params={"n_estimators": 1},
+            quantiles=[0.50],
+        )
+
+
+def test_cv_rejects_both_or_neither_model():
+    frame, X, y = _dated_frame(6)
+    with pytest.raises(ValueError, match="exactly one"):
+        run_timeseries_cv(X, y, frame, n_splits=2, quantiles=[0.50])
+    with pytest.raises(ValueError, match="exactly one"):
+        run_walk_forward(
+            X, y, frame,
+            xgb_params={"n_estimators": 1},
+            lgb_params={"n_estimators": 1},
+            n_folds=1,
+            quantiles=[0.50],
+        )
 
 
 def test_tune_rejects_bad_inputs():

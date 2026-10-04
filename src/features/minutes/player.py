@@ -9,14 +9,18 @@ from .rolling import (
     numeric_column,
     prior_ewm,
     prior_expanding,
+    prior_outside_bounds,
+    prior_quantile,
     prior_roll,
     prior_shift,
     prior_sum,
+    prior_trim_mean,
     ratio,
 )
 
 PLAYER_KEY = ["player_id"]
 SEASON_PLAYER = ["player_id", "season_year"]
+SEASON_VOL_CAP = 0.25
 
 
 def add_observation_columns(
@@ -77,11 +81,21 @@ def add_player_role_features(
         "std",
         min_periods=2,
     )
+    result["min_vol_10"] = ratio(
+        result["min_std_10"],
+        result["min_mean_10"],
+    )
     result["min_ewm_hl_3"] = prior_ewm(
         result,
         minutes,
         PLAYER_KEY,
         halflife=3,
+    )
+    result["min_ewm_hl_10"] = prior_ewm(
+        result,
+        minutes,
+        PLAYER_KEY,
+        halflife=10,
     )
     result["min_ge_30_rate_10"] = prior_roll(
         result,
@@ -96,6 +110,54 @@ def add_player_role_features(
         PLAYER_KEY,
         10,
         "mean",
+    )
+    result["min_p20_20"] = prior_quantile(
+        result,
+        minutes,
+        PLAYER_KEY,
+        20,
+        0.20,
+    )
+    result["min_p80_20"] = prior_quantile(
+        result,
+        minutes,
+        PLAYER_KEY,
+        20,
+        0.80,
+    )
+    result["min_p80_minus_p20_20"] = (
+        result["min_p80_20"] - result["min_p20_20"]
+    )
+    result["min_trim_mean_20"] = prior_trim_mean(
+        result,
+        minutes,
+        PLAYER_KEY,
+        20,
+    )
+    result["min_floor_10"] = prior_roll(
+        result,
+        minutes,
+        PLAYER_KEY,
+        10,
+        "min",
+        min_periods=2,
+    )
+    result["min_ceiling_10"] = prior_roll(
+        result,
+        minutes,
+        PLAYER_KEY,
+        10,
+        "max",
+        min_periods=2,
+    )
+    result["min_span_10"] = (
+        result["min_ceiling_10"] - result["min_floor_10"]
+    )
+    result["min_lag_outside_10"] = prior_outside_bounds(
+        result,
+        minutes,
+        PLAYER_KEY,
+        10,
     )
     return result
 
@@ -131,6 +193,16 @@ def add_season_and_stint_features(
         SEASON_PLAYER,
         "std",
         min_periods=2,
+    )
+    result["season_min_vol"] = ratio(
+        result["season_min_std"],
+        result["season_min_mean"],
+    )
+    result["min_unstable"] = (
+        result["season_min_vol"]
+        .gt(SEASON_VOL_CAP)
+        .astype(float)
+        .where(result["season_min_vol"].notna())
     )
     result["season_start_rate"] = prior_expanding(
         result,
