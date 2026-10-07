@@ -1,9 +1,10 @@
-"""Run MLB odds/props scrapers only.
+"""Run MLB and NBA odds/props scrapers.
 
 Usage:
   python -m src.scrapers.run_all_odds
-  python -m src.scrapers.run_all_odds --only mlb_novig,mlb_underdog
-  python -m src.scrapers.run_all_odds --exclude mlb_prizepick
+  python -m src.scrapers.run_all_odds --league nba
+  python -m src.scrapers.run_all_odds --only nba_novig,nba_underdog
+  python -m src.scrapers.run_all_odds --exclude nba_prizepick,mlb_prizepick
   python -m src.scrapers.run_all_odds --fail-fast
 """
 
@@ -16,33 +17,40 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-League = Literal["mlb"]
+League = Literal["mlb", "nba"]
+LEAGUES: tuple[League, ...] = ("mlb", "nba")
 
 
 @dataclass(frozen=True)
 class ScraperJob:
     name: str
-    league: Literal["mlb"]
+    league: League
     module: str
     env: dict[str, str] | None = None
 
 
-# PrizePicks last so DataDome/browser fallback does not block
-# the HTTP scrapers if a captcha solve is needed.
-SCRAPER_JOBS: tuple[ScraperJob, ...] = (
-    ScraperJob("mlb_novig", "mlb", "src.scrapers.mlb.mlb_novig"),
-    ScraperJob("mlb_prophetx", "mlb", "src.scrapers.mlb.mlb_prophetx"),
-    ScraperJob("mlb_underdog", "mlb", "src.scrapers.mlb.mlb_underdog"),
-    ScraperJob("mlb_fanduel", "mlb", "src.scrapers.mlb.mlb_fanduel"),
-    ScraperJob("mlb_draftking", "mlb", "src.scrapers.mlb.mlb_draftking"),
-    ScraperJob(
-        "mlb_pinnacle",
-        "mlb",
-        "src.scrapers.mlb.mlb_pinnacle",
-        env={"PINNACLE_LEAGUES": "mlb"},
-    ),
-    ScraperJob("mlb_prizepick", "mlb", "src.scrapers.mlb.mlb_prizepick"),
-)
+def _league_jobs(league: League) -> tuple[ScraperJob, ...]:
+    """One book order per league. PrizePicks stays last inside the league."""
+    package = f"src.scrapers.{league}"
+    return (
+        ScraperJob(f"{league}_novig", league, f"{package}.{league}_novig"),
+        ScraperJob(f"{league}_prophetx", league, f"{package}.{league}_prophetx"),
+        ScraperJob(f"{league}_underdog", league, f"{package}.{league}_underdog"),
+        ScraperJob(f"{league}_fanduel", league, f"{package}.{league}_fanduel"),
+        ScraperJob(f"{league}_draftking", league, f"{package}.{league}_draftking"),
+        ScraperJob(
+            f"{league}_pinnacle",
+            league,
+            f"{package}.{league}_pinnacle",
+            env={"PINNACLE_LEAGUES": league},
+        ),
+        ScraperJob(f"{league}_prizepick", league, f"{package}.{league}_prizepick"),
+    )
+
+
+# PrizePicks is last in each league, and resolve_jobs moves every PrizePicks
+# job to the end of the selected list so a captcha does not block later HTTP scrapers.
+SCRAPER_JOBS: tuple[ScraperJob, ...] = _league_jobs("mlb") + _league_jobs("nba")
 
 KNOWN_NAMES = {job.name for job in SCRAPER_JOBS}
 
@@ -51,13 +59,24 @@ def _unknown_names(names: list[str]) -> list[str]:
     return [name for name in names if name not in KNOWN_NAMES]
 
 
+def _prizepicks_last(jobs: list[ScraperJob]) -> list[ScraperJob]:
+    rest = [job for job in jobs if not job.name.endswith("prizepick")]
+    prize = [job for job in jobs if job.name.endswith("prizepick")]
+    return rest + prize
+
+
 def resolve_jobs(
     *,
     only: list[str] | None = None,
     exclude: list[str] | None = None,
+    league: str | None = None,
 ) -> list[ScraperJob]:
-    """Filter the canonical MLB job list by optional allowlist, then denylist."""
+    """Filter jobs by league, then allowlist, then denylist. PrizePicks runs last."""
+    if league is not None and league not in LEAGUES:
+        raise ValueError(f"Unknown league {league!r}; choose from {LEAGUES}")
     jobs = list(SCRAPER_JOBS)
+    if league:
+        jobs = [job for job in jobs if job.league == league]
     if only:
         unknown = _unknown_names(only)
         if unknown:
@@ -74,7 +93,7 @@ def resolve_jobs(
             )
         deny = set(exclude)
         jobs = [j for j in jobs if j.name not in deny]
-    return jobs
+    return _prizepicks_last(jobs)
 
 
 def run_job(job: ScraperJob, *, python: str | None = None) -> int:
@@ -92,11 +111,12 @@ def run_all(
     *,
     only: list[str] | None = None,
     exclude: list[str] | None = None,
+    league: str | None = None,
     fail_fast: bool = False,
     python: str | None = None,
 ) -> int:
-    """Run selected MLB scrapers sequentially. Returns 0 iff all succeeded."""
-    jobs = resolve_jobs(only=only, exclude=exclude)
+    """Run selected scrapers sequentially. Returns 0 iff all succeeded."""
+    jobs = resolve_jobs(only=only, exclude=exclude, league=league)
     if not jobs:
         print("No scrapers selected.", flush=True)
         return 1
@@ -129,7 +149,13 @@ def _parse_only(raw: str | None) -> list[str] | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run MLB odds/props scrapers.",
+        description="Run MLB and NBA odds/props scrapers.",
+    )
+    parser.add_argument(
+        "--league",
+        choices=LEAGUES,
+        default=None,
+        help="Run one league. Default runs MLB and NBA.",
     )
     parser.add_argument(
         "--only",
@@ -151,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_all(
             only=_parse_only(args.only),
             exclude=_parse_only(args.exclude),
+            league=args.league,
             fail_fast=args.fail_fast,
         )
     except ValueError as exc:
