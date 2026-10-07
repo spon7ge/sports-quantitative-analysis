@@ -3,6 +3,7 @@ data/silver/
 data/research/
 data/mlb/
 data/props/
+data/backtest/singleBets.csv
 data/odds/*.json
 src/data/
 artifacts/mlb/
