@@ -151,35 +151,35 @@ def _clip_breakpoints(u, q, lo, hi):
     q = np.asarray(q, dtype=float)
     if not (lo <= hi):
         raise ValueError("cap")
-    out_u: list[float] = []
-    out_q: list[float] = []
-
-    def append(point_u: float, point_q: float) -> None:
-        clipped = float(np.clip(point_q, lo, hi))
-        if out_u and point_u < out_u[-1]:
-            raise ValueError("quantile knots decreased in u")
-        if out_u and point_u == out_u[-1]:
-            out_q[-1] = clipped
-            return
-        if out_q and clipped < out_q[-1] - 1e-8:
-            raise ValueError("clipped quantile function decreased")
-        out_u.append(float(point_u))
-        out_q.append(clipped)
-
-    append(float(u[0]), float(q[0]))
-    for index in range(1, len(u)):
-        u0 = float(u[index - 1])
-        u1 = float(u[index])
-        q0 = float(q[index - 1])
-        q1 = float(q[index])
-        if q0 != q1:
-            for level in (lo, hi):
-                if (q0 < level < q1) or (q1 < level < q0):
-                    t = (level - q0) / (q1 - q0)
-                    append(u0 + t * (u1 - u0), level)
-        append(u1, q1)
-    clipped_u = np.asarray(out_u, dtype=float)
-    clipped_q = np.asarray(out_q, dtype=float)
+    u0, u1, q0, q1 = u[:-1], u[1:], q[:-1], q[1:]
+    segment = np.arange(1, len(u))
+    # Points sort by (segment, slot): lo crossing, hi crossing, then the knot.
+    points_u, points_q = [u[:1]], [q[:1]]
+    seg_keys, slot_keys = [np.zeros(1, dtype=int)], [np.full(1, 2)]
+    changing = q0 != q1
+    for slot, level in enumerate((lo, hi)):
+        cross = changing & (((q0 < level) & (level < q1)) | ((q1 < level) & (level < q0)))
+        t = (level - q0[cross]) / (q1[cross] - q0[cross])
+        points_u.append(u0[cross] + t * (u1[cross] - u0[cross]))
+        points_q.append(np.full(int(cross.sum()), float(level)))
+        seg_keys.append(segment[cross])
+        slot_keys.append(np.full(int(cross.sum()), slot))
+    points_u.append(u1)
+    points_q.append(q1)
+    seg_keys.append(segment)
+    slot_keys.append(np.full(len(segment), 2))
+    order = np.lexsort((np.concatenate(slot_keys), np.concatenate(seg_keys)))
+    all_u = np.concatenate(points_u)[order]
+    all_q = np.clip(np.concatenate(points_q)[order], lo, hi)
+    if np.any(np.diff(all_u) < 0):
+        raise ValueError("quantile knots decreased in u")
+    # A repeated u keeps its last q; a new u is checked against the previous kept q.
+    new_run = np.concatenate([[True], all_u[1:] != all_u[:-1]])
+    last_of_run = np.concatenate([new_run[1:], [True]])
+    clipped_u = all_u[last_of_run].copy()
+    clipped_q = all_q[last_of_run].copy()
+    if np.any(all_q[new_run][1:] < clipped_q[:-1] - 1e-8):
+        raise ValueError("clipped quantile function decreased")
     if np.any(np.diff(clipped_q) < -1e-8):
         raise ValueError("clipped quantile function decreased")
     np.maximum.accumulate(clipped_q, out=clipped_q)

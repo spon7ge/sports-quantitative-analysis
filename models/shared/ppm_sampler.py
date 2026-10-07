@@ -76,12 +76,11 @@ def _zero_atom_knots(q05: float, table: np.ndarray, zeros: int):
     local = np.linspace(0.0, 1.0, m)
     u_positive = (atom + local * (1.0 - atom)) * 0.05
     q_positive = q05 * positive
-    u_knots = [0.0, u_atom, float(np.nextafter(u_atom, 1.0))]
-    q_knots = [0.0, 0.0, float(q_positive[0])]
-    for index in range(1, m - 1):
-        u_knots.append(float(u_positive[index]))
-        q_knots.append(float(q_positive[index]))
-    return np.asarray(u_knots, dtype=float), np.asarray(q_knots, dtype=float)
+    u_knots = np.concatenate(
+        [[0.0, u_atom, float(np.nextafter(u_atom, 1.0))], u_positive[1 : m - 1]]
+    )
+    q_knots = np.concatenate([[0.0, 0.0, float(q_positive[0])], q_positive[1 : m - 1]])
+    return u_knots.astype(float), q_knots.astype(float)
 
 
 def _rate_knots(prepared_row, lower_group, upper_group, tables):
