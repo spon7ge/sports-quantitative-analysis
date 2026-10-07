@@ -5,9 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from models.shared.baselines import ensure_naive_cols
+
+
+def tukey_fences(values, *, k: float = 1.5) -> tuple[float, float]:
+    """Inclusive Tukey fences ``Q1 - k * IQR`` and ``Q3 + k * IQR``.
+
+    Quartiles use the linear method, the same one as ``Series.quantile``.
+    A rate on the fence stays in the training pool. A rate past either
+    fence is the outlier.
+    """
+    rates = np.asarray(values, dtype=float)
+    if rates.ndim != 1:
+        raise ValueError("tukey fences expect a 1-d series of rates")
+    if rates.size == 0 or not np.isfinite(rates).all():
+        raise ValueError("tukey fences require finite rates")
+    q1, q3 = np.quantile(rates, [0.25, 0.75])
+    iqr = q3 - q1
+    return float(q1 - k * iqr), float(q3 + k * iqr)
 
 
 def season_holdout_split(
