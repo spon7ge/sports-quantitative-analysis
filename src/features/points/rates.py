@@ -6,14 +6,24 @@ import pandas as pd
 
 from src.features.minutes.rolling import (
     numeric_column,
+    prior_ewm,
     prior_expanding,
+    prior_outside_bounds,
+    prior_quantile,
+    prior_roll,
     prior_shift,
     prior_sum,
+    prior_trim_mean,
     ratio,
 )
 
 PLAYER_KEY = ["player_id"]
 SEASON_PLAYER = ["player_id", "season_year"]
+# Short stints produce extreme per-game rates (6 pts in 2 min = 3.0).
+RATE_MIN_MINUTES = 10
+# Per-game ppm CV with the 10-minute floor (2024-25): median ~0.48;
+# 0.50 flags ~45% of players and ~15% of 10+ ppg scorers.
+SEASON_PPM_VOL_CAP = 0.50
 
 
 def add_rate_features(
@@ -53,6 +63,16 @@ def add_rate_features(
         prior_sum(result, "pts", PLAYER_KEY, 20),
         minutes_20,
     )
+    for halflife in (10, 20):
+        result[f"pts_per_min_ewm_hl_{halflife}"] = ratio(
+            prior_ewm(result, "pts", PLAYER_KEY, halflife=halflife),
+            prior_ewm(
+                result,
+                "target_minutes",
+                PLAYER_KEY,
+                halflife=halflife,
+            ),
+        )
     season_pts = prior_expanding(
         result,
         "pts",
@@ -70,6 +90,7 @@ def add_rate_features(
         season_minutes,
     )
     result = _add_stint_rate(result)
+    result = _add_ppm_distribution(result)
 
     if "fga_per_min_10" not in result:
         result["fga_per_min_10"] = ratio(
@@ -116,6 +137,99 @@ def add_rate_features(
     )
     result["fga_per_min_5_minus_season"] = (
         fga_per_min_5 - season_fga_per_min
+    )
+    return result
+
+
+def _add_ppm_distribution(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    minutes = numeric_column(result, "target_minutes")
+    result["_ppm_obs"] = ratio(
+        numeric_column(result, "pts"),
+        minutes,
+    ).where(minutes.ge(RATE_MIN_MINUTES))
+
+    ppm_mean_10 = prior_roll(result, "_ppm_obs", PLAYER_KEY, 10, "mean")
+    ppm_std_10 = prior_roll(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        10,
+        "std",
+        min_periods=2,
+    )
+    result["ppm_vol_10"] = ratio(ppm_std_10, ppm_mean_10)
+    result["ppm_p20_20"] = prior_quantile(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        20,
+        0.20,
+    )
+    result["ppm_p80_20"] = prior_quantile(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        20,
+        0.80,
+    )
+    result["ppm_p80_minus_p20_20"] = (
+        result["ppm_p80_20"] - result["ppm_p20_20"]
+    )
+    result["ppm_trim_mean_20"] = prior_trim_mean(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        20,
+    )
+    result["ppm_floor_10"] = prior_roll(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        10,
+        "min",
+        min_periods=2,
+    )
+    result["ppm_ceiling_10"] = prior_roll(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        10,
+        "max",
+        min_periods=2,
+    )
+    result["ppm_span_10"] = (
+        result["ppm_ceiling_10"] - result["ppm_floor_10"]
+    )
+    result["ppm_lag_outside_10"] = prior_outside_bounds(
+        result,
+        "_ppm_obs",
+        PLAYER_KEY,
+        10,
+    )
+
+    season_ppm_mean = prior_expanding(
+        result,
+        "_ppm_obs",
+        SEASON_PLAYER,
+        "mean",
+    )
+    result["season_ppm_std"] = prior_expanding(
+        result,
+        "_ppm_obs",
+        SEASON_PLAYER,
+        "std",
+        min_periods=2,
+    )
+    result["season_ppm_vol"] = ratio(
+        result["season_ppm_std"],
+        season_ppm_mean,
+    )
+    result["ppm_unstable"] = (
+        result["season_ppm_vol"]
+        .gt(SEASON_PPM_VOL_CAP)
+        .astype(float)
+        .where(result["season_ppm_vol"].notna())
     )
     return result
 

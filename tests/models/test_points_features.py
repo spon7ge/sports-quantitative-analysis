@@ -116,6 +116,129 @@ class PointsFeatureLeakageTests(unittest.TestCase):
                 column,
             )
 
+    def test_typical_band_and_recent_bounds_ignore_the_current_game(
+        self,
+    ) -> None:
+        points = [10, 20, 30, 40, 100, 32, 28]
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    f"2024-01-{2 * index + 1:02d}",
+                    30,
+                    pts=value,
+                    game_id=index + 1,
+                )
+                for index, value in enumerate(points)
+            ]
+        )
+        featured = add_points_features(frame)
+        by_game = featured.set_index("game_id")
+        # 30 minutes each, so prior ppm is 10, 20, 30, 40, 100 over 30.
+        # Linear 20th/80th are 18/30 and 52/30; inside are 20, 30, 40.
+        row = by_game.loc[6]
+        self.assertAlmostEqual(row["ppm_p20_20"], 18 / 30)
+        self.assertAlmostEqual(row["ppm_p80_20"], 52 / 30)
+        self.assertAlmostEqual(row["ppm_p80_minus_p20_20"], 34 / 30)
+        self.assertAlmostEqual(row["ppm_trim_mean_20"], 1.0)
+        self.assertAlmostEqual(row["ppm_floor_10"], 10 / 30)
+        self.assertAlmostEqual(row["ppm_ceiling_10"], 100 / 30)
+        self.assertAlmostEqual(row["ppm_span_10"], 3.0)
+        self.assertEqual(row["ppm_lag_outside_10"], 1)
+        self.assertEqual(by_game.loc[7, "ppm_lag_outside_10"], 0)
+        self.assertTrue(np.isnan(by_game.loc[1, "ppm_p20_20"]))
+        self.assertTrue(np.isnan(by_game.loc[1, "ppm_floor_10"]))
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(6), "pts"] = 1
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[6]
+        self.assertAlmostEqual(mutated_row["ppm_trim_mean_20"], 1.0)
+        self.assertAlmostEqual(mutated_row["ppm_span_10"], 3.0)
+        self.assertEqual(mutated_row["ppm_lag_outside_10"], 1)
+
+    def test_ppm_distribution_skips_short_stints(self) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 20, pts=10, game_id=1),
+                _player_row(1, "2024-01-03", 2, pts=8, game_id=2),
+                _player_row(1, "2024-01-05", 20, pts=20, game_id=3),
+                _player_row(1, "2024-01-07", 20, pts=12, game_id=4),
+            ]
+        )
+        row = add_points_features(frame).set_index("game_id").loc[4]
+
+        # The 2-minute, 4.0 ppm stint is excluded; priors are 0.5 and 1.0.
+        self.assertAlmostEqual(row["ppm_floor_10"], 0.5)
+        self.assertAlmostEqual(row["ppm_ceiling_10"], 1.0)
+
+    def test_points_volatility_is_prior_dispersion_over_prior_mean(
+        self,
+    ) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 30, pts=10, game_id=1),
+                _player_row(1, "2024-01-03", 30, pts=30, game_id=2),
+                _player_row(1, "2024-01-05", 30, pts=20, game_id=3),
+            ]
+        )
+        by_game = add_points_features(frame).set_index("game_id")
+
+        self.assertTrue(np.isnan(by_game.loc[1, "ppm_vol_10"]))
+        self.assertTrue(np.isnan(by_game.loc[2, "ppm_vol_10"]))
+        # Prior pts 10 and 30 over 30 minutes; CV is scale-free.
+        self.assertAlmostEqual(
+            by_game.loc[3, "ppm_vol_10"],
+            (200 ** 0.5) / 20,
+        )
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(3), "pts"] = 99
+        self.assertAlmostEqual(
+            add_points_features(mutated)
+            .set_index("game_id")
+            .loc[3, "ppm_vol_10"],
+            by_game.loc[3, "ppm_vol_10"],
+        )
+
+    def test_season_volatility_cap_flags_unstable_scorers(self) -> None:
+        stable_pts = [20, 22, 21, 23, 19, 21]
+        unstable_pts = [4, 28, 2, 30, 6, 18]
+        frame = _rows(
+            [
+                _player_row(
+                    player_id,
+                    f"2024-01-{2 * index + 1:02d}",
+                    30,
+                    pts=value,
+                    game_id=10 * player_id + index + 1,
+                )
+                for player_id, series in ((1, stable_pts), (2, unstable_pts))
+                for index, value in enumerate(series)
+            ]
+        )
+        by_game = add_points_features(frame).set_index("game_id")
+        stable = by_game.loc[16]
+        unstable = by_game.loc[26]
+
+        self.assertAlmostEqual(stable["season_ppm_vol"], (2.5 ** 0.5) / 21)
+        self.assertEqual(stable["ppm_unstable"], 0)
+        self.assertAlmostEqual(
+            unstable["season_ppm_vol"],
+            (190.0 ** 0.5) / 14,
+        )
+        self.assertEqual(unstable["ppm_unstable"], 1)
+        self.assertTrue(np.isnan(by_game.loc[11, "season_ppm_vol"]))
+        self.assertTrue(np.isnan(by_game.loc[11, "ppm_unstable"]))
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(26), "pts"] = 40
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[26]
+        self.assertEqual(mutated_row["ppm_unstable"], 1)
+        self.assertAlmostEqual(
+            mutated_row["season_ppm_vol"],
+            unstable["season_ppm_vol"],
+        )
+
     def test_rates_use_rolling_sums_not_mean_of_ratios(self) -> None:
         frame = _rows(
             [
@@ -179,6 +302,35 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             third["ts_agg_20"],
             expected_ts,
         )
+
+    def test_ewm_pts_per_min_is_ratio_of_prior_ewms(self) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 10, pts=10, game_id=1),
+                _player_row(1, "2024-01-03", 20, pts=40, game_id=2),
+                _player_row(1, "2024-01-05", 30, pts=8, game_id=3),
+            ]
+        )
+        by_game = add_points_features(frame).set_index("game_id")
+
+        self.assertTrue(np.isnan(by_game.loc[1, "pts_per_min_ewm_hl_10"]))
+        self.assertAlmostEqual(by_game.loc[2, "pts_per_min_ewm_hl_10"], 1.0)
+        for halflife in (10, 20):
+            alpha = 1 - np.exp(np.log(0.5) / halflife)
+            self.assertAlmostEqual(
+                by_game.loc[3, f"pts_per_min_ewm_hl_{halflife}"],
+                (10 + alpha * 30) / (10 + alpha * 10),
+            )
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(3), "pts"] = 99
+        mutated.loc[mutated["game_id"].eq(3), "minutes"] = 1
+        mutated.loc[mutated["game_id"].eq(3), "min"] = 1
+        mutated.loc[mutated["game_id"].eq(3), "min_sec"] = "1:00"
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[3]
+        for halflife in (10, 20):
+            column = f"pts_per_min_ewm_hl_{halflife}"
+            self.assertAlmostEqual(mutated_row[column], by_game.loc[3, column])
 
     def test_season_scoring_resets_trailing_minutes_cross_seasons(
         self,
