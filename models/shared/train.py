@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
-from lightgbm import LGBMRegressor, early_stopping
 from xgboost import XGBRegressor
 
 from models.shared.metrics import DEFAULT_MIN_TIERS, score_quantile_fold
@@ -79,113 +78,19 @@ def fit_quantile_models(
     return models, preds
 
 
-def _fit_lgb_regressor(params: dict, alpha: float, X_fit, y_fit, X_es, y_es):
-    """Fit one quantile LightGBM model. ``alpha`` is not taken from ``params``."""
-    if "alpha" in params:
-        raise ValueError("alpha is set per quantile, not in lgb_params")
-    cleaned = dict(params)
-    rounds = cleaned.pop("early_stopping_rounds", None)
-    model = LGBMRegressor(**cleaned, alpha=alpha)
-    fit_kwargs: dict[str, Any] = {"eval_set": [(X_es, y_es)]}
-    if rounds is not None:
-        fit_kwargs["callbacks"] = [early_stopping(int(rounds), verbose=False)]
-    model.fit(X_fit, y_fit, **fit_kwargs)
-    return model
-
-
-def fit_quantile_lightgbm(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    X_val: pd.DataFrame,
-    y_val: pd.Series,
-    *,
-    quantiles: Sequence[float] | None = None,
-    lgb_params: dict | None = None,
-    early_stop: str = "validation",
-    train_dates: pd.Series | np.ndarray | Sequence | None = None,
-    train_tail_frac: float = 0.10,
-    X_predict: pd.DataFrame | None = None,
-) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """Train one LightGBM quantile model per quantile; return models + preds."""
-    if early_stop == "train_tail":
-        if train_dates is None:
-            raise ValueError("train_tail requires train_dates")
-        dates = pd.to_datetime(np.asarray(train_dates))
-        if len(dates) != len(X_train):
-            raise ValueError("train_dates must align with X_train rows")
-        unique_dates = pd.unique(dates)
-        n_unique = len(unique_dates)
-        if n_unique < 2:
-            raise ValueError("train_tail requires at least two training dates")
-        n_stop = int(np.floor(n_unique * train_tail_frac))
-        if n_stop < 1:
-            n_stop = 1
-        if n_stop >= n_unique:
-            raise ValueError(
-                f"train_tail n_stop={n_stop} must be strictly less than "
-                f"n_unique={n_unique}"
-            )
-        stop_dates = set(unique_dates[-n_stop:])
-        fit_mask = ~pd.Series(dates).isin(stop_dates).to_numpy()
-        stop_mask = pd.Series(dates).isin(stop_dates).to_numpy()
-        X_fit = X_train.iloc[fit_mask] if hasattr(X_train, "iloc") else X_train[fit_mask]
-        y_fit = y_train.iloc[fit_mask] if hasattr(y_train, "iloc") else y_train[fit_mask]
-        X_es = X_train.iloc[stop_mask] if hasattr(X_train, "iloc") else X_train[stop_mask]
-        y_es = y_train.iloc[stop_mask] if hasattr(y_train, "iloc") else y_train[stop_mask]
-        predict_X = X_val if X_predict is None else X_predict
-    elif early_stop == "validation":
-        X_fit, y_fit = X_train, y_train
-        X_es, y_es = X_val, y_val
-        predict_X = X_val if X_predict is None else X_predict
-    else:
-        raise ValueError(f"unknown early_stop={early_stop!r}")
-
-    if lgb_params is None:
-        raise ValueError("lgb_params is required (define in the prop notebook)")
-    quantiles = list(quantiles or DEFAULT_QUANTILES)
-    params = dict(lgb_params)
-    models: dict[str, Any] = {}
-    preds: dict[str, np.ndarray] = {}
-    for q in quantiles:
-        model = _fit_lgb_regressor(params, q, X_fit, y_fit, X_es, y_es)
-        key = f"q_{q:.2f}"
-        models[key] = model
-        preds[key] = np.asarray(model.predict(predict_X), dtype=float)
-    return models, preds
-
-
-def _quantile_backend(
-    xgb_params: dict | None,
-    lgb_params: dict | None,
-) -> tuple[str, Callable[..., tuple[dict[str, Any], dict[str, np.ndarray]]]]:
-    """Return the model name and fitter. Exactly one param dict is allowed."""
-    if (xgb_params is None) == (lgb_params is None):
-        raise ValueError("pass exactly one of xgb_params or lgb_params")
-    if lgb_params is not None:
-        def fit_lgb(*args, **kwargs):
-            return fit_quantile_lightgbm(*args, lgb_params=lgb_params, **kwargs)
-        return "LightGBM", fit_lgb
-
-    def fit_xgb(*args, **kwargs):
-        return fit_quantile_models(*args, xgb_params=xgb_params, **kwargs)
-    return "XGBoost", fit_xgb
-
-
 def run_timeseries_cv(
     X: pd.DataFrame,
     y: pd.Series,
     train_df: pd.DataFrame,
     *,
-    xgb_params: dict | None = None,
-    lgb_params: dict | None = None,
+    xgb_params: dict,
     role_col: str = "starting",
     tiers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
     n_splits: int = 5,
     quantiles: Sequence[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Phase 1 — TimeSeriesSplit for feature / hyperparam comparison."""
-    model_name, fit_quantiles = _quantile_backend(xgb_params, lgb_params)
-    print(f"── Phase 1: TimeSeriesSplit ({model_name}) ──────────────────────────")
+    print("── Phase 1: TimeSeriesSplit (XGBoost) ──────────────────────────")
     tscv = TimeSeriesSplit(n_splits=n_splits)
     results: list[dict[str, Any]] = []
 
@@ -193,9 +98,10 @@ def run_timeseries_cv(
         X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
         starting_val = train_df[role_col].iloc[val_idx].values
-        models, preds = fit_quantiles(
+        models, preds = fit_quantile_models(
             X_tr, y_tr, X_val, y_val,
             quantiles=quantiles,
+            xgb_params=xgb_params,
         )
         metrics = score_quantile_fold(
             y_val.values, preds,
@@ -208,7 +114,7 @@ def run_timeseries_cv(
 
     pinballs = [r["pinball"] for r in results]
     covs = [r.get("coverage_80pct", float("nan")) for r in results]
-    print(f"\nTimeSeriesSplit Summary ({model_name})")
+    print("\nTimeSeriesSplit Summary (XGBoost)")
     print(f"  Pinball q50 : {np.mean(pinballs):.3f} ± {np.std(pinballs):.3f}")
     if np.any(~np.isnan(covs)):
         print(
@@ -287,89 +193,12 @@ def tune_xgb_quantile(
     }
 
 
-def tune_lgb_quantile(
-    X: pd.DataFrame,
-    y: pd.Series,
-    *,
-    n_trials: int = 40,
-    n_splits: int = 4,
-    quantile_alpha: float = 0.50,
-    seed: int = 42,
-    fixed_params: dict | None = None,
-    show_progress_bar: bool = True,
-) -> dict[str, Any]:
-    """Optuna-tune one LightGBM quantile model via TimeSeriesSplit pinball loss.
-
-    Use train-pool ``X`` / ``y`` only — never the locked holdout.
-    Returns merged ``best_params`` (ready for ``LGB_PARAMS``), ``best_value``,
-    and the Optuna ``study``. ``alpha`` is not part of ``best_params``.
-    """
-    import optuna
-
-    from models.shared.metrics import pinball_loss
-
-    if len(X) != len(y):
-        raise ValueError("X and y must have the same length")
-    if len(X) <= n_splits:
-        raise ValueError(f"len(X)={len(X)} must be greater than n_splits={n_splits}")
-    if not 0.0 < quantile_alpha < 1.0:
-        raise ValueError("quantile_alpha must be inside (0, 1)")
-
-    fixed = {
-        "objective": "quantile",
-        "n_jobs": -1,
-        "random_state": seed,
-        "verbose": -1,
-        "bagging_freq": 1,
-        "early_stopping_rounds": 50,
-        **(fixed_params or {}),
-    }
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-
-    def objective(trial: Any) -> float:
-        params = {
-            **fixed,
-            "n_estimators": trial.suggest_int("n_estimators", 500, 2000),
-            "num_leaves": trial.suggest_int("num_leaves", 15, 127),
-            "max_depth": trial.suggest_int("max_depth", 3, 12),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 5.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 5.0, log=True),
-            "min_child_samples": trial.suggest_int("min_child_samples", 10, 200),
-        }
-        losses: list[float] = []
-        for train_idx, val_idx in tscv.split(X):
-            X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
-            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-            model = _fit_lgb_regressor(params, quantile_alpha, X_tr, y_tr, X_val, y_val)
-            losses.append(pinball_loss(y_val, model.predict(X_val), quantile_alpha))
-        return float(np.mean(losses))
-
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
-    )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=show_progress_bar)
-
-    best_params = {**fixed, **study.best_params}
-    print(f"Best pinball (mean TSCV, q={quantile_alpha}): {study.best_value:.4f}")
-    print("Best params:", study.best_params)
-    return {
-        "best_params": best_params,
-        "best_value": study.best_value,
-        "study": study,
-    }
-
-
 def run_walk_forward(
     X: pd.DataFrame,
     y: pd.Series,
     train_df: pd.DataFrame,
     *,
-    xgb_params: dict | None = None,
-    lgb_params: dict | None = None,
+    xgb_params: dict,
     role_col: str = "starting",
     tiers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
     n_folds: int = 4,
@@ -380,9 +209,8 @@ def run_walk_forward(
     train_tail_frac: float = 0.10,
 ) -> dict[str, Any]:
     """Phase 2 — date-based walk-forward validation (production simulation)."""
-    model_name, fit_quantiles = _quantile_backend(xgb_params, lgb_params)
     print(
-        f"\n── Phase 2: Walk-Forward Validation ({model_name}, date-based) ──────"
+        "\n── Phase 2: Walk-Forward Validation (XGBoost, date-based) ──────"
     )
     if not train_df["game_date"].is_monotonic_increasing:
         raise ValueError("train_df must be sorted by game_date")
@@ -427,8 +255,9 @@ def run_walk_forward(
             fit_kwargs["train_dates"] = train_df.loc[train_mask, "game_date"]
             fit_kwargs["X_predict"] = X_val
 
-        models, preds = fit_quantiles(
+        models, preds = fit_quantile_models(
             X_tr, y_tr, X_val, y_val,
+            xgb_params=xgb_params,
             **fit_kwargs,
         )
         metrics = score_quantile_fold(
@@ -547,8 +376,7 @@ def evaluate_holdout(
     *,
     features: Sequence[str],
     target_col: str,
-    xgb_params: dict | None = None,
-    lgb_params: dict | None = None,
+    xgb_params: dict,
     role_col: str = "starting",
     tiers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
     wf_results: list[dict[str, Any]] | None = None,
@@ -557,7 +385,6 @@ def evaluate_holdout(
     es_frac: float = 0.90,
 ) -> dict[str, Any]:
     """Blind holdout evaluation on the held-out season."""
-    _, fit_quantiles = _quantile_backend(xgb_params, lgb_params)
     features = list(features)
     print(f"── {fold_label} ─────────────────────────────────────────────────")
     print(
@@ -577,9 +404,10 @@ def evaluate_holdout(
     X_es_val = X_train_full.iloc[es_cutoff:]
     y_es_val = y_train_full.iloc[es_cutoff:]
 
-    models_ho, _ = fit_quantiles(
+    models_ho, _ = fit_quantile_models(
         X_es_train, y_es_train, X_es_val, y_es_val,
         quantiles=quantiles,
+        xgb_params=xgb_params,
     )
     preds_ho = {
         k: np.asarray(models_ho[k].predict(X_ho), dtype=float) for k in models_ho

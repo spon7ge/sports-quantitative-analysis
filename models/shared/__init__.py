@@ -40,12 +40,10 @@ from models.shared.minutes_sampler import (
 from models.shared.splits import date_walk_forward_folds, prepare_splits, season_holdout_split
 from models.shared.train import (
     evaluate_holdout,
-    fit_quantile_lightgbm,
     fit_quantile_models,
     run_timeseries_cv,
     run_walk_forward,
     tune_xgb_quantile,
-    tune_lgb_quantile,
 )
 
 __all__ = [
@@ -56,7 +54,6 @@ __all__ = [
     "evaluate_holdout",
     "evaluate_holdout_vs_naive",
     "fit_quantile_linear",
-    "fit_quantile_lightgbm",
     "fit_quantile_models",
     "build_tail_tables",
     "canonical_id",
@@ -87,5 +84,4 @@ __all__ = [
     "season_holdout_split",
     "tail_bin_shares",
     "tune_xgb_quantile",
-    "tune_lgb_quantile",
 ]
