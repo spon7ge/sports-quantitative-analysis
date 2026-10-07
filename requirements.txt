@@ -17,6 +17,7 @@ optuna==5.0.0
 matplotlib==3.11.1
 seaborn==0.13.2
 statsmodels==0.14.6
+pyvinecopulib==1.0.0
 scipy==1.18.1
 python-dotenv==1.2.3
 fsspec==2026.7.0
