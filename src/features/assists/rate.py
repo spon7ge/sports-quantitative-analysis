@@ -12,7 +12,9 @@ import pandas as pd
 
 from src.features.minutes.rolling import (
     numeric_column,
+    prior_ewm,
     prior_expanding,
+    prior_quantile,
     prior_roll,
     prior_sum,
     ratio,
@@ -36,6 +38,10 @@ _PLAYER_OUTPUTS = (
     "player_sast_per_min_last10",
     "player_usg_pct_last10",
     "player_min_last5",
+    "ast_per_min_p20_10",
+    "ast_per_min_p80_10",
+    "ast_per_min_p80_minus_p20_10",
+    "ast_per_min_ewm_hl_10",
 )
 
 _OWN_TEAM_OUTPUTS = (
@@ -142,6 +148,31 @@ def _add_player_rates(frame: pd.DataFrame) -> pd.DataFrame:
         5,
         "mean",
     )
+    result["_ast_per_min_obs"] = ratio(
+        result["_ast_obs"],
+        result["_minutes_obs"],
+    )
+    result["ast_per_min_p20_10"] = prior_quantile(
+        result,
+        "_ast_per_min_obs",
+        PLAYER_KEY,
+        10,
+        0.20,
+    )
+    result["ast_per_min_p80_10"] = prior_quantile(
+        result,
+        "_ast_per_min_obs",
+        PLAYER_KEY,
+        10,
+        0.80,
+    )
+    result["ast_per_min_p80_minus_p20_10"] = (
+        result["ast_per_min_p80_10"] - result["ast_per_min_p20_10"]
+    )
+    result["ast_per_min_ewm_hl_10"] = ratio(
+        prior_ewm(result, "_ast_obs", PLAYER_KEY, halflife=10),
+        prior_ewm(result, "_minutes_obs", PLAYER_KEY, halflife=10),
+    )
     result["days_since_previous_game"] = (
         result.groupby(SEASON_PLAYER, sort=False)["game_date"]
         .diff()
@@ -164,6 +195,7 @@ def _add_player_rates(frame: pd.DataFrame) -> pd.DataFrame:
         "_pass_obs",
         "_sast_obs",
         "_usg_obs",
+        "_ast_per_min_obs",
     ]
     return result.drop(columns=temps)
 

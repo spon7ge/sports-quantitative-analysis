@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
 import pandas as pd
 
 from src.features.assists.rate import (
@@ -250,6 +251,74 @@ class AstRateFeatureTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             featured.loc[1, "team_efg_pct_last10"], 0.40
+        )
+
+    def test_rate_band_uses_the_prior_ten_games(self) -> None:
+        assists = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 0]
+        frame = pd.DataFrame(
+            [
+                _row(
+                    1,
+                    f"2024-01-{game_id:02d}",
+                    game_id=game_id,
+                    ast=float(ast),
+                    minutes=1,
+                )
+                for game_id, ast in enumerate(assists, start=1)
+            ]
+        )
+        featured = add_ast_rate_features(frame).set_index("game_id")
+
+        # Five priors: 1, 2, 3, 4, 5. Linear 20th/80th are 1.8 and 4.2.
+        early = featured.loc[6]
+        self.assertAlmostEqual(early["ast_per_min_p20_10"], 1.8)
+        self.assertAlmostEqual(early["ast_per_min_p80_10"], 4.2)
+        self.assertAlmostEqual(early["ast_per_min_p80_minus_p20_10"], 2.4)
+        self.assertTrue(pd.isna(featured.loc[5, "ast_per_min_p80_10"]))
+
+        # Window keeps 2..10 and 100, dropping the oldest 1.
+        later = featured.loc[12]
+        self.assertAlmostEqual(later["ast_per_min_p20_10"], 3.8)
+        self.assertAlmostEqual(later["ast_per_min_p80_10"], 9.2)
+        self.assertAlmostEqual(later["ast_per_min_p80_minus_p20_10"], 5.4)
+
+        frame.loc[frame["game_id"].eq(12), "ast"] = 999
+        mutated = add_ast_rate_features(frame).set_index("game_id").loc[12]
+        self.assertAlmostEqual(mutated["ast_per_min_p80_10"], 9.2)
+        self.assertAlmostEqual(mutated["ast_per_min_p80_minus_p20_10"], 5.4)
+
+    def test_ewm_ast_per_min_survives_a_duplicated_index(self) -> None:
+        early = pd.DataFrame(
+            [
+                _row(1, "2024-01-05", game_id=2, ast=8, minutes=10),
+                _row(1, "2024-01-01", game_id=1, ast=4, minutes=20),
+            ]
+        )
+        later = pd.DataFrame(
+            [_row(1, "2024-01-07", game_id=3, ast=2, minutes=30)]
+        )
+        stacked = pd.concat([early, later])
+        self.assertFalse(stacked.index.is_unique)
+
+        featured = add_ast_rate_features(stacked)
+        self.assertEqual(list(featured.index), list(stacked.index))
+        by_game = featured.set_index("game_id")
+        alpha = 1 - np.exp(np.log(0.5) / 10)
+
+        self.assertTrue(pd.isna(by_game.loc[1, "ast_per_min_ewm_hl_10"]))
+        self.assertAlmostEqual(by_game.loc[2, "ast_per_min_ewm_hl_10"], 0.2)
+        self.assertAlmostEqual(
+            by_game.loc[3, "ast_per_min_ewm_hl_10"],
+            (4 + alpha * 4) / (20 - alpha * 10),
+        )
+
+        later.loc[later["game_id"].eq(3), "ast"] = 999
+        later.loc[later["game_id"].eq(3), "minutes"] = 1
+        mutated = add_ast_rate_features(pd.concat([early, later]))
+        mutated_row = mutated.set_index("game_id").loc[3]
+        self.assertAlmostEqual(
+            mutated_row["ast_per_min_ewm_hl_10"],
+            by_game.loc[3, "ast_per_min_ewm_hl_10"],
         )
 
     def test_contract_columns_are_present(self) -> None:
