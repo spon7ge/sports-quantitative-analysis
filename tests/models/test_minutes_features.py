@@ -124,16 +124,16 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
         # Priors 10, 20, 30, 40, 100. Linear 20th/80th are 18 and 52.
         # Games inside that band are 20, 30, 40.
         row = by_game.loc[6]
-        self.assertAlmostEqual(row["min_p20_20"], 18)
-        self.assertAlmostEqual(row["min_p80_20"], 52)
-        self.assertAlmostEqual(row["min_p80_minus_p20_20"], 34)
+        self.assertAlmostEqual(row["min_p20_10"], 18)
+        self.assertAlmostEqual(row["min_p80_10"], 52)
+        self.assertAlmostEqual(row["min_p80_minus_p20_10"], 34)
         self.assertAlmostEqual(row["min_trim_mean_20"], 30)
         self.assertAlmostEqual(row["min_floor_10"], 10)
         self.assertAlmostEqual(row["min_ceiling_10"], 100)
         self.assertAlmostEqual(row["min_span_10"], 90)
         self.assertEqual(row["min_lag_outside_10"], 1)
         self.assertEqual(by_game.loc[7, "min_lag_outside_10"], 0)
-        self.assertTrue(np.isnan(by_game.loc[1, "min_p20_20"]))
+        self.assertTrue(np.isnan(by_game.loc[1, "min_p20_10"]))
         self.assertTrue(np.isnan(by_game.loc[1, "min_floor_10"]))
 
         mutated = frame.copy()
@@ -144,6 +144,35 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
         self.assertAlmostEqual(mutated_row["min_trim_mean_20"], 30)
         self.assertAlmostEqual(mutated_row["min_span_10"], 90)
         self.assertEqual(mutated_row["min_lag_outside_10"], 1)
+
+    def test_minutes_band_uses_the_prior_ten_games(self) -> None:
+        minutes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 0]
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    f"2024-01-{game_id:02d}",
+                    float(value),
+                    game_id=game_id,
+                )
+                for game_id, value in enumerate(minutes, start=1)
+            ]
+        )
+        featured = add_minutes_features(frame).set_index("game_id")
+
+        # Window keeps 2..10 and 100, dropping the oldest 1.
+        # A 20-game window would keep all 11 priors: 4 and 10.
+        later = featured.loc[12]
+        self.assertAlmostEqual(later["min_p20_10"], 3.8)
+        self.assertAlmostEqual(later["min_p80_10"], 9.2)
+        self.assertAlmostEqual(later["min_p80_minus_p20_10"], 5.4)
+
+        frame.loc[frame["game_id"].eq(12), "minutes"] = 999
+        frame.loc[frame["game_id"].eq(12), "min"] = 999
+        frame.loc[frame["game_id"].eq(12), "min_sec"] = "999:00"
+        mutated = add_minutes_features(frame).set_index("game_id").loc[12]
+        self.assertAlmostEqual(mutated["min_p80_10"], 9.2)
+        self.assertAlmostEqual(mutated["min_p80_minus_p20_10"], 5.4)
 
     def test_minutes_volatility_is_prior_dispersion_over_prior_mean(
         self,

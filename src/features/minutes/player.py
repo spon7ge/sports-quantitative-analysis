@@ -111,22 +111,22 @@ def add_player_role_features(
         10,
         "mean",
     )
-    result["min_p20_20"] = prior_quantile(
+    result["min_p20_10"] = prior_quantile(
         result,
         minutes,
         PLAYER_KEY,
-        20,
+        10,
         0.20,
     )
-    result["min_p80_20"] = prior_quantile(
+    result["min_p80_10"] = prior_quantile(
         result,
         minutes,
         PLAYER_KEY,
-        20,
+        10,
         0.80,
     )
-    result["min_p80_minus_p20_20"] = (
-        result["min_p80_20"] - result["min_p20_20"]
+    result["min_p80_minus_p20_10"] = (
+        result["min_p80_10"] - result["min_p20_10"]
     )
     result["min_trim_mean_20"] = prior_trim_mean(
         result,
