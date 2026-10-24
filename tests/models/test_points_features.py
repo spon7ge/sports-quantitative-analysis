@@ -96,6 +96,7 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         mutated.loc[mutated["game_id"].eq(3), "min"] = 99
         mutated.loc[mutated["game_id"].eq(3), "min_sec"] = "99:00"
         mutated.loc[mutated["game_id"].eq(3), "fga"] = 99
+        mutated.loc[mutated["game_id"].eq(3), "fg3_a"] = 99
         mutated.loc[mutated["game_id"].eq(3), "usg_pct"] = 99
         mutated_featured = add_points_features(mutated)
         mutated_third = mutated_featured.loc[
@@ -108,7 +109,11 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             "pts_per_min_10",
             "min_lag_1",
             "fga_per_min_10",
+            "fg3a_per_min_10",
             "usg_wmean_10",
+            "season_pts_per_min",
+            "current_team_pts_per_min",
+            "player_fga_share_10",
         ):
             self.assertEqual(
                 mutated_third[column],
@@ -239,6 +244,123 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             unstable["season_ppm_vol"],
         )
 
+    def test_date_t_features_match_a_history_truncated_before_later_games(
+        self,
+    ) -> None:
+        records = []
+        games = [
+            (1, "2024-01-01", 10, 8, 2, 20, 110),
+            (2, "2024-01-03", 20, 12, 4, 30, 108),
+            (3, "2024-01-05", 15, 10, 3, 25, 112),
+            (4, "2024-01-07", 40, 20, 8, 35, 99),
+        ]
+        for game_id, date, pts, fga, fg3_a, minutes, defense in games:
+            records.append(
+                _player_row(
+                    1,
+                    date,
+                    minutes,
+                    pts=pts,
+                    game_id=game_id,
+                    fga=fga,
+                    fg3_a=fg3_a,
+                    team_id=100,
+                    opp_team_id=200,
+                    team_def_rating=defense,
+                    team_fga=80,
+                )
+            )
+            records.append(
+                _player_row(
+                    2,
+                    date,
+                    24,
+                    pts=8,
+                    game_id=game_id,
+                    fga=7,
+                    fg3_a=1,
+                    team_id=200,
+                    opp_team_id=100,
+                    team_def_rating=105,
+                    team_fga=90,
+                )
+            )
+        frame = _rows(records)
+        frame["starting"] = (
+            frame["start_position"]
+            .astype("string")
+            .str.strip()
+            .isin(["G", "F", "C"])
+            .astype(int)
+        )
+        columns = [
+            "season_pts_per_min",
+            "current_team_pts_per_min",
+            "player_fga_share_10",
+            "opp_def_rating_mean_10",
+            "fga_per_min_10",
+            "fg3a_per_min_10",
+            "pts_per_min_ewm_hl_10",
+            "start_rate_10",
+            "starting",
+        ]
+
+        def at(featured: pd.DataFrame) -> pd.Series:
+            return featured.loc[
+                featured["player_id"].eq(1) & featured["game_id"].eq(3)
+            ].iloc[0]
+
+        full = at(add_points_features(frame))
+        truncated = at(
+            add_points_features(frame.loc[~frame["game_id"].eq(4)].copy())
+        )
+        shuffled = at(
+            add_points_features(frame.sample(frac=1, random_state=0))
+        )
+        later = frame.copy()
+        later.loc[later["game_id"].eq(4), ["pts", "fga", "fg3_a", "minutes"]] = [
+            1,
+            1,
+            0,
+            5,
+        ]
+        later.loc[
+            later["player_id"].eq(2) & later["game_id"].eq(4),
+            "team_def_rating",
+        ] = 70
+        changed_later = at(add_points_features(later))
+
+        for column in columns:
+            self.assertAlmostEqual(full[column], truncated[column], msg=column)
+            self.assertAlmostEqual(full[column], shuffled[column], msg=column)
+            self.assertAlmostEqual(full[column], changed_later[column], msg=column)
+
+        # Prior points 10+20 over minutes 20+30. Opponent defense is 105 both games.
+        self.assertAlmostEqual(full["season_pts_per_min"], 30 / 50)
+        self.assertAlmostEqual(full["current_team_pts_per_min"], 30 / 50)
+        self.assertAlmostEqual(full["player_fga_share_10"], 20 / 160)
+        self.assertAlmostEqual(full["opp_def_rating_mean_10"], 105)
+        self.assertAlmostEqual(full["fga_per_min_10"], 20 / 50)
+        self.assertAlmostEqual(full["fg3a_per_min_10"], 6 / 50)
+        self.assertAlmostEqual(full["start_rate_10"], 1)
+        self.assertEqual(full["starting"], 1)
+
+        same_game = frame.copy()
+        same_game.loc[
+            same_game["player_id"].eq(1) & same_game["game_id"].eq(3),
+            "start_position",
+        ] = ""
+        same_game["starting"] = (
+            same_game["start_position"]
+            .astype("string")
+            .str.strip()
+            .isin(["G", "F", "C"])
+            .astype(int)
+        )
+        edited = at(add_points_features(same_game))
+        self.assertEqual(edited["starting"], 0)
+        self.assertAlmostEqual(edited["start_rate_10"], full["start_rate_10"])
+
     def test_rates_use_rolling_sums_not_mean_of_ratios(self) -> None:
         frame = _rows(
             [
@@ -283,6 +405,10 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         ].iloc[0]
 
         self.assertAlmostEqual(third["pts_per_min_10"], 1.0)
+        # Sum of attempts over sum of minutes, not the mean of per-game rates.
+        # Three-point attempts 9 and 1 over 10 and 20 minutes: 10/30, not 0.475.
+        self.assertAlmostEqual(third["fga_per_min_10"], 30 / 30)
+        self.assertAlmostEqual(third["fg3a_per_min_10"], 10 / 30)
         self.assertAlmostEqual(
             third["three_attempt_rate_10"],
             10 / 30,

@@ -26,6 +26,8 @@ PTS_FEATURES = [
     "season_pts_per_min",
     "starting",
     "fta_per_min_10",
+    "fga_per_min_10",
+    "fg3a_per_min_10",
     "ppm_unstable",
     "opp_def_rating_mean_10",
     "team_spread_canonical",

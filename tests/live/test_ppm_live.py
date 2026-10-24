@@ -1,8 +1,16 @@
 """Live points-per-minute features use the opponent's defensive rating."""
 
-import pandas as pd
+import ast
+import json
+from pathlib import Path
 
-from src.live.ppm_live import build_ppm_live
+import pandas as pd
+from src.live.ppm_live import PTS_FEATURES, build_ppm_live
+
+_POINTS_NOTEBOOK = (
+    Path(__file__).resolve().parents[2]
+    / "notebooks/nba/points/points_xgboost.ipynb"
+)
 
 
 def _game(player_id, name, team, team_id, opponent_id, game_id, date, defense, matchup):
@@ -47,6 +55,30 @@ def _game(player_id, name, team, team_id, opponent_id, game_id, date, defense, m
         "comment": "",
         "wl": "W",
     }
+
+
+def test_points_features_include_attempt_rates_per_minute() -> None:
+    assert "fga_per_min_10" in PTS_FEATURES
+    assert "fg3a_per_min_10" in PTS_FEATURES
+
+
+def test_live_feature_list_matches_the_points_notebook() -> None:
+    notebook = json.loads(_POINTS_NOTEBOOK.read_text())
+    source = next(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if "PTS_FEATURES = [" in "".join(cell.get("source", []))
+    )
+    assigned = next(
+        ast.literal_eval(node.value)
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "PTS_FEATURES"
+            for target in node.targets
+        )
+    )
+    assert assigned == PTS_FEATURES
 
 
 def test_defense_rating_comes_from_the_opponent_in_the_matchup() -> None:
