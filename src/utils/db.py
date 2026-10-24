@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
+import threading
+import time
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,6 +19,13 @@ from psycopg2.extras import execute_values
 from sqlalchemy import create_engine
 
 from src.scrapers.mlb.paths import repo_root
+
+logger = logging.getLogger(__name__)
+
+# Default measured batch size for execute_values bulk upserts.
+DEFAULT_UPSERT_BATCH_SIZE = 5000
+
+_slot_depth = threading.local()
 
 
 def _load_env() -> None:
@@ -41,8 +53,78 @@ def get_engine():
     return create_engine(
         url,
         pool_pre_ping=True,
+        pool_size=4,
+        max_overflow=4,
         connect_args={"connect_timeout": 20, "sslmode": "require"},
     )
+
+
+def _db_slot_count() -> int:
+    raw = os.environ.get("ODDS_DB_LOAD_SLOTS", "2").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 2
+    return max(n, 1)
+
+
+def _db_lock_dir() -> Path:
+    override = os.environ.get("ODDS_DB_LOCK_DIR", "").strip()
+    if override:
+        path = Path(override)
+    else:
+        path = repo_root() / "data" / ".odds_db_locks"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+@contextmanager
+def db_load_slot():
+    """Limit concurrent odds DB work across scraper subprocesses (default 2).
+
+    Re-entrant in-process so change-filter lookup + upsert share one slot.
+    """
+    import fcntl
+
+    depth = getattr(_slot_depth, "n", 0)
+    if depth > 0:
+        _slot_depth.n = depth + 1
+        try:
+            yield
+        finally:
+            _slot_depth.n = depth
+        return
+
+    slots = _db_slot_count()
+    lock_dir = _db_lock_dir()
+    handles: list = []
+    acquired = None
+    try:
+        while acquired is None:
+            for i in range(slots):
+                fh = open(lock_dir / f"slot_{i}.lock", "a+", encoding="utf-8")
+                handles.append(fh)
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = fh
+                    break
+                except BlockingIOError:
+                    fh.close()
+                    handles.pop()
+            if acquired is None:
+                time.sleep(0.05)
+        _slot_depth.n = 1
+        yield
+    finally:
+        _slot_depth.n = 0
+        if acquired is not None:
+            try:
+                fcntl.flock(acquired.fileno(), fcntl.LOCK_UN)
+            finally:
+                acquired.close()
+        for fh in handles:
+            if fh is not acquired and not fh.closed:
+                fh.close()
 
 
 def _normalize_col(name: str) -> str:
@@ -95,6 +177,33 @@ def _df_to_tuples(df: pd.DataFrame) -> tuple[list[str], list[tuple]]:
     return cols, rows
 
 
+def _dedupe_rows_by_conflict(
+    cols: list[str],
+    rows: list[tuple],
+    conflict_cols: list[str],
+) -> tuple[list[str], list[tuple]]:
+    """Keep last row per conflict key so ON CONFLICT is not CardinalityViolation."""
+    key_idx = [cols.index(c) for c in conflict_cols if c in cols]
+    if not key_idx or not rows:
+        return cols, rows
+    seen: dict[tuple, tuple] = {}
+    order: list[tuple] = []
+    for row in rows:
+        key = tuple(row[i] for i in key_idx)
+        if key not in seen:
+            order.append(key)
+        seen[key] = row
+    deduped = [seen[k] for k in order]
+    dropped = len(rows) - len(deduped)
+    if dropped:
+        logger.warning(
+            "upsert_df dropped %s duplicate row(s) on %s",
+            dropped,
+            ", ".join(conflict_cols),
+        )
+    return cols, deduped
+
+
 @lru_cache(maxsize=32)
 def _table_columns(schema: str, table: str) -> frozenset[str]:
     q = """
@@ -133,7 +242,7 @@ def upsert_df(
     df: pd.DataFrame,
     schema: str = "odds",
     conflict_cols: list[str] | None = None,
-    batch_size: int = 2000,
+    batch_size: int = DEFAULT_UPSERT_BATCH_SIZE,
     *,
     lineage_col: str | None = "fetched_at",
 ) -> None:
@@ -156,6 +265,10 @@ def upsert_df(
 
     aligned = _align_df_to_table(df, schema=schema, table=table)
     cols, rows = _df_to_tuples(aligned)
+    cols, rows = _dedupe_rows_by_conflict(cols, rows, conflict_cols)
+    if not rows:
+        return
+
     col_list = ", ".join(f'"{c}"' for c in cols)
     conflict = ", ".join(f'"{c}"' for c in conflict_cols)
     update_cols = [c for c in cols if c not in conflict_cols]
@@ -165,16 +278,26 @@ def upsert_df(
         f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}"
     )
     engine = get_engine()
-    conn = engine.raw_connection()
-    try:
-        cur = conn.cursor()
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i : i + batch_size]
-            execute_values(cur, sql, batch, page_size=len(batch))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-        conn.close()
+    t0 = time.perf_counter()
+    with db_load_slot():
+        conn = engine.raw_connection()
+        try:
+            cur = conn.cursor()
+            for i in range(0, len(rows), batch_size):
+                batch = rows[i : i + batch_size]
+                execute_values(cur, sql, batch, page_size=len(batch))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+    logger.info(
+        "upsert_df table=%s.%s rows=%s batch_size=%s upsert_s=%.3f",
+        schema,
+        table,
+        len(rows),
+        batch_size,
+        time.perf_counter() - t0,
+    )

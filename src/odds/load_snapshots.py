@@ -161,6 +161,18 @@ DEFAULT_SNAPSHOT_MINUTES = 30
 
 
 def _skip_db(env_var: str) -> bool:
+    """Skip Supabase odds writes unless ``ODDS_WRITE_DB=1``.
+
+    Local JSON under ``data/props/`` is the default artifact. Opt in to Postgres
+    with ``ODDS_WRITE_DB=1``; book-specific ``*_SKIP_DB`` still disables a book.
+    """
+    write = os.environ.get("ODDS_WRITE_DB", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if not write:
+        return True
     return os.environ.get(env_var, "").strip().lower() in {"1", "true", "yes"}
 
 

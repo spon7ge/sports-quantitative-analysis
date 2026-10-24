@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # Sports slate calendar day — same line/odds on a new ET date still upserts.
 _SCRAPE_DATE_TZ = ZoneInfo("America/New_York")
 
+# Cap VALUES/LATERAL batches so bind params stay reasonable.
+_IDENTITY_LOOKUP_BATCH = 500
+
 
 def _is_null(value: Any) -> bool:
     if value is None:
@@ -64,6 +67,14 @@ def _identity_key(row: pd.Series, identity_cols: tuple[str, ...]) -> tuple:
     )
 
 
+def identity_key_rows(df: pd.DataFrame, identity_cols: tuple[str, ...]) -> pd.DataFrame:
+    """Unique identity tuples present in the incoming scrape (complete key)."""
+    present = [c for c in identity_cols if c in df.columns]
+    if not present:
+        return pd.DataFrame(columns=list(identity_cols))
+    return df.loc[:, present].drop_duplicates().reset_index(drop=True)
+
+
 def filter_unchanged_quotes(
     df: pd.DataFrame,
     *,
@@ -104,41 +115,123 @@ def _skip_change_filter() -> bool:
     }
 
 
-def fetch_latest_quotes(table: str, *, league: str, spec: QuoteSpec) -> pd.DataFrame:
-    from src.utils.db import get_engine
+def _quote_ident(name: str) -> str:
+    if not name.replace("_", "").isalnum():
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return f'"{name}"'
 
-    # scraped_at needed so change filter can partition identity by ET calendar day.
-    cols = list(
+
+def _safe_table(table: str) -> str:
+    if not table.replace("_", "").isalnum():
+        raise ValueError(f"unsafe table name: {table!r}")
+    return table
+
+
+def _latest_for_identity_batch_sql(
+    table: str,
+    *,
+    identity_cols: tuple[str, ...],
+    select_cols: list[str],
+    n_rows: int,
+) -> str:
+    """One latest row per incoming identity via indexed LATERAL lookup."""
+    id_cols_sql = ", ".join(_quote_ident(c) for c in identity_cols)
+    select_sql = ", ".join(f"latest.{_quote_ident(c)}" for c in select_cols)
+    value_rows = []
+    for i in range(n_rows):
+        cells = ", ".join(f":id_{i}_{j}" for j in range(len(identity_cols)))
+        value_rows.append(f"({cells})")
+    values_sql = ", ".join(value_rows)
+    join_preds = " AND ".join(
+        f"t.{_quote_ident(c)} IS NOT DISTINCT FROM ids.{_quote_ident(c)}"
+        for c in identity_cols
+    )
+    lateral_select = ", ".join(f"t.{_quote_ident(c)}" for c in select_cols)
+    safe = _safe_table(table)
+    return f"""
+SELECT {select_sql}
+FROM (VALUES {values_sql}) AS ids({id_cols_sql})
+CROSS JOIN LATERAL (
+  SELECT {lateral_select}
+  FROM odds.{safe} t
+  WHERE t.league = :league
+    AND {join_preds}
+  ORDER BY t."scraped_at" DESC
+  LIMIT 1
+) latest
+"""
+
+
+def fetch_latest_quotes(
+    table: str,
+    *,
+    league: str,
+    spec: QuoteSpec,
+    incoming: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Latest stored quote per identity present in ``incoming``.
+
+    Looks up only scrape identities (complete key, including book-specific
+    fields like ``odds_type``). Avoids a full-history DISTINCT ON scan.
+    """
+    from src.utils.db import db_load_slot, get_engine
+
+    if incoming is None:
+        raise TypeError("incoming DataFrame is required for identity-scoped lookup")
+    if incoming.empty:
+        return pd.DataFrame()
+
+    keys = identity_key_rows(incoming, spec.identity_cols)
+    if keys.empty:
+        return pd.DataFrame()
+
+    select_cols = list(
         dict.fromkeys([*spec.identity_cols, *spec.compare_cols, "scraped_at"])
     )
-    col_sql = ", ".join(f'"{c}"' for c in cols)
-    identity_sql = ", ".join(f'"{c}"' for c in spec.identity_cols)
-    order_sql = identity_sql + ', "scraped_at" DESC'
-    sql = text(
-        f"""
-SELECT DISTINCT ON ({identity_sql}) {col_sql}
-FROM odds.{table}
-WHERE league = :league
-ORDER BY {order_sql}
-"""
-    )
     engine = get_engine()
-    with engine.connect() as conn:
-        return pd.read_sql(sql, conn, params={"league": league})
+    frames: list[pd.DataFrame] = []
+
+    with db_load_slot():
+        with engine.connect() as conn:
+            for start in range(0, len(keys), _IDENTITY_LOOKUP_BATCH):
+                batch = keys.iloc[start : start + _IDENTITY_LOOKUP_BATCH]
+                sql = text(
+                    _latest_for_identity_batch_sql(
+                        table,
+                        identity_cols=spec.identity_cols,
+                        select_cols=select_cols,
+                        n_rows=len(batch),
+                    )
+                )
+                params: dict[str, Any] = {"league": league}
+                for i, row in enumerate(batch.itertuples(index=False, name=None)):
+                    for j, val in enumerate(row):
+                        params[f"id_{i}_{j}"] = None if _is_null(val) else val
+                frames.append(pd.read_sql(sql, conn, params=params))
+
+    if not frames:
+        return pd.DataFrame(columns=select_cols)
+    return pd.concat(frames, ignore_index=True)
 
 
 def apply_change_filter(table: str, df: pd.DataFrame, *, league: str) -> pd.DataFrame:
     if df.empty or _skip_change_filter():
         return df
+    import time
+
+    t0 = time.perf_counter()
     spec = get_quote_spec(table)
-    latest = fetch_latest_quotes(table, league=league, spec=spec)
+    latest = fetch_latest_quotes(table, league=league, spec=spec, incoming=df)
     kept, skipped = filter_unchanged_quotes(df, latest=latest, spec=spec)
-    if skipped:
-        logger.info(
-            "odds change filter table=%s league=%s kept=%s skipped_unchanged=%s",
-            table,
-            league,
-            len(kept),
-            skipped,
-        )
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "odds change filter table=%s league=%s kept=%s skipped_unchanged=%s "
+        "latest_rows=%s filter_s=%.3f",
+        table,
+        league,
+        len(kept),
+        skipped,
+        0 if latest is None else len(latest),
+        elapsed,
+    )
     return kept

@@ -3,8 +3,10 @@ data/silver/
 data/research/
 data/mlb/
 data/props/
+data/raw/
 data/backtest/singleBets.csv
 data/odds/*.json
+data/.odds_db_locks/
 src/data/
 artifacts/mlb/
 .ipynb_checkpoints/
