@@ -1,4 +1,4 @@
-"""Integer points PMF from joint minutes and rate draws."""
+"""Integer points PMF from independent minutes and rate draws."""
 
 from __future__ import annotations
 
@@ -7,9 +7,8 @@ import math
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.stats import norm, spearmanr
+from scipy.stats import spearmanr
 
-from models.shared.copula import CopulaSample, IndependentCopula
 from models.shared.metrics import integer_log_score, randomized_pit, rps
 from models.shared.minutes_sampler import (
     QUANTILE_LEVELS,
@@ -71,40 +70,6 @@ def _row(game_id, player_id, minutes, rate, starting=1):
         row[f"minutes_q_{level:.2f}"] = float(minute)
         row[f"rate_q_{level:.2f}"] = float(scoring_rate)
     return row
-
-
-def _independent():
-    pairs = pd.DataFrame(
-        {
-            "u_m": [0.4],
-            "u_r": [0.6],
-            "tier": ["15-24"],
-            "game_date": [pd.Timestamp("2024-01-01")],
-            "is_holdout": [False],
-        }
-    )
-    return IndependentCopula(pairs, before_date="2025-10-21")
-
-
-class GaussianCopula:
-    def __init__(self, rho):
-        self.rho = float(rho)
-
-    def sample(self, tier, n, rng):
-        cov = np.array([[1.0, self.rho], [self.rho, 1.0]])
-        z = rng.multivariate_normal([0.0, 0.0], cov, size=int(n))
-        uniforms = norm.cdf(z)
-        pairs = pd.DataFrame(
-            {"u_m": uniforms[:, 0], "u_r": uniforms[:, 1], "tier": tier}
-        )
-        return CopulaSample(pairs, False)
-
-
-class SharedUniformCopula:
-    def sample(self, tier, n, rng):
-        uniform = rng.random(int(n))
-        pairs = pd.DataFrame({"u_m": uniform, "u_r": uniform.copy(), "tier": tier})
-        return CopulaSample(pairs, False)
 
 
 def _capture(monkeypatch):
@@ -177,8 +142,8 @@ def test_reruns_with_the_same_ids_are_identical():
         n_draws=400,
         kmax=60,
     )
-    first = points_pmf(rows, _independent(), **kwargs)
-    second = points_pmf(rows, _independent(), **kwargs)
+    first = points_pmf(rows, **kwargs)
+    second = points_pmf(rows, **kwargs)
     np.testing.assert_array_equal(first[0], second[0])
     np.testing.assert_array_equal(first[1], second[1])
     np.testing.assert_array_equal(first[2], second[2])
@@ -191,7 +156,7 @@ def test_reruns_with_the_same_ids_are_identical():
             _row("same-game", 2, knots_m, knots_r),
         ]
     )
-    twin_pmf, _, _ = points_pmf(twins, _independent(), **kwargs)
+    twin_pmf, _, _ = points_pmf(twins, **kwargs)
     assert not np.array_equal(twin_pmf[0], twin_pmf[1])
     duplicate = pd.DataFrame(
         [
@@ -199,7 +164,7 @@ def test_reruns_with_the_same_ids_are_identical():
             _row("same-game", 1, knots_m, knots_r),
         ]
     )
-    duplicated, _, _ = points_pmf(duplicate, _independent(), **kwargs)
+    duplicated, _, _ = points_pmf(duplicate, **kwargs)
     np.testing.assert_array_equal(duplicated[0], duplicated[1])
     np.testing.assert_array_equal(duplicated[0], twin_pmf[0])
 
@@ -215,7 +180,6 @@ def test_constant_knots_are_a_point_mass_at_round_minutes_times_rate():
     )
     pmf, mean, median = points_pmf(
         rows,
-        _independent(),
         n_draws=200,
         minutes_tables=_flat_tables("minutes"),
         rate_tables=_flat_tables("rate"),
@@ -238,7 +202,6 @@ def test_pmf_mean_is_not_the_product_of_q50s_when_the_row_is_skewed():
     rows = pd.DataFrame([_row("g-skew", 4, minutes, rate)])
     _pmf, mean, _median = points_pmf(
         rows,
-        _independent(),
         n_draws=4_000,
         minutes_tables=_flat_tables("minutes"),
         rate_tables=_flat_tables("rate"),
@@ -248,49 +211,17 @@ def test_pmf_mean_is_not_the_product_of_q50s_when_the_row_is_skewed():
     assert abs(float(mean[0]) - q50_product) > 1.0
 
 
-def test_gaussian_copula_passes_dependence_through_the_quantile_functions(monkeypatch):
-    captured = _capture(monkeypatch)
-    minutes_tables, rate_tables = _spread_tables()
-    rows = _monotone_row()
-    points_pmf(
-        rows,
-        GaussianCopula(0.3),
-        n_draws=10_000,
-        minutes_tables=minutes_tables,
-        rate_tables=rate_tables,
-    )
-    rho = float(spearmanr(captured["minutes"][0], captured["rate"][0]).statistic)
-    expected = (6.0 / math.pi) * math.asin(0.3 / 2.0)
-    assert rho == pytest.approx(expected, abs=0.03)
-    assert rho == pytest.approx(0.29, abs=0.03)
-
-
-def test_independent_copula_draws_have_no_rank_correlation(monkeypatch):
+def test_minutes_and_rate_draws_are_independent(monkeypatch):
     captured = _capture(monkeypatch)
     minutes_tables, rate_tables = _spread_tables()
     points_pmf(
         _monotone_row(),
-        _independent(),
         n_draws=10_000,
         minutes_tables=minutes_tables,
         rate_tables=rate_tables,
     )
     rho = float(spearmanr(captured["minutes"][0], captured["rate"][0]).statistic)
     assert rho == pytest.approx(0.0, abs=0.05)
-
-
-def test_shared_uniforms_keep_perfect_rank_correlation(monkeypatch):
-    captured = _capture(monkeypatch)
-    minutes_tables, rate_tables = _spread_tables()
-    points_pmf(
-        _monotone_row(),
-        SharedUniformCopula(),
-        n_draws=2_000,
-        minutes_tables=minutes_tables,
-        rate_tables=rate_tables,
-    )
-    rho = float(spearmanr(captured["minutes"][0], captured["rate"][0]).statistic)
-    assert rho == pytest.approx(1.0, abs=1e-6)
 
 
 def test_integer_log_score_is_the_log_probability_of_the_outcome():

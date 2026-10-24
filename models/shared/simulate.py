@@ -1,9 +1,9 @@
 """Integer points PMF from a minutes draw and a rate draw.
 
-One seeded RNG per player-game is handed to the copula. The uniforms
-come back as a pair and each is pushed through that target's quantile
-function. The samplers' own draw functions are not used: separate
-draws are independent, and a shared hash draws the same uniforms twice.
+One seeded RNG per player-game draws the two uniforms independently.
+Each uniform is pushed through that target's quantile function. The
+samplers' own draw functions are not used: separate draws would repeat
+the same hash.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from hashlib import sha256
 import numpy as np
 import pandas as pd
 
-from models.shared.copula import minutes_tier
 from models.shared.minutes_sampler import (
     QUANTILE_LEVELS,
     canonical_id,
@@ -30,7 +29,6 @@ from models.shared.ppm_sampler import (
 
 def points_pmf(
     rows: pd.DataFrame,
-    copula,
     n_draws: int = 10_000,
     kmax: int = 90,
     *,
@@ -40,9 +38,8 @@ def points_pmf(
 ):
     """PMF of ``k = clip(floor(minutes * rate + 0.5), 0, kmax)``.
 
-    Rows in one predicted-minutes tier are mapped together. Returns
-    ``(pmf, mean, median)`` aligned to ``rows``. The mean and the median
-    are read from the PMF.
+    Minutes and rate ranks are independent. Returns ``(pmf, mean, median)``
+    aligned to ``rows``. The mean and the median are read from the PMF.
     """
     n_draws = _positive_draws(n_draws)
     kmax = _kmax(kmax)
@@ -53,42 +50,37 @@ def points_pmf(
     if n_rows == 0:
         return pmf, np.zeros(0, dtype=float), np.zeros(0, dtype=int)
 
-    tiers = minutes_tier(frame["minutes_q_0.50"])
     minute_grids = _knot_grid(frame, "minutes")
     rate_grids = _knot_grid(frame, "rate")
     minute_lower, minute_upper = minutes_groups(frame["starting"], minutes_tables)
     rate_lower, rate_upper = rate_groups(frame["starting"], rate_tables)
     game_ids = frame["game_id"].to_numpy()
     player_ids = frame["player_id"].to_numpy()
-
-    for tier in dict.fromkeys(tiers.tolist()):
-        index = np.flatnonzero(tiers == tier)
-        uniforms_m = np.empty((index.shape[0], n_draws), dtype=float)
-        uniforms_r = np.empty((index.shape[0], n_draws), dtype=float)
-        for local, row_index in enumerate(index):
-            rng = _player_game_rng(game_ids[row_index], player_ids[row_index], seed)
-            drawn = copula.sample(str(tier), n_draws, rng)
-            uniforms_m[local] = _uniform_column(drawn, "u_m", n_draws)
-            uniforms_r[local] = _uniform_column(drawn, "u_r", n_draws)
-        minutes = minutes_ppf(
-            uniforms_m,
-            minute_grids[index],
-            minute_lower[index],
-            minute_upper[index],
-            minutes_tables,
-        )
-        rate = np.minimum(
-            rate_ppf(
-                uniforms_r,
-                rate_grids[index],
-                rate_lower[index],
-                rate_upper[index],
-                rate_tables,
-            ),
-            RATE_CAP,
-        )
-        counts = np.clip(np.floor(minutes * rate + 0.5), 0, kmax).astype(np.int64)
-        pmf[index] = _bincount_rows(counts, width) / float(n_draws)
+    uniforms_m = np.empty((n_rows, n_draws), dtype=float)
+    uniforms_r = np.empty((n_rows, n_draws), dtype=float)
+    for row_index in range(n_rows):
+        rng = _player_game_rng(game_ids[row_index], player_ids[row_index], seed)
+        uniforms_m[row_index] = rng.random(n_draws)
+        uniforms_r[row_index] = rng.random(n_draws)
+    minutes = minutes_ppf(
+        uniforms_m,
+        minute_grids,
+        minute_lower,
+        minute_upper,
+        minutes_tables,
+    )
+    rate = np.minimum(
+        rate_ppf(
+            uniforms_r,
+            rate_grids,
+            rate_lower,
+            rate_upper,
+            rate_tables,
+        ),
+        RATE_CAP,
+    )
+    counts = np.clip(np.floor(minutes * rate + 0.5), 0, kmax).astype(np.int64)
+    pmf[:] = _bincount_rows(counts, width) / float(n_draws)
 
     mean, median = _pmf_summaries(pmf)
     return pmf, mean, median
@@ -125,14 +117,6 @@ def _player_game_rng(game_id, player_id, seed: int):
     ).encode()
     digest = sha256(material).digest()
     return np.random.default_rng(int.from_bytes(digest[:8], "little"))
-
-
-def _uniform_column(drawn, name: str, n_draws: int) -> np.ndarray:
-    pairs = drawn.pairs
-    values = np.asarray(pairs[name], dtype=float).reshape(-1)
-    if values.shape != (n_draws,):
-        raise ValueError("copula draw count")
-    return values
 
 
 def _knot_grid(frame: pd.DataFrame, prefix: str) -> np.ndarray:

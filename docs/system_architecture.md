@@ -22,10 +22,10 @@ nba_api / BRef / Rotowire
         └── rate quantile model (11 knots, points per minute)
                   │
                   ▼
-            OOS copula  →  minutes × rate  →  integer points PMF
+            independent draws  →  minutes × rate  →  integer points PMF
 ```
 
-Nothing below silver should read bronze. Nothing in features should use Game N outcomes. A points total is a minutes draw times a rate draw from the copula. Game N minutes are still not a feature.
+Nothing below silver should read bronze. Nothing in features should use Game N outcomes. A points total is an independent minutes draw times an independent rate draw. Game N minutes are still not a feature.
 
 ---
 
@@ -84,8 +84,8 @@ The learners are the two quantile notebooks, fit through `models/shared/`. The p
 | `models/shared/minutes_sampler.py` | Minutes quantile function, OOS tails, line probability |
 | `models/shared/ppm_sampler.py` | Rate quantile function, OOS tails, cap at 6.0 |
 | `models/shared/oos.py` | Joint OOS minutes and rate knots, one row per player-game |
-| `models/shared/copula.py` | OOS PIT pairs; `IndependentCopula` and `EmpiricalCopula` |
-| `models/shared/simulate.py` | `minutes × rate` → integer points PMF and line probabilities |
+| `models/shared/copula.py` | OOS PIT pairs for the dependence check. Not used to price a line |
+| `models/shared/simulate.py` | Independent `minutes × rate` draws → integer points PMF and line probabilities |
 | `models/shared/metrics.py` | Pinball, interval coverage, and points-PMF scores |
 | `src/models/evaluation.py` | Draw-based NLL, CRPS, coverage |
 | `src/models/odds.py` | American → decimal / implied / no-vig / EV |
@@ -120,9 +120,9 @@ Load a bundle with `load_model_bundle` and a sidecar with that sampler's `load_t
 2. Build pregame features as of the quote timestamp.
 3. `predict_quantiles` for minutes and for the rate. Sort each row's 11 knots along tau before a probability is read.
 4. A minutes line is `probability_below_line` on the minutes sampler. That is not a points price.
-5. Points: `build_pit_pairs` on the OOS table. `EmpiricalCopula` keeps pairs with `game_date` before the quote and drops holdout pairs unless `include_holdout` is set. A tier with fewer than 3,000 pairs draws from every remaining tier. `points_pmf` takes 10,000 seeded draws, inverts both quantile functions, caps the rate at 6, and sets `k = floor(minutes × rate + 0.5)` with `k` clipped at 90. `line_probs` reads the half-point over/under from that PMF. Expected points is the PMF mean.
+5. Points: `points_pmf` draws a minutes uniform and a rate uniform independently from one seeded RNG per player-game. It inverts both quantile functions, caps the rate at 6, and sets `k = floor(minutes × rate + 0.5)` with `k` clipped at 90. Default draw count is 10,000. `line_probs` reads the half-point over/under from that PMF. Expected points is the PMF mean.
 
-`IndependentCopula` draws the two uniforms separately. `notebooks/nba/points/pmf_eval.ipynb` scores it as model A against the empirical copula as model B. The priced path is B.
+The Frank check in `notebooks/nba/copula/simulator_checks.ipynb` is why the price ignores dependence. Fitted Frank theta 0.667 (Kendall tau 0.074) changed the over/under Brier score by −0.00042 on 15,441 player-games, from 0.23576 to 0.23534. `models/shared/copula.py` still builds those PIT pairs for that check.
 
 ---
 
@@ -148,10 +148,9 @@ Quantile promotion stays pinball and interval coverage from `models/shared/metri
 - 80% interval (q0.10–q0.90) coverage near 0.80
 - 90% interval (q0.05–q0.95) coverage near 0.90
 
-The integer points PMF is scored in `pmf_eval.ipynb` by `evaluate_points_pmfs`. Dev is the 2024-25 OOS rows, with B's pool rebuilt at each game date from pre-holdout pairs only. Holdout `2025-26` runs once after that, and B's pool is every pre-holdout pair. Reports are overall and by predicted minutes q50 (`<15`, `15-24`, `24-31`, `31+`):
+The integer points PMF is the independent draw from `points_pmf`, scored by `evaluate_points_pmfs`. Reports are overall and by predicted minutes q50 (`<15`, `15-24`, `24-31`, `31+`):
 
-- Randomized PIT of the PMF, P(points = 0), mean log score, and RPS
-- Log score and RPS differences (B minus A) with a 95% interval from a bootstrap over game dates
+- Randomized PIT of the PMF, P(points = 0), mean log score, and RPS, with a 95% interval from a bootstrap over game dates
 - Pseudo-lines around `floor(EWMA halflife 3) + 0.5`, plus that line ±4 and ±8, floored at 0.5
 - MAE of the PMF median and RMSE of the PMF mean against last game, season-to-date mean, and EWMA halflife 3
 
@@ -173,7 +172,7 @@ q50 MAE against last-game, season mean, and EWMA is diagnostic. It does not sele
 
 ## 9. Out of scope (current architecture)
 
-- A second counting stat on this PMF. Assists (`notebooks/nba/assists/ast_nba_model.ipynb`) would be its own rate model and its own minutes-rate copula
+- A second counting stat on this PMF. Assists (`notebooks/nba/assists/ast_nba_model.ipynb`) would be its own rate model and its own independent minutes-rate PMF
 - Confirmed lineup overlay
 - Non-PTS markets and period props. A whole-number points line pushes on that integer; the scored market is the half-point line
 - Bankroll / Kelly as a training objective

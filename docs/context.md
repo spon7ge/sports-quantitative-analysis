@@ -19,7 +19,7 @@ The mean-plus-residual stack (`src/models/xgboost_models/`, joint overlay / slop
 | Minutes quantiles | `notebooks/nba/minutes/min_nba_model.ipynb` | Frozen. Bundle `models/saved_models/min_nba_model_2026-04-12.joblib` |
 | Minutes distribution | `models/shared/minutes_sampler.py` | Frozen tails `min_nba_tails_2026-04-12.joblib` |
 | Points-per-minute quantiles | `notebooks/nba/points/pts_nba_model.ipynb` | Notebook still fits `pts` until the retarget. Label will be `min(pts / minutes, 6.0)` |
-| Rate distribution, copula, points PMF | `models/shared/ppm_sampler.py`, `copula.py`, `simulate.py` | Not written. Spec is `PROPSIM_SPEC.MD` |
+| Points PMF | `models/shared/simulate.py` | Priced path. Independent minutes and rate draws |
 | Holdout | `2025-26` | Closed for selection, tuning, and tail edits |
 
 Both models are `reg:quantileerror` with levels `0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95`. Training goes through `models/shared/`. Appearance filter is `minutes > 0`.
@@ -34,7 +34,7 @@ The minutes feature list is `MIN_FEATURES` in the minutes notebook. The rate mod
 2. **Features.** `add_minutes_features` / `add_points_features`. Shift-then-roll, pregame only. Game N box scores are never features.
 3. **Quantile models.** Fit in `min_nba_model.ipynb` and `pts_nba_model.ipynb`. Walk-forward on the pre-holdout pool, then one holdout score. Save with `save_model_bundle`.
 4. **Minutes distribution.** Inverse of the 11 knots, with out-of-fold tails by starter/bench. A minutes line is `probability_below_line`, not a draw count.
-5. **Points distribution.** Rate sampler, then an OOS copula with minutes, then `points = minutes × rate` rounded to an integer PMF.
+5. **Points distribution.** Rate sampler, then independent minutes and rate draws, then `points = minutes × rate` rounded to an integer PMF.
 
 Holdout season `2025-26` is not a place to retune. Next promotion window is `2026-27`.
 
@@ -61,7 +61,7 @@ DNPs void; they are not priced as zeros. Predictions are conditional on appearan
 ## Known gaps
 
 - The points notebook still trains `pts`. The rate retarget, its retune, and its tail tables are not done.
-- No copula or integer points PMF yet.
+- The priced PMF does not use the copula. `models/shared/copula.py` remains the dependence check.
 - No confirmed lineup / injury feed in training.
 - Assists has a feature builder and `notebooks/nba/assists/ast_nba_model.ipynb`. It is not part of the points PMF.
 
