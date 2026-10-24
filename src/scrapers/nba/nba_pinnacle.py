@@ -462,8 +462,9 @@ class PinnacleScraper:
         self.page_wait = float(os.environ.get("PINNACLE_PAGE_WAIT", "8"))
         self.max_games = int(os.environ.get("PINNACLE_MAX_GAMES", "50"))
 
-        cpu = os.cpu_count() or 8
-        _default_workers = min(6, max(2, cpu // 2))
+        # Prefer 3 Chromes by default: fewer cold-starts and less swap than 5–6
+        # on typical laptop memory. Override with PINNACLE_WORKERS.
+        _default_workers = 3
         try:
             self.parallel_workers = max(
                 1,
@@ -574,15 +575,21 @@ class PinnacleScraper:
         return min(self.parallel_workers, n, max(1, ideal))
 
     def _scroll_lazy(self, driver, rounds: int | None = None) -> None:
+        """Scroll until no new game URLs appear, or ``rounds`` is exhausted."""
         if By is None:
             return
 
         r = self.discover_scroll_rounds if rounds is None else rounds
+        prev_count = len(self._read_game_urls_from_driver(driver))
         for _ in range(max(1, r)):
             driver.execute_script(
                 "window.scrollBy({top: window.innerHeight * 0.85, behavior: 'instant'})",
             )
             time.sleep(self.discover_scroll_pause)
+            cur_count = len(self._read_game_urls_from_driver(driver))
+            if cur_count <= prev_count:
+                break
+            prev_count = cur_count
 
     def _dismiss_cookie_banner(self, driver) -> None:
         """Accept cookies when the consent modal blocks or delays list hydration."""

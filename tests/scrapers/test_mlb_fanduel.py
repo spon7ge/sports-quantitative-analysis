@@ -61,7 +61,7 @@ def _page_payload() -> dict:
 def test_fanduel_root_is_repo_root_not_src() -> None:
     root = repo_root()
     assert _ROOT == str(root)
-    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "fanduel")
+    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "fanduel" / "mlb")
 
 
 def test_fetch_events_joins_competition_name_from_attachments() -> None:

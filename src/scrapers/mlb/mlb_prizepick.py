@@ -48,8 +48,8 @@ league_id note:
     noisy 403s before the real projections fetch.
 
 Default output (one file per league):
-    data/props/prizepicks/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
-    e.g. prizepicks_mlb_2026-07-31_180238.json
+    data/props/prizepicks/{league}/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
+    e.g. data/props/prizepicks/mlb/prizepicks_mlb_2026-07-31_180238.json
 
 Usage:
     python prizepicks_scraper_mlb.py                    # Fetch and save
@@ -248,8 +248,8 @@ def resolve_output_path(
 
     Checks:
     1. PRIZEPICKS_OUTPUT env var (if .json file) — used as-is when set
-    2. Default: data/props/prizepicks/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
-       e.g. prizepicks_mlb_2026-07-31_180238.json
+    2. Default: data/props/prizepicks/{league}/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
+       e.g. data/props/prizepicks/mlb/prizepicks_mlb_2026-07-31_180238.json
 
     Args:
         league: League label embedded in the default filename (mlb)
@@ -275,7 +275,7 @@ def resolve_output_path(
     stamp = when or datetime.now(_OUTPUT_TZ)
     slug = league_slug(league) if league else "mixed"
     filename = stamp.strftime(f"prizepicks_{slug}_%Y-%m-%d_%H%M%S.json")
-    path = os.path.join(_DEFAULT_OUTPUT_DIR, filename)
+    path = os.path.join(_DEFAULT_OUTPUT_DIR, slug, filename)
 
     logger.info(f"Using default output path: {path}")
     return path
@@ -1224,6 +1224,14 @@ def try_fetch_with_playwright(
 
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+# run_all_odds treats this exit as "queue Playwright fallback".
+PRIZEPICKS_NEED_BROWSER_EXIT = 3
+
+
 def fetch_projections_payloads(
     leagues: tuple[tuple[str, int], ...] | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -1237,11 +1245,16 @@ def fetch_projections_payloads(
     4. Fall back to Playwright (headed; solve captcha if needed)
     5. If all fail, provide helpful error message
 
+    Env:
+      PRIZEPICKS_NO_BROWSER=1 — HTTP only; SystemExit(3) if HTTP fails
+      PRIZEPICKS_BROWSER_ONLY=1 — Playwright only (runner browser queue)
+
     Returns:
         Mapping league name → API response with 'data' / 'included'
 
     Raises:
         requests.HTTPError: If all fetch attempts fail
+        SystemExit: exit code 3 when NO_BROWSER and HTTP fails
     """
     if leagues is None:
         leagues = resolve_leagues(DEFAULT_LEAGUE_NAMES)
@@ -1259,13 +1272,24 @@ def fetch_projections_payloads(
     )
     logger.info("=" * 70)
 
-    result = try_fetch_with_curl_cffi(leagues)
-    if result is not None:
-        return result
+    no_browser = _env_flag("PRIZEPICKS_NO_BROWSER")
+    browser_only = _env_flag("PRIZEPICKS_BROWSER_ONLY")
 
-    result = try_fetch_with_requests(leagues)
-    if result is not None:
-        return result
+    if not browser_only:
+        result = try_fetch_with_curl_cffi(leagues)
+        if result is not None:
+            return result
+
+        result = try_fetch_with_requests(leagues)
+        if result is not None:
+            return result
+
+        if no_browser:
+            logger.error(
+                "PrizePicks HTTP exhausted with PRIZEPICKS_NO_BROWSER=1 "
+                f"(exit {PRIZEPICKS_NEED_BROWSER_EXIT} for browser queue)"
+            )
+            raise SystemExit(PRIZEPICKS_NEED_BROWSER_EXIT)
 
     result = try_fetch_with_playwright(leagues)
     if result is not None:

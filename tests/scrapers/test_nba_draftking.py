@@ -105,8 +105,8 @@ def test_nba_draftking_defaults() -> None:
     assert _DEFAULT_CONFIG["sport_allowlist"] == ["NBA"]
     assert _DEFAULT_CONFIG["dk_event_group"] == "42648"
     assert _DEFAULT_CONFIG["dk_league_page"].endswith("/leagues/basketball/nba")
-    assert "pitcher" not in _DEFAULT_CONFIG["dk_category_allowlist"]
-    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "draftkings")
+    assert "Points" in (_DEFAULT_CONFIG.get("dk_subcategory_names") or [])
+    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "draftkings" / "nba")
     assert sport_to_league("NBA") == "nba"
     assert sport_to_league("WNBA") is None
     assert sport_to_league("MLB") is None
@@ -119,7 +119,9 @@ def test_nba_draftkings_table_and_quote_spec() -> None:
 
 
 def test_subcategories_from_nav_keep_player_props_not_game_lines() -> None:
-    subs = subcategories_from_nav(_NAV_HTML, _DEFAULT_CONFIG["dk_category_allowlist"])
+    subs = subcategories_from_nav(
+        _NAV_HTML, names=_DEFAULT_CONFIG["dk_subcategory_names"]
+    )
     assert {(s.category_name, s.name, s.subcategory_id) for s in subs} == {
         ("Player Points", "Points", "12488"),
         ("Player Combos", "Pts + Reb + Ast", "12492"),
@@ -129,7 +131,7 @@ def test_subcategories_from_nav_keep_player_props_not_game_lines() -> None:
 def test_fetch_event_group_reads_nav_from_league_page() -> None:
     cfg = {
         "dk_league_page": _DEFAULT_CONFIG["dk_league_page"],
-        "dk_category_allowlist": _DEFAULT_CONFIG["dk_category_allowlist"],
+        "dk_subcategory_names": _DEFAULT_CONFIG["dk_subcategory_names"],
         "dk_timeout": 30,
         "dk_max_retries": 1,
     }
@@ -175,8 +177,12 @@ def test_match_stat_maps_nba_props_not_baseball() -> None:
 def test_resolve_output_path_uses_nba_slug(monkeypatch) -> None:
     monkeypatch.delenv("DK_OUTPUT", raising=False)
     path = resolve_output_path("NBA")
-    assert path.startswith(_DEFAULT_OUTPUT_DIR)
-    assert "draftkings_nba_" in path
+    assert Path(path).parent == Path(_DEFAULT_OUTPUT_DIR)
+    assert "draftkings_nba_" in Path(path).name
+
+    other = resolve_output_path("MLB")
+    assert Path(other).parent.name == "mlb"
+    assert Path(other).parent.parent == Path(_DEFAULT_OUTPUT_DIR).parent
 
 
 def test_nba_draftking_imports_as_loose_script() -> None:

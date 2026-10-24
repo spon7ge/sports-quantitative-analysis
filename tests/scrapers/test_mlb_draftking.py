@@ -144,7 +144,7 @@ def _outs_ou_payload() -> dict:
 def test_draftkings_root_is_repo_root_not_src() -> None:
     root = repo_root()
     assert _ROOT == str(root)
-    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "draftkings")
+    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "draftkings" / "mlb")
 
 
 def test_subcategories_from_nav_keep_player_props_not_game_lines() -> None:

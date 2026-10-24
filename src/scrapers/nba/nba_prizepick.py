@@ -48,8 +48,8 @@ league_id note:
     noisy 403s before the real projections fetch.
 
 Default output (one file per league):
-    data/props/prizepicks/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
-    e.g. prizepicks_nba_2026-07-31_180238.json
+    data/props/prizepicks/{league}/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
+    e.g. data/props/prizepicks/nba/prizepicks_nba_2026-07-31_180238.json
 
 Usage:
     python -m src.scrapers.nba.nba_prizepick                    # Fetch and save
@@ -247,8 +247,8 @@ def resolve_output_path(
 
     Checks:
     1. PRIZEPICKS_OUTPUT env var (if .json file) — used as-is when set
-    2. Default: data/props/prizepicks/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
-       e.g. prizepicks_nba_2026-07-31_180238.json
+    2. Default: data/props/prizepicks/{league}/prizepicks_{league}_YYYY-MM-DD_HHMMSS.json
+       e.g. data/props/prizepicks/nba/prizepicks_nba_2026-07-31_180238.json
 
     Args:
         league: League label embedded in the default filename (nba)
@@ -274,7 +274,7 @@ def resolve_output_path(
     stamp = when or datetime.now(_OUTPUT_TZ)
     slug = league_slug(league) if league else "mixed"
     filename = stamp.strftime(f"prizepicks_{slug}_%Y-%m-%d_%H%M%S.json")
-    path = os.path.join(_DEFAULT_OUTPUT_DIR, filename)
+    path = os.path.join(_DEFAULT_OUTPUT_DIR, slug, filename)
 
     logger.info(f"Using default output path: {path}")
     return path
@@ -1223,6 +1223,14 @@ def try_fetch_with_playwright(
 
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+# run_all_odds treats this exit as "queue Playwright fallback".
+PRIZEPICKS_NEED_BROWSER_EXIT = 3
+
+
 def fetch_projections_payloads(
     leagues: tuple[tuple[str, int], ...] | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -1236,11 +1244,16 @@ def fetch_projections_payloads(
     4. Fall back to Playwright (headed; solve captcha if needed)
     5. If all fail, provide helpful error message
 
+    Env:
+      PRIZEPICKS_NO_BROWSER=1 — HTTP only; SystemExit(3) if HTTP fails
+      PRIZEPICKS_BROWSER_ONLY=1 — Playwright only (runner browser queue)
+
     Returns:
         Mapping league name → API response with 'data' / 'included'
 
     Raises:
         requests.HTTPError: If all fetch attempts fail
+        SystemExit: exit code 3 when NO_BROWSER and HTTP fails
     """
     if leagues is None:
         leagues = resolve_leagues(DEFAULT_LEAGUE_NAMES)
@@ -1258,13 +1271,24 @@ def fetch_projections_payloads(
     )
     logger.info("=" * 70)
 
-    result = try_fetch_with_curl_cffi(leagues)
-    if result is not None:
-        return result
+    no_browser = _env_flag("PRIZEPICKS_NO_BROWSER")
+    browser_only = _env_flag("PRIZEPICKS_BROWSER_ONLY")
 
-    result = try_fetch_with_requests(leagues)
-    if result is not None:
-        return result
+    if not browser_only:
+        result = try_fetch_with_curl_cffi(leagues)
+        if result is not None:
+            return result
+
+        result = try_fetch_with_requests(leagues)
+        if result is not None:
+            return result
+
+        if no_browser:
+            logger.error(
+                "PrizePicks HTTP exhausted with PRIZEPICKS_NO_BROWSER=1 "
+                f"(exit {PRIZEPICKS_NEED_BROWSER_EXIT} for browser queue)"
+            )
+            raise SystemExit(PRIZEPICKS_NEED_BROWSER_EXIT)
 
     result = try_fetch_with_playwright(leagues)
     if result is not None:
@@ -1393,6 +1417,33 @@ def extract_projections_from_payloads(
     for league_name, payload in payloads.items():
         rows.extend(extract_projections(payload, league=league_name))
     return rows
+
+
+def excluded_odds_types() -> frozenset[str]:
+    """Odds types dropped before change-filter/upsert (not from the JSON file).
+
+    Set ``PRIZEPICKS_EXCLUDE_ODDS_TYPES=demon,goblin`` when those lines are unused.
+    """
+    raw = os.environ.get("PRIZEPICKS_EXCLUDE_ODDS_TYPES", "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def filter_projections_for_db(projections: list[Projection]) -> list[Projection]:
+    """Drop optional unused odds_types before Supabase load."""
+    deny = excluded_odds_types()
+    if not deny:
+        return projections
+    kept = [p for p in projections if (p.odds_type or "").strip().lower() not in deny]
+    dropped = len(projections) - len(kept)
+    if dropped:
+        logger.info(
+            "PrizePicks DB filter dropped %s projection(s) with odds_type in %s",
+            dropped,
+            sorted(deny),
+        )
+    return kept
 
 
 # ============================================================================
@@ -1529,6 +1580,7 @@ class PrizePicks_Scraper:
         self.output_paths: list[str] = []
         self.projections: list[Projection] = []
         self.scraped_at: datetime | None = None
+        self._db_failed = False
         logger.info("Initialization complete")
 
     @property
@@ -1561,8 +1613,9 @@ class PrizePicks_Scraper:
             try:
                 from src.odds.load_snapshots import load_prizepicks_snapshot
 
+                db_rows = filter_projections_for_db(rows)
                 n = load_prizepicks_snapshot(
-                    [p.to_dict() for p in rows],
+                    [p.to_dict() for p in db_rows],
                     league=league_slug(league_name),
                     scraped_at=scraped_at,
                 )
@@ -1571,39 +1624,58 @@ class PrizePicks_Scraper:
                 )
             except Exception as e:
                 logger.error(f"Supabase prizepicks load failed (JSON kept): {e}")
+                self._db_failed = True
             paths.append(path)
         self.output_paths = paths
         return paths
 
-    def run(self) -> None:
-        """Execute the full scrape pipeline for NBA."""
+    def run(self) -> int:
+        """Execute the full scrape pipeline for NBA. Returns process exit code."""
+        from src.scrapers.stage_report import StageReport, stage_timer
+
+        report = StageReport(book="prizepick", league="nba")
         try:
             logger.info("\n[Step 1/2] Fetching data...")
-            payloads = fetch_projections_payloads()
+            with stage_timer(report, "download"):
+                payloads = fetch_projections_payloads()
 
             logger.info("\n[Step 2/2] Extracting and saving...")
-            self.projections = extract_projections_from_payloads(payloads)
-            self.scraped_at = datetime.now(timezone.utc)
-            paths = self._save_by_league(self.projections)
+            with stage_timer(report, "parse"):
+                self.projections = extract_projections_from_payloads(payloads)
+                self.scraped_at = datetime.now(timezone.utc)
+                paths = self._save_by_league(self.projections)
 
             by_league: dict[str, int] = {}
             for p in self.projections:
                 by_league[p.league] = by_league.get(p.league, 0) + 1
             summary = ", ".join(f"{k}={v}" for k, v in sorted(by_league.items())) or "none"
 
+            report.mark_json(ok=True, rows=len(self.projections))
+            report.mark_db(ok=not self._db_failed)
+            report.set_stage("total", sum(report.stages_s.values()))
+
             logger.info("=" * 70)
-            logger.info(
-                f"✓ SUCCESS: {len(self.projections)} projections saved ({summary})"
-            )
+            if self._db_failed:
+                logger.error(
+                    f"JSON saved ({summary}) but Supabase load failed — "
+                    "marking run unsuccessful"
+                )
+            else:
+                logger.info(
+                    f"✓ SUCCESS: {len(self.projections)} projections saved ({summary})"
+                )
             for path in paths:
                 logger.info(f"  → {path}")
             logger.info("=" * 70)
+            return report.log_and_exit_code()
 
         except Exception as e:
             logger.error("=" * 70)
             logger.error(f"✗ FAILED: {type(e).__name__}: {e}")
             logger.error("=" * 70)
-            raise
+            report.mark_json(ok=False)
+            report.error = str(e)
+            return report.log_and_exit_code()
 
     def load_from_file(self, path: str) -> None:
         """Load projections from file."""
@@ -1699,7 +1771,7 @@ Environment variables:
     else:
         logger.info("Starting PrizePicks NBA scraper...")
         scraper = PrizePicks_Scraper()
-        scraper.run()
+        code = scraper.run()
 
         if args.tsv_all:
             print()
@@ -1709,6 +1781,7 @@ Environment variables:
             print()
             print_projections_tsv(scraper.projections, limit=args.head)
 
+        raise SystemExit(code)
 
 if __name__ == "__main__":
     main()

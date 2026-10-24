@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from src.odds.load_snapshots import _prizepicks_table
 from src.odds.quote_specs import QUOTE_SPECS
+from src.scrapers.mlb.mlb_prizepick import resolve_output_path as resolve_mlb_output_path
 from src.scrapers.nba.nba_prizepick import (
     _CLEARANCE_PROBE_LEAGUE_ID,
     _DEFAULT_OUTPUT_DIR,
@@ -71,8 +72,12 @@ def test_resolve_output_path_uses_nba_slug(monkeypatch) -> None:
     monkeypatch.delenv("PRIZEPICKS_OUTPUT", raising=False)
     when = datetime(2026, 10, 3, 14, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
     path = resolve_output_path("NBA", when=when)
-    assert path.endswith("prizepicks_nba_2026-10-03_143000.json")
-    assert path.startswith(_DEFAULT_OUTPUT_DIR)
+    assert path.endswith("nba/prizepicks_nba_2026-10-03_143000.json")
+    assert Path(path).parent == Path(_DEFAULT_OUTPUT_DIR) / "nba"
+
+    mlb_path = resolve_mlb_output_path("MLB", when=when)
+    assert mlb_path.endswith("mlb/prizepicks_mlb_2026-10-03_143000.json")
+    assert Path(mlb_path).parent == Path(_DEFAULT_OUTPUT_DIR) / "mlb"
 
 
 def test_nba_prizepick_imports_as_loose_script() -> None:

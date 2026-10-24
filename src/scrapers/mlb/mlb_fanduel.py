@@ -44,7 +44,8 @@ except ImportError:  # python mlb_fanduel.py from this directory
 
 _ROOT = str(ensure_repo_on_path(__file__))
 
-_DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "fanduel")
+_BOOK_DIR = os.path.join(_ROOT, "data", "props", "fanduel")
+_DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "mlb")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
@@ -811,7 +812,7 @@ def resolve_output_path(sport: str) -> str:
 
     Checks:
     1. FANDUEL_OUTPUT env var (if .json file) — used as-is for a single sport
-    2. Default: data/props/fanduel/fanduel_{sport}_YYYY-MM-DD_HHMMSS.json
+    2. Default: data/props/fanduel/{sport}/fanduel_{sport}_YYYY-MM-DD_HHMMSS.json
 
     Returns:
         Absolute path to output file
@@ -831,7 +832,7 @@ def resolve_output_path(sport: str) -> str:
 
     now = datetime.now(_OUTPUT_TZ)
     filename = now.strftime(f"fanduel_{sport_slug}_%Y-%m-%d_%H%M%S.json")
-    path = os.path.join(_DEFAULT_OUTPUT_DIR, filename)
+    path = os.path.join(_BOOK_DIR, sport_slug, filename)
     logger.info(f"Using default output path: {path}")
     return path
 

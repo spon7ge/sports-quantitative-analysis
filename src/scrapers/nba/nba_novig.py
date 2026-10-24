@@ -1157,23 +1157,68 @@ def fetch_via_selenium() -> tuple[list[dict[str, Any]], dict[str, list[dict[str,
     )
 
 
+def _event_market_workers() -> int:
+    raw = os.environ.get("NOVIG_MARKET_WORKERS", "6").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 6
+
+
 def _fetch_graphql_snapshots(
     session: requests.Session,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     events = fetch_nba_events(session)
+    event_ids = [
+        str(event.get("id"))
+        for event in events
+        if event.get("id") is not None
+    ]
     markets_by_event_id: dict[str, list[dict[str, Any]]] = {}
-    for event in events:
-        event_id = event.get("id")
-        if event_id is None:
-            continue
-        markets_by_event_id[str(event_id)] = fetch_event_markets(
-            session, str(event_id)
-        )
+    workers = min(_event_market_workers(), max(1, len(event_ids)))
+    logger.info(
+        "Fetching Novig markets for %s event(s) with %s worker(s)",
+        len(event_ids),
+        workers,
+    )
+
+    thread_local = threading.local()
+
+    def _worker_session() -> requests.Session:
+        sess = getattr(thread_local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            sess.headers.update(session.headers)
+            thread_local.session = sess
+        return sess
+
+    def _one(event_id: str) -> tuple[str, list[dict[str, Any]]]:
+        try:
+            return event_id, fetch_event_markets(_worker_session(), event_id)
+        except Exception as exc:
+            logger.warning(
+                "Novig markets failed for event %s (%s); retrying once",
+                event_id,
+                exc,
+            )
+            return event_id, fetch_event_markets(_worker_session(), event_id)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_one, eid) for eid in event_ids]
+        for fut in as_completed(futures):
+            event_id, markets = fut.result()
+            markets_by_event_id[event_id] = markets
+
     props_games, team_games = build_game_snapshots(events, markets_by_event_id)
     return events, props_games, team_games
 
 
 def run() -> None:
+    from src.scrapers.stage_report import StageReport, stage_timer
+
     logging.basicConfig(
         level=getattr(
             logging,
@@ -1182,6 +1227,7 @@ def run() -> None:
         ),
         format="[%(levelname)-8s] %(name)s: %(message)s",
     )
+    report = StageReport(book="novig", league="nba")
     session = requests.Session()
     events: list[dict[str, Any]] = []
     props_games: list[dict[str, Any]] = []
@@ -1189,9 +1235,11 @@ def run() -> None:
     graphql_failed = False
 
     try:
-        events, props_games, team_games = _fetch_graphql_snapshots(session)
+        with stage_timer(report, "download"):
+            events, props_games, team_games = _fetch_graphql_snapshots(session)
     except Exception as exc:
         graphql_failed = True
+        report.error = str(exc)
         logger.error("GraphQL fetch failed: %s", exc)
 
     n_props, n_team = _count_usable_quotes(props_games, team_games)
@@ -1203,17 +1251,20 @@ def run() -> None:
         if selenium_fallback_enabled():
             logger.warning("Attempting Selenium fallback for Novig NBA...")
             try:
-                events, markets_by_event_id = fetch_via_selenium()
-                props_games, team_games = build_game_snapshots(
-                    events, markets_by_event_id
-                )
+                with stage_timer(report, "selenium_fallback"):
+                    events, markets_by_event_id = fetch_via_selenium()
+                    props_games, team_games = build_game_snapshots(
+                        events, markets_by_event_id
+                    )
                 n_props, n_team = _count_usable_quotes(props_games, team_games)
             except Exception as exc:
                 logger.error("Selenium fallback failed: %s", exc)
-                sys.exit(1)
+                report.mark_json(ok=False)
+                sys.exit(report.log_and_exit_code())
             if n_props == 0 and n_team == 0:
                 logger.error("Selenium fallback returned no usable quotes")
-                sys.exit(1)
+                report.mark_json(ok=False)
+                sys.exit(report.log_and_exit_code())
         else:
             if graphql_failed:
                 logger.error(
@@ -1225,12 +1276,15 @@ def run() -> None:
                     "set NOVIG_ALLOW_SELENIUM to attempt browser fallback",
                     len(events),
                 )
-            sys.exit(1)
+            report.mark_json(ok=False)
+            sys.exit(report.log_and_exit_code())
 
     props_path = resolve_props_output_path()
-    props_path, team_path = write_snapshots(
-        props_games, team_games, props_path=props_path
-    )
+    with stage_timer(report, "parse"):
+        props_path, team_path = write_snapshots(
+            props_games, team_games, props_path=props_path
+        )
+    report.mark_json(ok=True, rows=n_props + n_team)
     logger.info(
         "Wrote Novig snapshots: props_games=%s team_games=%s props_quotes=%s "
         "team_markets=%s props=%s team=%s",
@@ -1241,12 +1295,19 @@ def run() -> None:
         props_path,
         team_path,
     )
-    load_supabase_snapshots(
-        props_games,
-        team_games,
-        props_path=props_path,
-        team_path=team_path,
-    )
+    with stage_timer(report, "upsert"):
+        db_ok, rows = load_supabase_snapshots(
+            props_games,
+            team_games,
+            props_path=props_path,
+            team_path=team_path,
+        )
+    report.mark_db(ok=db_ok, rows=rows)
+    if not db_ok:
+        report.error = report.error or "supabase load failed"
+    total = sum(report.stages_s.values())
+    report.set_stage("total", total)
+    sys.exit(report.log_and_exit_code())
 
 
 def load_supabase_snapshots(
@@ -1256,8 +1317,12 @@ def load_supabase_snapshots(
     scraped_at: datetime | None = None,
     props_path: str | None = None,
     team_path: str | None = None,
-) -> None:
-    """Upsert snapshot games to odds.nba_novig / odds.nba_novig_team."""
+) -> tuple[bool, int]:
+    """Upsert snapshot games to odds.nba_novig / odds.nba_novig_team.
+
+    Returns ``(ok, rows_upserted)``. Timeouts and other DB errors are failures —
+    JSON may still have been written, but the run is not a successful load.
+    """
     try:
         from src.odds.load_snapshots import (
             load_novig_props_snapshot,
@@ -1278,8 +1343,10 @@ def load_supabase_snapshots(
             f" props_path={props_path}" if props_path else "",
             f" team_path={team_path}" if team_path else "",
         )
+        return True, int(n_props) + int(n_team)
     except Exception as exc:
         logger.error("Supabase Novig load failed (JSON kept): %s", exc)
+        return False, 0
 
 
 if __name__ == "__main__":

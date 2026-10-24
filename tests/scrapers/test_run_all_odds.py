@@ -92,10 +92,57 @@ def test_cli_rejects_wnba_only() -> None:
 def test_cli_league_nba_runs_nba_jobs_only(monkeypatch) -> None:
     ran: list[str] = []
 
-    def fake_run_job(job, *, python=None):
+    def fake_run_job(job, **_kwargs):
         ran.append(job.name)
         return 0
 
     monkeypatch.setattr("src.scrapers.run_all_odds.run_job", fake_run_job)
     assert main(["--league", "nba"]) == 0
-    assert ran == NBA_NAMES
+    assert set(ran) == set(NBA_NAMES)
+    # PrizePicks HTTP attempt is in the HTTP pool; browser fallback is separate.
+    assert "nba_prizepick" in ran
+
+
+def test_cancel_running_terminates_procs() -> None:
+    import threading
+
+    from src.scrapers.run_all_odds import cancel_running
+
+    class FakeProc:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    procs = [FakeProc(), FakeProc()]
+    cancel_running(procs, threading.Lock())  # type: ignore[arg-type]
+    assert all(p.terminated for p in procs)
+
+
+def test_classify_job_pools() -> None:
+    from src.scrapers.run_all_odds import classify_pool, resolve_jobs
+
+    pools = {j.name: classify_pool(j) for j in resolve_jobs(league="nba")}
+    assert pools["nba_novig"] == "http"
+    assert pools["nba_draftking"] == "http"
+    assert pools["nba_prizepick"] == "http"
+    assert pools["nba_pinnacle"] == "pinnacle"
+
+
+def test_prizepick_http_job_sets_no_browser() -> None:
+    from src.scrapers.run_all_odds import resolve_jobs
+
+    job = next(j for j in resolve_jobs(league="nba") if j.name == "nba_prizepick")
+    assert job.env == {"PRIZEPICKS_NO_BROWSER": "1"}

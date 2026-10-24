@@ -81,7 +81,7 @@ def test_nba_fanduel_defaults() -> None:
     assert _DEFAULT_CONFIG["fd_competition_names"] == ["NBA"]
     assert "player-points" in _DEFAULT_CONFIG["fd_event_tabs"]
     assert "pitcher-props" not in _DEFAULT_CONFIG["fd_event_tabs"]
-    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "fanduel")
+    assert _DEFAULT_OUTPUT_DIR == str(root / "data" / "props" / "fanduel" / "nba")
     assert sport_to_league("NBA") == "nba"
     assert sport_to_league("MLB") is None
 
@@ -185,8 +185,12 @@ def test_extract_event_picks_keeps_points_and_drops_game_total() -> None:
 def test_resolve_output_path_uses_nba_slug(monkeypatch) -> None:
     monkeypatch.delenv("FANDUEL_OUTPUT", raising=False)
     when_path = resolve_output_path("NBA")
-    assert when_path.startswith(_DEFAULT_OUTPUT_DIR)
-    assert "fanduel_nba_" in when_path
+    assert Path(when_path).parent == Path(_DEFAULT_OUTPUT_DIR)
+    assert "fanduel_nba_" in Path(when_path).name
+
+    other = resolve_output_path("MLB")
+    assert Path(other).parent.name == "mlb"
+    assert Path(other).parent.parent == Path(_DEFAULT_OUTPUT_DIR).parent
 
 
 def test_nba_fanduel_imports_as_loose_script() -> None:

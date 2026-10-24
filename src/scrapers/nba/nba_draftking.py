@@ -26,13 +26,30 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 import requests
+
+try:
+    from src.scrapers.stage_report import retry_after_seconds
+except ImportError:  # loose script
+    def retry_after_seconds(response: Any, *, default: float) -> float:
+        try:
+            header = response.headers.get("Retry-After") if response is not None else None
+        except Exception:
+            header = None
+        if not header:
+            return default
+        try:
+            return max(float(header), 0.0)
+        except (TypeError, ValueError):
+            return default
 
 # ============================================================================
 # Configuration
@@ -45,7 +62,8 @@ except ImportError:  # python nba_draftking.py from this directory
 
 _ROOT = str(ensure_repo_on_path(__file__))
 
-_DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "draftkings")
+_BOOK_DIR = os.path.join(_ROOT, "data", "props", "draftkings")
+_DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "nba")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
@@ -58,20 +76,26 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "dk_api_base": (
         "https://sportsbook-nash.draftkings.com/sites/US-SB/api/sportscontent/controldata"
     ),
-    # Categories whose subcategories hold player props. Matched case-insensitively as
-    # substrings; widen this rather than the stat patterns when a whole tab is missing.
-    "dk_category_allowlist": [
-        "point",
-        "rebound",
-        "assist",
-        "three",
-        "prop",
-        "combo",
-        "steal",
-        "block",
-        "turnover",
+    # Explicit pregame prop tab titles (exact, case-insensitive). Avoids substring
+    # matches like "prop" → Live Player Props or "point" → 1st Point.
+    "dk_subcategory_names": [
+        "Points",
+        "Threes",
+        "Rebounds",
+        "Assists",
+        "Pts + Reb + Ast",
+        "Pts + Reb",
+        "Pts + Ast",
+        "Reb + Ast",
+        "Steals",
+        "Blocks",
+        "Turnovers",
+        "Steals + Blocks",
     ],
-    "dk_request_delay": 0.4,
+    # Legacy substring allowlist (used only when dk_subcategory_names is empty).
+    "dk_category_allowlist": [],
+    "dk_request_delay": 0.0,
+    "dk_concurrency": 8,
     "dk_max_retries": 3,
     "dk_timeout": 30,
     "headers": {
@@ -405,9 +429,18 @@ def fetch_json(
             last_error = e
             if attempt >= max(1, max_retries):
                 break
-            backoff = 2 ** (attempt - 1)
+            default_backoff = float(2 ** (attempt - 1))
+            if (
+                isinstance(e, requests.HTTPError)
+                and getattr(e, "response", None) is not None
+                and e.response.status_code == 429
+            ):
+                backoff = retry_after_seconds(e.response, default=default_backoff)
+            else:
+                backoff = default_backoff
             logger.warning(
-                f"{label}: attempt {attempt}/{max_retries} failed ({e}); retrying in {backoff}s"
+                f"{label}: attempt {attempt}/{max_retries} failed ({e}); "
+                f"retrying in {backoff}s"
             )
             time.sleep(backoff)
 
@@ -475,15 +508,48 @@ def _extract_nav_root(html: str) -> dict[str, Any]:
     raise ValueError("NavRoot JSON unterminated")
 
 
-def subcategories_from_nav(html: str, allow: list[str]) -> list[Subcategory]:
-    """
-    Walk the league nav tree and keep player-prop tabs under allowlisted categories.
+_LIVE_OR_FIRST_RE = re.compile(
+    r"\blive\b|\b1st\b|\bfirst\b|\bearly\s+exit\b",
+    re.IGNORECASE,
+)
 
-    Game lines and period tabs are dropped even when they have a subcategory id.
-    Duplicate subcategory ids (e.g. Early Exit copies) keep the first occurrence.
+
+def subcategory_allowed(
+    *,
+    category_name: str,
+    name: str,
+    names: list[str] | None = None,
+    allow: list[str] | None = None,
+) -> bool:
+    """True when a nav tab should be fetched (explicit names preferred)."""
+    hay = f"{category_name} {name}".lower()
+    if _LIVE_OR_FIRST_RE.search(hay):
+        return False
+    name_set = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
+    if name_set:
+        return name.strip().lower() in name_set
+    allow_l = [str(token).lower() for token in (allow or []) if str(token).strip()]
+    if not allow_l:
+        return True
+    return any(token in hay for token in allow_l)
+
+
+def subcategories_from_nav(
+    html: str,
+    allow: list[str] | None = None,
+    *,
+    names: list[str] | None = None,
+) -> list[Subcategory]:
+    """
+    Walk the league nav tree and keep player-prop tabs.
+
+    Prefer ``names`` (exact subcategory titles). Legacy ``allow`` is substring match
+    on category/title. Live / first-event tabs are always excluded.
+    Duplicate subcategory ids keep the first occurrence.
     """
     nav = _extract_nav_root(html)
-    allow_l = [str(token).lower() for token in allow if str(token).strip()]
+    allow_l = [str(token).lower() for token in (allow or []) if str(token).strip()]
+    name_list = list(names or [])
     seen: set[str] = set()
     subcategories: list[Subcategory] = []
 
@@ -492,21 +558,24 @@ def subcategories_from_nav(html: str, allow: list[str]) -> list[Subcategory]:
         seo = str(node.get("seoId") or "")
         params = node.get("parameters") if isinstance(node.get("parameters"), dict) else {}
         next_category = category_name
-        node_hay = f"{title} {seo}".lower()
-        if not params.get("subcategoryId") and allow_l and any(token in node_hay for token in allow_l):
-            next_category = title or category_name
+        # Folder nodes (no subcategoryId) become the category label for children.
+        if not params.get("subcategoryId") and title:
+            next_category = title
 
         subcategory_id = str(params.get("subcategoryId") or "")
         category_id = str(params.get("categoryId") or "")
         tags = {str(tag).lower() for tag in (node.get("tags") or [])}
-        hay = f"{next_category} {title} {seo}".lower()
-        in_allow = (not allow_l) or any(token in hay for token in allow_l)
         if (
             subcategory_id
             and category_id
             and subcategory_id not in seen
-            and in_allow
             and "playerprops" in tags
+            and subcategory_allowed(
+                category_name=next_category or title,
+                name=title,
+                names=name_list,
+                allow=allow_l,
+            )
         ):
             seen.add(subcategory_id)
             subcategories.append(
@@ -616,8 +685,9 @@ def fetch_event_group(
         max_retries=int(cfg.get("dk_max_retries", 3)),
         label="NBA league page",
     )
+    names = [str(c) for c in (cfg.get("dk_subcategory_names") or [])]
     allow = [str(c).lower() for c in (cfg.get("dk_category_allowlist") or [])]
-    subcategories = subcategories_from_nav(html, allow)
+    subcategories = subcategories_from_nav(html, allow, names=names or None)
 
     logger.info(
         f"League nav: events=0 (loaded with markets), prop subcategories={len(subcategories)}"
@@ -674,7 +744,7 @@ def fetch_subcategory_offers(
     if events is not None:
         events.update(payload_events)
 
-    delay = float(cfg.get("dk_request_delay", 0.4) or 0)
+    delay = float(cfg.get("dk_request_delay", 0) or 0)
     if delay:
         time.sleep(delay)
     return offers
@@ -934,19 +1004,43 @@ def extract_picks(
     }
     unmatched: set[str] = set()
     picks: list[Pick] = []
+    counters_lock = threading.Lock()
+    events_lock = threading.Lock()
+    concurrency = max(1, int(cfg.get("dk_concurrency", 8) or 8))
+    logger.info(
+        f"Scheduling {len(subcategories)} subcategory request(s) "
+        f"with concurrency={concurrency}"
+    )
 
-    for index, sub in enumerate(subcategories, start=1):
-        logger.info(f"[{index}/{len(subcategories)}] {sub.category_name} / {sub.name}")
-        offers = fetch_subcategory_offers(session, cfg, sub, events)
+    thread_local = threading.local()
+
+    def _worker_session() -> requests.Session:
+        sess = getattr(thread_local, "session", None)
+        if sess is None:
+            sess = build_session(dict(session.headers))
+            thread_local.session = sess
+        return sess
+
+    def _one(sub: Subcategory) -> list[Pick]:
+        with events_lock:
+            offers = fetch_subcategory_offers(_worker_session(), cfg, sub, events)
         if not offers:
             logger.warning(f"subcategory {sub.name!r}: no offers returned")
-            continue
-
-        sub_picks = extract_offer_picks(
-            offers, sub, events, fetched_at, counters, unmatched, sport_allowlist
+            return []
+        with counters_lock:
+            sub_picks = extract_offer_picks(
+                offers, sub, events, fetched_at, counters, unmatched, sport_allowlist
+            )
+        logger.info(
+            f"{sub.category_name} / {sub.name}: offers={len(offers)}, "
+            f"picks={len(sub_picks)}"
         )
-        logger.info(f"  offers={len(offers)}, picks={len(sub_picks)}")
-        picks.extend(sub_picks)
+        return sub_picks
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_one, sub) for sub in subcategories]
+        for fut in as_completed(futures):
+            picks.extend(fut.result())
 
     picks = dedupe_picks(picks)
 
@@ -973,7 +1067,7 @@ def resolve_output_path(sport: str) -> str:
 
     Checks:
     1. DK_OUTPUT env var (if .json file) — used as-is for a single sport
-    2. Default: data/props/draftkings/draftkings_{sport}_YYYY-MM-DD_HHMMSS.json
+    2. Default: data/props/draftkings/{sport}/draftkings_{sport}_YYYY-MM-DD_HHMMSS.json
 
     Returns:
         Absolute path to output file
@@ -993,7 +1087,7 @@ def resolve_output_path(sport: str) -> str:
 
     now = datetime.now(_OUTPUT_TZ)
     filename = now.strftime(f"draftkings_{sport_slug}_%Y-%m-%d_%H%M%S.json")
-    path = os.path.join(_DEFAULT_OUTPUT_DIR, filename)
+    path = os.path.join(_BOOK_DIR, sport_slug, filename)
     logger.info(f"Using default output path: {path}")
     return path
 
@@ -1050,6 +1144,8 @@ class DraftKingsScraper:
         self.output_paths: list[str] = []
         self.picks: list[Pick] = []
         self.scraped_at: datetime | None = None
+        self._db_failed = False
+        self._db_rows = 0
         logger.info("Initialization complete")
 
     def _load_sport_to_supabase(self, sport: str, sport_picks: list[Pick]) -> None:
@@ -1066,68 +1162,102 @@ class DraftKingsScraper:
                 league=league,
                 scraped_at=self.scraped_at,
             )
+            self._db_rows += int(n)
             logger.info(f"Supabase odds.nba_draftkings upserted {n} rows ({sport})")
         except Exception as e:
+            self._db_failed = True
             logger.error(f"Supabase draftkings load failed (JSON kept): {e}")
 
-    def run(self) -> None:
-        """Execute the full scrape pipeline."""
+    def run(self) -> int:
+        """Execute the full scrape pipeline. Returns process exit code."""
+        try:
+            from src.scrapers.stage_report import StageReport, stage_timer
+        except ImportError:
+            StageReport = None  # type: ignore[misc, assignment]
+            stage_timer = None  # type: ignore[assignment]
+
+        report = StageReport(book="draftking", league="nba") if StageReport else None
         logger.info("=" * 70)
         logger.info("STARTING DRAFTKINGS SCRAPER (NBA)")
         logger.info("=" * 70)
 
         try:
-            # Step 1: Discover events and prop tabs
             logger.info("\n[Step 1/3] Discovering events and prop subcategories...")
             session = build_session(self.config.get("headers", {}))
-            events, subcategories = fetch_event_group(session, self.config)
-
-            # Step 2: Fetch each subcategory and extract
-            logger.info("\n[Step 2/3] Extracting picks...")
             sport_allowlist = get_sport_allowlist(self.config)
-            self.picks = extract_picks(
-                session, self.config, events, subcategories, sport_allowlist
-            )
+            if report and stage_timer:
+                with stage_timer(report, "download"):
+                    events, subcategories = fetch_event_group(session, self.config)
+                    logger.info("\n[Step 2/3] Extracting picks...")
+                    self.picks = extract_picks(
+                        session, self.config, events, subcategories, sport_allowlist
+                    )
+            else:
+                events, subcategories = fetch_event_group(session, self.config)
+                logger.info("\n[Step 2/3] Extracting picks...")
+                self.picks = extract_picks(
+                    session, self.config, events, subcategories, sport_allowlist
+                )
 
-            # Step 3: Save one file per sport (draftkings_nba_*, …)
             logger.info("\n[Step 3/3] Saving to file...")
             self.scraped_at = datetime.now(timezone.utc)
             grouped = group_picks_by_sport(self.picks)
             self.output_paths = []
 
-            if not grouped:
-                # Still write an empty NBA file when allowlist includes it, else first allowlist sport
-                fallback = "NBA"
-                if sport_allowlist:
-                    fallback = sorted(sport_allowlist)[0]
-                path = resolve_output_path(fallback)
-                save_picks([], path)
-                self._load_sport_to_supabase(fallback, [])
-                self.output_paths.append(path)
-            else:
-                for sport, sport_picks in sorted(grouped.items()):
-                    path = resolve_output_path(sport)
-                    save_picks(sport_picks, path)
-                    self._load_sport_to_supabase(sport, sport_picks)
+            def _save_and_load() -> None:
+                if not grouped:
+                    fallback = "NBA"
+                    if sport_allowlist:
+                        fallback = sorted(sport_allowlist)[0]
+                    path = resolve_output_path(fallback)
+                    save_picks([], path)
+                    self._load_sport_to_supabase(fallback, [])
                     self.output_paths.append(path)
+                else:
+                    for sport, sport_picks in sorted(grouped.items()):
+                        path = resolve_output_path(sport)
+                        save_picks(sport_picks, path)
+                        self._load_sport_to_supabase(sport, sport_picks)
+                        self.output_paths.append(path)
+
+            if report and stage_timer:
+                with stage_timer(report, "upsert"):
+                    _save_and_load()
+            else:
+                _save_and_load()
+
+            if report:
+                report.mark_json(ok=True, rows=len(self.picks))
+                report.mark_db(ok=not self._db_failed, rows=self._db_rows)
+                report.set_stage("total", sum(report.stages_s.values()))
 
             logger.info("=" * 70)
-            logger.info(
-                f"✓ SUCCESS: {len(self.picks)} picks saved across "
-                f"{len(self.output_paths)} file(s)"
-            )
+            if self._db_failed:
+                logger.error(
+                    f"JSON saved ({len(self.picks)} picks) but Supabase load failed"
+                )
+            else:
+                logger.info(
+                    f"✓ SUCCESS: {len(self.picks)} picks saved across "
+                    f"{len(self.output_paths)} file(s)"
+                )
             logger.info("=" * 70)
+            return report.log_and_exit_code() if report else (1 if self._db_failed else 0)
 
         except Exception as e:
             logger.error("=" * 70)
             logger.error(f"✗ FAILED: {type(e).__name__}: {e}")
             logger.error("=" * 70)
+            if report:
+                report.mark_json(ok=False)
+                report.error = str(e)
+                return report.log_and_exit_code()
             raise
+
 
 # ============================================================================
 # Entry Point
 # ============================================================================
 
 if __name__ == "__main__":
-    scraper = DraftKingsScraper()
-    scraper.run()
+    raise SystemExit(DraftKingsScraper().run())

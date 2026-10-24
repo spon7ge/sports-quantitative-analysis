@@ -25,13 +25,30 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 import requests
+
+try:
+    from src.scrapers.stage_report import retry_after_seconds
+except ImportError:  # loose `python nba_fanduel.py` from this directory
+    def retry_after_seconds(response: Any, *, default: float) -> float:
+        try:
+            header = response.headers.get("Retry-After") if response is not None else None
+        except Exception:
+            header = None
+        if not header:
+            return default
+        try:
+            return max(float(header), 0.0)
+        except (TypeError, ValueError):
+            return default
 
 # ============================================================================
 # Configuration
@@ -44,7 +61,8 @@ except ImportError:  # python nba_fanduel.py from this directory
 
 _ROOT = str(ensure_repo_on_path(__file__))
 
-_DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "fanduel")
+_BOOK_DIR = os.path.join(_ROOT, "data", "props", "fanduel")
+_DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "nba")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
@@ -64,7 +82,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "player-combos",
         "player-defense",
     ],
-    "fd_request_delay": 0.4,
+    # 0 under normal responses; Retry-After / exponential backoff still apply on 429.
+    "fd_request_delay": 0.0,
+    "fd_concurrency": 8,
     "fd_max_retries": 3,
     "fd_timeout": 30,
     "headers": {
@@ -383,6 +403,7 @@ def fetch_json(
     last_error: Exception | None = None
 
     for attempt in range(1, max(1, max_retries) + 1):
+        response = None
         try:
             response = session.get(url, params=params, timeout=timeout)
             if response.status_code in (429, 500, 502, 503, 504):
@@ -397,9 +418,18 @@ def fetch_json(
             last_error = e
             if attempt >= max(1, max_retries):
                 break
-            backoff = 2 ** (attempt - 1)
+            default_backoff = float(2 ** (attempt - 1))
+            if (
+                isinstance(e, requests.HTTPError)
+                and getattr(e, "response", None) is not None
+                and e.response.status_code == 429
+            ):
+                backoff = retry_after_seconds(e.response, default=default_backoff)
+            else:
+                backoff = default_backoff
             logger.warning(
-                f"{label}: attempt {attempt}/{max_retries} failed ({e}); retrying in {backoff}s"
+                f"{label}: attempt {attempt}/{max_retries} failed ({e}); "
+                f"retrying in {backoff}s"
             )
             time.sleep(backoff)
 
@@ -462,6 +492,51 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
 
     return events
 
+def fetch_event_tab_markets(
+    session: requests.Session,
+    cfg: dict[str, Any],
+    event: Event,
+    tab: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch markets for one event-page tab."""
+    url = f"{_api_base(cfg['fd_region'])}/event-page"
+    timeout = int(cfg.get("fd_timeout", 30))
+    max_retries = int(cfg.get("fd_max_retries", 3))
+    params = {
+        **_BASE_PARAMS,
+        "eventId": event.event_id,
+        "_ak": str(cfg.get("fd_api_key") or ""),
+    }
+    if tab:
+        params["tab"] = tab
+    try:
+        payload = fetch_json(
+            session,
+            url,
+            params,
+            timeout=timeout,
+            max_retries=max_retries,
+            label=f"event {event.event_id} tab={tab or 'default'}",
+        )
+    except (requests.RequestException, ValueError) as e:
+        logger.warning(
+            f"event {event.event_id}: tab {tab!r} unavailable ({e}); continuing"
+        )
+        return [], {}
+
+    _maybe_dump(payload, f"event_{event.event_id}_{tab or 'default'}")
+    markets = list(_iter_records(_dig(payload, "attachments", "markets")))
+    event_record: dict[str, Any] = {}
+    for rec in _iter_records(_dig(payload, "attachments", "events")):
+        if str(rec.get("eventId") or rec.get("id") or "") == event.event_id:
+            event_record = rec
+            break
+    delay = float(cfg.get("fd_request_delay", 0) or 0)
+    if delay:
+        time.sleep(delay)
+    return markets, event_record
+
+
 def fetch_event_markets(
     session: requests.Session,
     cfg: dict[str, Any],
@@ -473,47 +548,21 @@ def fetch_event_markets(
     Returns:
         (markets, event_record) — markets deduped by market ID
     """
-    url = f"{_api_base(cfg['fd_region'])}/event-page"
-    timeout = int(cfg.get("fd_timeout", 30))
-    max_retries = int(cfg.get("fd_max_retries", 3))
-    delay = float(cfg.get("fd_request_delay", 0.4) or 0)
-
     markets: dict[str, dict[str, Any]] = {}
     event_record: dict[str, Any] = {}
     tabs: list[str | None] = list(cfg.get("fd_event_tabs") or []) or [None]
 
     for tab in tabs:
-        params = {**_BASE_PARAMS, "eventId": event.event_id, "_ak": str(cfg.get("fd_api_key") or "")}
-        if tab:
-            params["tab"] = tab
-        try:
-            payload = fetch_json(
-                session,
-                url,
-                params,
-                timeout=timeout,
-                max_retries=max_retries,
-                label=f"event {event.event_id} tab={tab or 'default'}",
-            )
-        except (requests.RequestException, ValueError) as e:
-            logger.warning(f"event {event.event_id}: tab {tab!r} unavailable ({e}); continuing")
-            continue
-
-        _maybe_dump(payload, f"event_{event.event_id}_{tab or 'default'}")
-
-        new_markets = 0
-        for market in _iter_records(_dig(payload, "attachments", "markets")):
+        tab_markets, tab_event = fetch_event_tab_markets(session, cfg, event, tab)
+        if tab_event:
+            event_record = tab_event
+        for market in tab_markets:
             market_id = str(market.get("marketId") or market.get("id") or "")
             if market_id and market_id not in markets:
                 markets[market_id] = market
-                new_markets += 1
-        for rec in _iter_records(_dig(payload, "attachments", "events")):
-            if str(rec.get("eventId") or rec.get("id") or "") == event.event_id:
-                event_record = rec
-
-        logger.debug(f"event {event.event_id} tab={tab or 'default'}: +{new_markets} markets")
-        if delay:
-            time.sleep(delay)
+        logger.debug(
+            f"event {event.event_id} tab={tab or 'default'}: +{len(tab_markets)} markets"
+        )
 
     return list(markets.values()), event_record
 
@@ -758,12 +807,7 @@ def extract_picks(
     """
     Fetch each event's markets and flatten them into picks.
 
-    Args:
-        events: Events discovered from the NBA page
-        sport_allowlist: Set of sport IDs to keep (None = keep all)
-
-    Returns:
-        List of Pick objects
+    Event×tab combinations are scheduled through a bounded pool (default 8).
     """
     logger.info(f"Extracting picks from {len(events)} event(s)...")
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -781,23 +825,76 @@ def extract_picks(
     }
     unmatched: set[str] = set()
     picks: list[Pick] = []
+    counters_lock = threading.Lock()
 
-    for index, event in enumerate(events, start=1):
+    work_events = []
+    for event in events:
         sport_id = (event.competition or "NBA").upper()
         if sport_allowlist is not None and sport_id not in sport_allowlist:
             counters["skipped_sport"] += 1
             continue
+        work_events.append((event, sport_id))
 
-        logger.info(f"[{index}/{len(events)}] {event.name or event.event_id}")
-        markets, event_record = fetch_event_markets(session, cfg, event)
-        if not markets:
-            logger.warning(f"event {event.event_id}: no markets returned")
-            continue
+    tabs: list[str | None] = list(cfg.get("fd_event_tabs") or []) or [None]
+    jobs = [(event, sport_id, tab) for event, sport_id in work_events for tab in tabs]
+    concurrency = max(1, int(cfg.get("fd_concurrency", 8) or 8))
+    logger.info(
+        f"Scheduling {len(jobs)} event/tab request(s) with concurrency={concurrency}"
+    )
 
-        event_picks = extract_event_picks(
-            markets, event, event_record, fetched_at, sport_id, counters, unmatched
+    thread_local = threading.local()
+
+    def _worker_session() -> requests.Session:
+        sess = getattr(thread_local, "session", None)
+        if sess is None:
+            sess = build_session(dict(session.headers))
+            thread_local.session = sess
+        return sess
+
+    # event_id -> (markets_by_id, event_record, sport_id, event)
+    merged: dict[str, tuple[dict[str, dict[str, Any]], dict[str, Any], str, Event]] = {}
+    merge_lock = threading.Lock()
+
+    def _one(job: tuple[Event, str, str | None]) -> None:
+        event, sport_id, tab = job
+        tab_markets, tab_event = fetch_event_tab_markets(
+            _worker_session(), cfg, event, tab
         )
-        logger.info(f"  markets={len(markets)}, picks={len(event_picks)}")
+        with merge_lock:
+            markets_by_id, event_record, sid, ev = merged.get(
+                event.event_id, ({}, {}, sport_id, event)
+            )
+            if tab_event:
+                event_record = tab_event
+            for market in tab_markets:
+                market_id = str(market.get("marketId") or market.get("id") or "")
+                if market_id and market_id not in markets_by_id:
+                    markets_by_id[market_id] = market
+            merged[event.event_id] = (markets_by_id, event_record, sid, ev)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_one, job) for job in jobs]
+        for fut in as_completed(futures):
+            fut.result()
+
+    for event_id, (markets_by_id, event_record, sport_id, event) in merged.items():
+        markets = list(markets_by_id.values())
+        if not markets:
+            logger.warning(f"event {event_id}: no markets returned")
+            continue
+        with counters_lock:
+            event_picks = extract_event_picks(
+                markets,
+                event,
+                event_record,
+                fetched_at,
+                sport_id,
+                counters,
+                unmatched,
+            )
+        logger.info(
+            f"{event.name or event_id}: markets={len(markets)}, picks={len(event_picks)}"
+        )
         picks.extend(event_picks)
 
     picks = dedupe_picks(picks)
@@ -826,7 +923,7 @@ def resolve_output_path(sport: str) -> str:
 
     Checks:
     1. FANDUEL_OUTPUT env var (if .json file) — used as-is for a single sport
-    2. Default: data/props/fanduel/fanduel_{sport}_YYYY-MM-DD_HHMMSS.json
+    2. Default: data/props/fanduel/{sport}/fanduel_{sport}_YYYY-MM-DD_HHMMSS.json
 
     Returns:
         Absolute path to output file
@@ -846,7 +943,7 @@ def resolve_output_path(sport: str) -> str:
 
     now = datetime.now(_OUTPUT_TZ)
     filename = now.strftime(f"fanduel_{sport_slug}_%Y-%m-%d_%H%M%S.json")
-    path = os.path.join(_DEFAULT_OUTPUT_DIR, filename)
+    path = os.path.join(_BOOK_DIR, sport_slug, filename)
     logger.info(f"Using default output path: {path}")
     return path
 
@@ -904,6 +1001,8 @@ class FanDuelScraper:
         self.output_paths: list[str] = []
         self.picks: list[Pick] = []
         self.scraped_at: datetime | None = None
+        self._db_failed = False
+        self._db_rows = 0
         logger.info("Initialization complete")
 
     def _load_sport_to_supabase(self, sport: str, sport_picks: list[Pick]) -> None:
@@ -920,66 +1019,102 @@ class FanDuelScraper:
                 league=league,
                 scraped_at=self.scraped_at,
             )
+            self._db_rows += int(n)
             logger.info(f"Supabase odds.nba_fanduel upserted {n} rows ({sport})")
         except Exception as e:
+            self._db_failed = True
             logger.error(f"Supabase fanduel load failed (JSON kept): {e}")
 
-    def run(self) -> None:
-        """Execute the full scrape pipeline."""
+    def run(self) -> int:
+        """Execute the full scrape pipeline. Returns process exit code."""
+        try:
+            from src.scrapers.stage_report import StageReport, stage_timer
+        except ImportError:
+            StageReport = None  # type: ignore[misc, assignment]
+            stage_timer = None  # type: ignore[assignment]
+
+        report = StageReport(book="fanduel", league="nba") if StageReport else None
         logger.info("=" * 70)
         logger.info("STARTING FANDUEL SCRAPER (NBA)")
         logger.info("=" * 70)
 
         try:
-            # Step 1: Discover events
             logger.info("\n[Step 1/3] Discovering events...")
             session = build_session(self.config.get("headers", {}))
-            events = fetch_events(session, self.config)
-
-            # Step 2: Fetch markets per event and extract
-            logger.info("\n[Step 2/3] Extracting picks...")
             sport_allowlist = get_sport_allowlist(self.config)
-            self.picks = extract_picks(session, self.config, events, sport_allowlist)
+            if report and stage_timer:
+                with stage_timer(report, "download"):
+                    events = fetch_events(session, self.config)
+                    logger.info("\n[Step 2/3] Extracting picks...")
+                    self.picks = extract_picks(
+                        session, self.config, events, sport_allowlist
+                    )
+            else:
+                events = fetch_events(session, self.config)
+                logger.info("\n[Step 2/3] Extracting picks...")
+                self.picks = extract_picks(
+                    session, self.config, events, sport_allowlist
+                )
 
-            # Step 3: Save one file per sport (fanduel_nba_*, …)
             logger.info("\n[Step 3/3] Saving to file...")
             self.scraped_at = datetime.now(timezone.utc)
             grouped = group_picks_by_sport(self.picks)
             self.output_paths = []
 
-            if not grouped:
-                # Still write an empty NBA file when allowlist includes it, else first allowlist sport
-                fallback = "NBA"
-                if sport_allowlist:
-                    fallback = sorted(sport_allowlist)[0]
-                path = resolve_output_path(fallback)
-                save_picks([], path)
-                self._load_sport_to_supabase(fallback, [])
-                self.output_paths.append(path)
-            else:
-                for sport, sport_picks in sorted(grouped.items()):
-                    path = resolve_output_path(sport)
-                    save_picks(sport_picks, path)
-                    self._load_sport_to_supabase(sport, sport_picks)
+            def _save_and_load() -> None:
+                if not grouped:
+                    fallback = "NBA"
+                    if sport_allowlist:
+                        fallback = sorted(sport_allowlist)[0]
+                    path = resolve_output_path(fallback)
+                    save_picks([], path)
+                    self._load_sport_to_supabase(fallback, [])
                     self.output_paths.append(path)
+                else:
+                    for sport, sport_picks in sorted(grouped.items()):
+                        path = resolve_output_path(sport)
+                        save_picks(sport_picks, path)
+                        self._load_sport_to_supabase(sport, sport_picks)
+                        self.output_paths.append(path)
+
+            if report and stage_timer:
+                with stage_timer(report, "upsert"):
+                    _save_and_load()
+            else:
+                _save_and_load()
+
+            if report:
+                report.mark_json(ok=True, rows=len(self.picks))
+                report.mark_db(ok=not self._db_failed, rows=self._db_rows)
+                report.set_stage("total", sum(report.stages_s.values()))
 
             logger.info("=" * 70)
-            logger.info(
-                f"✓ SUCCESS: {len(self.picks)} picks saved across "
-                f"{len(self.output_paths)} file(s)"
-            )
+            if self._db_failed:
+                logger.error(
+                    f"JSON saved ({len(self.picks)} picks) but Supabase load failed"
+                )
+            else:
+                logger.info(
+                    f"✓ SUCCESS: {len(self.picks)} picks saved across "
+                    f"{len(self.output_paths)} file(s)"
+                )
             logger.info("=" * 70)
+            return report.log_and_exit_code() if report else (1 if self._db_failed else 0)
 
         except Exception as e:
             logger.error("=" * 70)
             logger.error(f"✗ FAILED: {type(e).__name__}: {e}")
             logger.error("=" * 70)
+            if report:
+                report.mark_json(ok=False)
+                report.error = str(e)
+                return report.log_and_exit_code()
             raise
+
 
 # ============================================================================
 # Entry Point
 # ============================================================================
 
 if __name__ == "__main__":
-    scraper = FanDuelScraper()
-    scraper.run()
+    raise SystemExit(FanDuelScraper().run())

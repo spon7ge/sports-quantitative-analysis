@@ -444,7 +444,7 @@ def load_supabase_snapshots(
     scraped_at: datetime | None = None,
     props_path: str | None = None,
     team_path: str | None = None,
-) -> None:
+) -> tuple[bool, int]:
     """Upsert snapshot games to odds.nba_prophetx / odds.nba_prophetx_team."""
     try:
         from src.odds.load_snapshots import (
@@ -466,8 +466,10 @@ def load_supabase_snapshots(
             f" props_path={props_path}" if props_path else "",
             f" team_path={team_path}" if team_path else "",
         )
+        return True, int(n_props) + int(n_team)
     except Exception as exc:
         logger.error("Supabase ProphetX load failed (JSON kept): %s", exc)
+        return False, 0
 
 
 def _merge_market_rows(
@@ -488,7 +490,16 @@ def _merge_market_rows(
     ]
 
 
+def _include_period_markets() -> bool:
+    raw = os.environ.get("PROPHETX_INCLUDE_PERIOD_MARKETS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def run() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.scrapers.stage_report import StageReport, stage_timer
+
     logging.basicConfig(
         level=getattr(
             logging,
@@ -497,33 +508,58 @@ def run() -> None:
         ),
         format="[%(levelname)-8s] %(name)s: %(message)s",
     )
+    report = StageReport(book="prophetx", league="nba")
     session = requests.Session()
-    events = fetch_nba_events(session)
-    event_ids = [int(event["id"]) for event in events if event.get("id") is not None]
-    team_rows = fetch_markets_for_events(
-        session,
-        event_ids,
-        market_types="moneyline,spread,total",
-    )
-    period_rows = fetch_markets_for_events(
-        session,
-        event_ids,
-        market_sub_types=",".join(PERIOD_MARKET_SUBTYPES),
-    )
-    prop_rows = fetch_markets_for_events(
-        session,
-        event_ids,
-        market_sub_types=",".join(PROP_SUBTYPE_TO_STAT),
-    )
-    props_games, team_games = build_game_snapshots(
-        events,
-        _merge_market_rows(team_rows, period_rows),
-        prop_rows,
-    )
-    props_path = resolve_props_output_path()
-    props_path, team_path = write_snapshots(
-        props_games, team_games, props_path=props_path
-    )
+    with stage_timer(report, "download"):
+        events = fetch_nba_events(session)
+        event_ids = [
+            int(event["id"]) for event in events if event.get("id") is not None
+        ]
+
+        def _team() -> list[dict[str, Any]]:
+            return fetch_markets_for_events(
+                requests.Session(),
+                event_ids,
+                market_types="moneyline,spread,total",
+            )
+
+        def _period() -> list[dict[str, Any]]:
+            if not _include_period_markets():
+                logger.info("Skipping ProphetX period markets (PROPHETX_INCLUDE_PERIOD_MARKETS=0)")
+                return []
+            return fetch_markets_for_events(
+                requests.Session(),
+                event_ids,
+                market_sub_types=",".join(PERIOD_MARKET_SUBTYPES),
+            )
+
+        def _props() -> list[dict[str, Any]]:
+            return fetch_markets_for_events(
+                requests.Session(),
+                event_ids,
+                market_sub_types=",".join(PROP_SUBTYPE_TO_STAT),
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            fut_team = pool.submit(_team)
+            fut_period = pool.submit(_period)
+            fut_props = pool.submit(_props)
+            team_rows = fut_team.result()
+            period_rows = fut_period.result()
+            prop_rows = fut_props.result()
+
+    with stage_timer(report, "parse"):
+        props_games, team_games = build_game_snapshots(
+            events,
+            _merge_market_rows(team_rows, period_rows),
+            prop_rows,
+        )
+        props_path = resolve_props_output_path()
+        props_path, team_path = write_snapshots(
+            props_games, team_games, props_path=props_path
+        )
+    n_prop_quotes = sum(len(g.get("props") or []) for g in props_games)
+    report.mark_json(ok=True, rows=n_prop_quotes)
     logger.info(
         "Wrote ProphetX snapshots: props_games=%s team_games=%s props=%s team=%s",
         len(props_games),
@@ -531,12 +567,16 @@ def run() -> None:
         props_path,
         team_path,
     )
-    load_supabase_snapshots(
-        props_games,
-        team_games,
-        props_path=props_path,
-        team_path=team_path,
-    )
+    with stage_timer(report, "upsert"):
+        db_ok, rows = load_supabase_snapshots(
+            props_games,
+            team_games,
+            props_path=props_path,
+            team_path=team_path,
+        )
+    report.mark_db(ok=db_ok, rows=rows)
+    report.set_stage("total", sum(report.stages_s.values()))
+    raise SystemExit(report.log_and_exit_code())  # noqa: TRY301 — CLI entry
 
 
 if __name__ == "__main__":
