@@ -73,6 +73,31 @@ def _class_tokens(classes) -> set[str]:
     return set()
 
 
+def _chip_status(item) -> str:
+    tokens = _class_tokens(item.get("class"))
+    text = item.get_text(strip=True)
+    if "is-confirmed" in tokens or text == "Confirmed Lineup":
+        return "confirmed"
+    return "projected"
+
+
+def _snapshot_player(item, *, with_badge: bool) -> dict | None:
+    link = item.find("a")
+    if link is None:
+        return None
+    name = (link.get("title") or link.get_text(strip=True) or "").strip()
+    if not name:
+        return None
+    pos_el = item.find(class_="lineup__pos")
+    position = pos_el.get_text(strip=True) if pos_el else ""
+    player = {"name": name, "position": position or None}
+    if with_badge:
+        inj_el = item.find(class_="lineup__inj")
+        badge = inj_el.get_text(strip=True) if inj_el else ""
+        player["badge"] = badge or None
+    return player
+
+
 def _is_nba_lineup_card(classes) -> bool:
     tokens = _class_tokens(classes)
     return "lineup" in tokens and "is-nba" in tokens
@@ -322,6 +347,62 @@ class NBADailyLineups:
         if not self.data:
             self.getDict()
         return _players_by_status(self.data, "out")
+
+    def lineup_snapshot(self, fetched_at: str) -> dict:
+        """Props payload for NBA cards already loaded in ``self.soup``.
+
+        Does not fetch. WNBA cards are ignored, including on a page that has
+        no NBA card. ``_matchup_cards`` is the wrong helper here: with no NBA
+        card it falls back to every ``div.lineup``.
+        """
+        cards = self.soup.find_all("div", class_=_is_nba_lineup_card)
+        return {
+            "source": "rotowire",
+            "url": self.url,
+            "fetched_at": fetched_at,
+            "games": [
+                {
+                    "away": self._side_snapshot(card, "away"),
+                    "home": self._side_snapshot(card, "home"),
+                }
+                for card in cards
+            ],
+        }
+
+    def _side_snapshot(self, matchup, side: str) -> dict:
+        list_cls = (
+            "lineup__list is-visit" if side == "away" else "lineup__list is-home"
+        )
+        lineup_list = matchup.find("ul", {"class": list_cls})
+        nickname = self._side_nickname(matchup, side)
+        status = "projected"
+        lineup: list[dict] = []
+        may_not_play: list[dict] = []
+        after_title = False
+        if lineup_list is not None:
+            for item in lineup_list.find_all("li", recursive=False):
+                tokens = _class_tokens(item.get("class"))
+                if "lineup__status" in tokens:
+                    status = _chip_status(item)
+                    continue
+                if "lineup__title" in tokens:
+                    after_title = True
+                    continue
+                if "lineup__player" not in tokens:
+                    continue
+                player = _snapshot_player(item, with_badge=after_title)
+                if player is None:
+                    continue
+                if after_title:
+                    may_not_play.append(player)
+                else:
+                    lineup.append(player)
+        return {
+            "team": self._resolve_abbr(matchup, side, nickname),
+            "status": status,
+            "lineup": lineup,
+            "may_not_play": may_not_play,
+        }
 
 
 def _players_by_status(matchups: list[dict], status: str) -> dict[str, list[str]]:

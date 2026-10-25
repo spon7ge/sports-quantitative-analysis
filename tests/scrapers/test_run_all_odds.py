@@ -21,6 +21,7 @@ NBA_NAMES = [
     "nba_fanduel",
     "nba_draftking",
     "nba_pinnacle",
+    "nba_rotowire_lineup",
     "nba_prizepick",
 ]
 
@@ -38,6 +39,14 @@ def test_resolve_jobs_default_runs_mlb_then_nba_with_prizepicks_last() -> None:
     assert by_name["nba_pinnacle"].env == {"PINNACLE_LEAGUES": "nba"}
     assert by_name["nba_fanduel"].module == "src.scrapers.nba.nba_fanduel"
     assert by_name["nba_draftking"].module == "src.scrapers.nba.nba_draftking"
+    assert by_name["nba_rotowire_lineup"].module == (
+        "src.scrapers.nba.nba_rotowire_lineup"
+    )
+    assert by_name["nba_rotowire_lineup"].league == "nba"
+    assert by_name["nba_rotowire_lineup"].env is None
+    names = [j.name for j in jobs]
+    assert names[names.index("mlb_prizepick") - 1] == "nba_rotowire_lineup"
+    assert "nba_rotowire_lineup" not in [j.name for j in resolve_jobs(league="mlb")]
 
 
 def test_resolve_jobs_league_keeps_that_league_order() -> None:
@@ -139,6 +148,7 @@ def test_classify_job_pools() -> None:
     assert pools["nba_draftking"] == "http"
     assert pools["nba_prizepick"] == "http"
     assert pools["nba_pinnacle"] == "pinnacle"
+    assert pools["nba_rotowire_lineup"] == "http"
 
 
 def test_prizepick_http_job_sets_no_browser() -> None:

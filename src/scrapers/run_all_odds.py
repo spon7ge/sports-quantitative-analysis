@@ -49,7 +49,7 @@ class ScraperJob:
 def _league_jobs(league: League) -> tuple[ScraperJob, ...]:
     """One book order per league. PrizePicks stays last inside the league."""
     package = f"src.scrapers.{league}"
-    return (
+    jobs = [
         ScraperJob(f"{league}_novig", league, f"{package}.{league}_novig"),
         ScraperJob(f"{league}_prophetx", league, f"{package}.{league}_prophetx"),
         ScraperJob(f"{league}_underdog", league, f"{package}.{league}_underdog"),
@@ -61,14 +61,25 @@ def _league_jobs(league: League) -> tuple[ScraperJob, ...]:
             f"{package}.{league}_pinnacle",
             env={"PINNACLE_LEAGUES": league},
         ),
+    ]
+    if league == "nba":
+        jobs.append(
+            ScraperJob(
+                "nba_rotowire_lineup",
+                "nba",
+                "src.scrapers.nba.nba_rotowire_lineup",
+            )
+        )
+    jobs.append(
         ScraperJob(
             f"{league}_prizepick",
             league,
             f"{package}.{league}_prizepick",
             # HTTP attempt first; browser fallback is queued separately on exit 3.
             env={"PRIZEPICKS_NO_BROWSER": "1"},
-        ),
+        )
     )
+    return tuple(jobs)
 
 
 # PrizePicks is last in each league, and resolve_jobs moves every PrizePicks
