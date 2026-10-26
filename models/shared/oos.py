@@ -16,7 +16,7 @@ import pandas as pd
 from models.shared.minutes_sampler import QUANTILE_LEVELS
 
 HOLDOUT_WINDOW_ID = -1
-RATE_CAP = 6.0
+RATE_CAP = 2.0
 
 _IDENTITY = (
     "game_id",
