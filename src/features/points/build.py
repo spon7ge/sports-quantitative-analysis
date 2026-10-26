@@ -30,6 +30,9 @@ def add_points_features(
     result = add_rate_features(result)
     result = add_team_scoring_context(result)
     result = add_points_trend_features(result)
+    result["min_sd_10"] = result["min_std_10"]
+    result["minutes_ewm_10"] = result["min_ewm_hl_10"]
+    result["opp_pace_10"] = result["opp_pace_mean_10"]
 
     for column in TIER1_POINTS_FEATURES:
         if column not in result:

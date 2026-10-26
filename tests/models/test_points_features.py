@@ -429,6 +429,241 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             expected_ts,
         )
 
+    def test_opponent_rates_use_earlier_meetings_only(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2023-04-01",
+                    10,
+                    pts=20,
+                    game_id=1,
+                    opp_team_id=200,
+                    season_year="2022-23",
+                    fga=10,
+                    fta=4,
+                    fg3_a=6,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    20,
+                    pts=40,
+                    game_id=2,
+                    opp_team_id=300,
+                    fga=20,
+                    fta=8,
+                    fg3_a=10,
+                ),
+                _player_row(
+                    2,
+                    "2024-01-02",
+                    24,
+                    pts=12,
+                    game_id=3,
+                    opp_team_id=200,
+                    fga=8,
+                    fta=2,
+                    fg3_a=1,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    30,
+                    pts=15,
+                    game_id=4,
+                    opp_team_id=200,
+                    fga=6,
+                    fta=3,
+                    fg3_a=3,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-05",
+                    40,
+                    pts=8,
+                    game_id=5,
+                    opp_team_id=200,
+                    fga=4,
+                    fta=0,
+                    fg3_a=1,
+                ),
+            ]
+        )
+        featured = add_points_features(frame)
+
+        def at(game_id: int) -> pd.Series:
+            return featured.loc[featured["game_id"].eq(game_id)].iloc[0]
+
+        columns = (
+            "pts_per_min_mean_vs_opp",
+            "fga_per_min_mean_vs_opp",
+            "fta_per_min_mean_vs_opp",
+            "fg3a_per_min_mean_vs_opp",
+        )
+        for column in columns:
+            self.assertTrue(np.isnan(at(1)[column]), column)
+            self.assertTrue(np.isnan(at(2)[column]), column)
+            self.assertTrue(np.isnan(at(3)[column]), column)
+
+        second = at(4)
+        self.assertAlmostEqual(second["pts_per_min_mean_vs_opp"], 20 / 10)
+        self.assertAlmostEqual(second["fga_per_min_mean_vs_opp"], 10 / 10)
+        self.assertAlmostEqual(second["fta_per_min_mean_vs_opp"], 4 / 10)
+        self.assertAlmostEqual(second["fg3a_per_min_mean_vs_opp"], 6 / 10)
+
+        third = at(5)
+        self.assertAlmostEqual(third["pts_per_min_mean_vs_opp"], 35 / 40)
+        self.assertAlmostEqual(third["fga_per_min_mean_vs_opp"], 16 / 40)
+        self.assertAlmostEqual(third["fta_per_min_mean_vs_opp"], 7 / 40)
+        self.assertAlmostEqual(third["fg3a_per_min_mean_vs_opp"], 9 / 40)
+
+        mutated = frame.copy()
+        mutated.loc[
+            mutated["game_id"].eq(5),
+            ["pts", "fga", "fta", "fg3_a", "minutes", "min", "min_sec"],
+        ] = [99, 99, 99, 99, 2, 2, "2:00"]
+        mutated_third = add_points_features(mutated).loc[
+            lambda rows: rows["game_id"].eq(5)
+        ].iloc[0]
+        for column in columns:
+            self.assertAlmostEqual(mutated_third[column], third[column], msg=column)
+
+        unknown = _rows(
+            [
+                _player_row(
+                    1, "2024-01-01", 30, pts=10, game_id=1, opp_team_id=np.nan
+                ),
+                _player_row(
+                    1, "2024-01-03", 20, pts=8, game_id=2, opp_team_id=np.nan
+                ),
+            ]
+        )
+        blank = add_points_features(unknown)
+        for column in columns:
+            self.assertTrue(blank[column].isna().all(), column)
+
+    def test_dispersion_and_true_shooting_use_prior_games_only(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    10,
+                    pts=10,
+                    game_id=1,
+                    fga=10,
+                    fta=2,
+                    team_id=100,
+                    opp_team_id=200,
+                    team_pace=100,
+                ),
+                _player_row(
+                    2,
+                    "2024-01-01",
+                    24,
+                    pts=8,
+                    game_id=1,
+                    fga=7,
+                    fta=2,
+                    team_id=200,
+                    opp_team_id=100,
+                    team_pace=110,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    20,
+                    pts=40,
+                    game_id=2,
+                    fga=20,
+                    fta=4,
+                    team_id=100,
+                    opp_team_id=200,
+                    team_pace=102,
+                ),
+                _player_row(
+                    2,
+                    "2024-01-03",
+                    24,
+                    pts=12,
+                    game_id=2,
+                    fga=8,
+                    fta=2,
+                    team_id=200,
+                    opp_team_id=100,
+                    team_pace=108,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-04",
+                    2,
+                    pts=6,
+                    game_id=3,
+                    fga=4,
+                    fta=1,
+                    team_id=100,
+                    opp_team_id=200,
+                    team_pace=99,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-05",
+                    30,
+                    pts=8,
+                    game_id=4,
+                    fga=4,
+                    fta=0,
+                    team_id=100,
+                    opp_team_id=200,
+                    team_pace=101,
+                ),
+                _player_row(
+                    2,
+                    "2024-01-05",
+                    24,
+                    pts=10,
+                    game_id=4,
+                    fga=8,
+                    fta=2,
+                    team_id=200,
+                    opp_team_id=100,
+                    team_pace=112,
+                ),
+            ]
+        )
+        featured = add_points_features(frame)
+        row = featured.loc[
+            featured["player_id"].eq(1) & featured["game_id"].eq(4)
+        ].iloc[0]
+
+        self.assertAlmostEqual(row["min_sd_10"], row["min_std_10"])
+        self.assertAlmostEqual(row["minutes_ewm_10"], row["min_ewm_hl_10"])
+        self.assertAlmostEqual(row["opp_pace_10"], 109)
+        self.assertAlmostEqual(row["opp_pace_10"], row["opp_pace_mean_10"])
+        self.assertAlmostEqual(row["ts_pct_10"], 56 / (2 * (34 + 0.44 * 7)))
+        self.assertAlmostEqual(
+            row["ppm_sd_10"],
+            float(pd.Series([1.0, 2.0]).std()),
+        )
+
+        mutated = frame.copy()
+        mutated.loc[
+            mutated["player_id"].eq(1) & mutated["game_id"].eq(4),
+            ["pts", "fga", "fta", "minutes", "min", "min_sec", "team_pace"],
+        ] = [99, 99, 99, 2, 2, "2:00", 80]
+        changed = add_points_features(mutated).loc[
+            lambda rows: rows["player_id"].eq(1) & rows["game_id"].eq(4)
+        ].iloc[0]
+        for column in (
+            "min_sd_10",
+            "minutes_ewm_10",
+            "ts_pct_10",
+            "opp_pace_10",
+            "ppm_sd_10",
+        ):
+            self.assertAlmostEqual(changed[column], row[column], msg=column)
+
     def test_ewm_pts_per_min_is_ratio_of_prior_ewms(self) -> None:
         frame = _rows(
             [

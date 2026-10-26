@@ -117,6 +117,14 @@ def add_rate_features(
         prior_sum(result, "pts", PLAYER_KEY, 20),
         2 * (fga_20 + 0.44 * fta_20),
     )
+    result["ts_pct_10"] = ratio(
+        prior_sum(result, "pts", PLAYER_KEY, 10),
+        2
+        * (
+            prior_sum(result, "fga", PLAYER_KEY, 10)
+            + 0.44 * prior_sum(result, "fta", PLAYER_KEY, 10)
+        ),
+    )
     result["player_fga_share_10"] = ratio(
         fga_10,
         prior_sum(result, "team_fga", PLAYER_KEY, 10),
@@ -138,6 +146,51 @@ def add_rate_features(
     result["fga_per_min_5_minus_season"] = (
         fga_per_min_5 - season_fga_per_min
     )
+    return add_opponent_rate_features(result)
+
+
+_OPP_RATE_COLUMNS = {
+    "pts": "pts_per_min_mean_vs_opp",
+    "fga": "fga_per_min_mean_vs_opp",
+    "fta": "fta_per_min_mean_vs_opp",
+    "fg3_a": "fg3a_per_min_mean_vs_opp",
+}
+
+
+def add_opponent_rate_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Minutes-weighted rate from earlier meetings with this opponent.
+
+    Each column is the prior sum of that stat divided by the prior sum
+    of minutes for the same player and opponent, across seasons. The
+    current game is excluded. Rows with no opponent id stay missing so
+    they do not share a history. The frame must already be ordered by
+    player, date, and game.
+    """
+    result = frame.copy()
+    outputs = list(_OPP_RATE_COLUMNS.values())
+    for output in outputs:
+        result[output] = float("nan")
+    if "opp_team_id" not in result.columns:
+        return result
+
+    known = result["opp_team_id"].notna()
+    if not bool(known.any()):
+        return result
+
+    missing = pd.Series(
+        [f"__missing_rate_{i}" for i in range(len(result))],
+        index=result.index,
+    )
+    result["_opp_for_rate"] = result["opp_team_id"].where(known, missing)
+    keys = ["player_id", "_opp_for_rate"]
+    result["pts"] = numeric_column(result, "pts")
+    minutes = prior_expanding(result, "target_minutes", keys, "sum")
+    for source, output in _OPP_RATE_COLUMNS.items():
+        result[output] = ratio(
+            prior_expanding(result, source, keys, "sum"),
+            minutes,
+        )
+    result.loc[~known, outputs] = float("nan")
     return result
 
 
@@ -158,6 +211,7 @@ def _add_ppm_distribution(frame: pd.DataFrame) -> pd.DataFrame:
         "std",
         min_periods=2,
     )
+    result["ppm_sd_10"] = ppm_std_10
     result["ppm_vol_10"] = ratio(ppm_std_10, ppm_mean_10)
     result["ppm_p20_20"] = prior_quantile(
         result,
