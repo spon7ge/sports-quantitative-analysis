@@ -156,3 +156,88 @@ def test_prizepick_http_job_sets_no_browser() -> None:
 
     job = next(j for j in resolve_jobs(league="nba") if j.name == "nba_prizepick")
     assert job.env == {"PRIZEPICKS_NO_BROWSER": "1"}
+
+
+def test_next_aligned_lands_on_quarter_hours() -> None:
+    from datetime import datetime
+
+    from src.scrapers.run_all_odds import next_aligned
+
+    assert next_aligned(datetime(2026, 10, 24, 12, 7, 30), 15) == datetime(
+        2026, 10, 24, 12, 15
+    )
+    assert next_aligned(datetime(2026, 10, 24, 12, 15), 15) == datetime(
+        2026, 10, 24, 12, 15
+    )
+    assert next_aligned(datetime(2026, 10, 24, 12, 15, 1), 15) == datetime(
+        2026, 10, 24, 12, 30
+    )
+    assert next_aligned(datetime(2026, 10, 24, 12, 59), 15) == datetime(
+        2026, 10, 24, 13, 0
+    )
+    assert next_aligned(datetime(2026, 10, 24, 12, 0), 15) == datetime(
+        2026, 10, 24, 12, 0
+    )
+    assert next_aligned(datetime(2026, 10, 24, 12, 45), 15) == datetime(
+        2026, 10, 24, 12, 45
+    )
+
+
+def test_next_aligned_rejects_interval_that_does_not_divide_the_hour() -> None:
+    from datetime import datetime
+
+    from src.scrapers.run_all_odds import next_aligned
+
+    with pytest.raises(ValueError, match="divisor of 60"):
+        next_aligned(datetime(2026, 10, 24, 12, 7), 7)
+
+
+def test_run_on_marks_waits_for_quarter_hours_and_skips_overrun_slots() -> None:
+    from datetime import datetime, timedelta
+
+    from src.scrapers.run_all_odds import run_on_marks
+
+    clock = [datetime(2026, 10, 24, 12, 7, 30)]
+    calls: list[datetime] = []
+
+    def now() -> datetime:
+        return clock[0]
+
+    def sleep(seconds: float) -> None:
+        clock[0] = clock[0] + timedelta(seconds=seconds)
+
+    def run_once() -> int:
+        calls.append(clock[0])
+        clock[0] = clock[0] + timedelta(minutes=20)
+        return 0
+
+    assert (
+        run_on_marks(
+            interval_minutes=15,
+            run_once=run_once,
+            now=now,
+            sleep=sleep,
+            cycles=2,
+        )
+        == 0
+    )
+    assert calls == [
+        datetime(2026, 10, 24, 12, 15),
+        datetime(2026, 10, 24, 12, 45),
+    ]
+
+
+def test_cli_every_schedules_clock_aligned_runs(monkeypatch) -> None:
+    seen: dict[str, int] = {}
+
+    def fake_run_on_marks(**kwargs):
+        seen["interval_minutes"] = kwargs["interval_minutes"]
+        return 0
+
+    monkeypatch.setattr("src.scrapers.run_all_odds.run_on_marks", fake_run_on_marks)
+    assert main(["--league", "nba", "--every", "15"]) == 0
+    assert seen["interval_minutes"] == 15
+
+
+def test_cli_every_rejects_unaligned_interval() -> None:
+    assert main(["--every", "7"]) == 2

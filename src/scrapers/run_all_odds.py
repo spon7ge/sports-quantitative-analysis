@@ -6,6 +6,7 @@ Usage:
   python -m src.scrapers.run_all_odds --only nba_novig,nba_underdog
   python -m src.scrapers.run_all_odds --exclude nba_prizepick,mlb_prizepick
   python -m src.scrapers.run_all_odds --fail-fast
+  python -m src.scrapers.run_all_odds --league nba --every 15
 
 Concurrency (env):
   ODDS_HTTP_CONCURRENCY — Novig/ProphetX/Underdog/FanDuel/DraftKings/PrizePicks HTTP (default 8)
@@ -26,8 +27,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Literal
 
 League = Literal["mlb", "nba"]
@@ -339,6 +342,62 @@ def _parse_only(raw: str | None) -> list[str] | None:
     return names or None
 
 
+def next_aligned(now: datetime, interval_minutes: int) -> datetime:
+    """Next wall-clock mark whose minute is a multiple of ``interval_minutes``.
+
+    ``interval_minutes`` must divide 60 so the marks stay fixed on the hour.
+    15 lands on :00, :15, :30, and :45. An exact mark is returned unchanged;
+    any later instant in that minute waits for the following mark.
+    """
+    if interval_minutes <= 0 or 60 % interval_minutes != 0:
+        raise ValueError(
+            "--every must be a positive divisor of 60 "
+            f"(got {interval_minutes}); 15 runs at :00, :15, :30, and :45"
+        )
+    bucket = (now.minute // interval_minutes) * interval_minutes
+    candidate = now.replace(minute=bucket, second=0, microsecond=0)
+    if candidate < now:
+        candidate += timedelta(minutes=interval_minutes)
+    return candidate
+
+
+def run_on_marks(
+    *,
+    interval_minutes: int,
+    run_once: Callable[[], int],
+    now: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    cycles: int | None = None,
+) -> int:
+    """Run ``run_once`` on each clock mark, then wait for the next future mark.
+
+    A scrape that is still going at the following mark does not start a
+    catch-up run. The next start is the first mark still ahead when it ends.
+    """
+    clock = now or datetime.now
+    pause = sleep or time.sleep
+    completed = 0
+    last_code = 0
+    try:
+        while cycles is None or completed < cycles:
+            current = clock()
+            target = next_aligned(current, interval_minutes)
+            delay = (target - current).total_seconds()
+            if delay > 0:
+                print(
+                    f"Next scrape at {target.strftime('%H:%M:%S')} "
+                    f"(in {delay:.0f}s)",
+                    flush=True,
+                )
+                pause(delay)
+            last_code = run_once()
+            completed += 1
+    except KeyboardInterrupt:
+        print("\nStopped odds scrape schedule.", flush=True)
+        return last_code
+    return last_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run MLB and NBA odds/props scrapers.",
@@ -364,14 +423,33 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Cancel running scrapers after the first failure (default: continue)",
     )
+    parser.add_argument(
+        "--every",
+        type=int,
+        default=None,
+        metavar="MINUTES",
+        help=(
+            "Repeat on the clock instead of exiting after one run. "
+            "15 runs at :00, :15, :30, and :45. Must divide 60. "
+            "A run that overruns the next mark waits for the one after it."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        return run_all(
-            only=_parse_only(args.only),
-            exclude=_parse_only(args.exclude),
-            league=args.league,
-            fail_fast=args.fail_fast,
-        )
+        if args.every is not None:
+            next_aligned(datetime.now(), args.every)
+
+        def once() -> int:
+            return run_all(
+                only=_parse_only(args.only),
+                exclude=_parse_only(args.exclude),
+                league=args.league,
+                fail_fast=args.fail_fast,
+            )
+
+        if args.every is None:
+            return once()
+        return run_on_marks(interval_minutes=args.every, run_once=once)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
