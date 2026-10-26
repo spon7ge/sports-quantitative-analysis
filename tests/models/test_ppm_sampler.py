@@ -243,8 +243,25 @@ def test_builder_rejects_holdout_rows():
     oof, ranges = _valid_oof()
     late = oof.copy()
     late["game_date"] = HOLDOUT_START
-    with pytest.raises(ValueError, match="2025-10-21"):
+    with pytest.raises(ValueError, match="2026-10-20"):
         build_tail_tables(late, folds=[1], fold_ranges=ranges)
+    promoted = oof.copy()
+    promoted["game_date"] = HOLDOUT_START
+    tables = build_tail_tables(
+        promoted,
+        folds=[1],
+        fold_ranges=ranges,
+        holdout_start="2027-10-19",
+    )
+    assert tables.holdout_start == "2027-10-19"
+    promoted["game_date"] = pd.Timestamp("2027-10-19")
+    with pytest.raises(ValueError, match="2027-10-19"):
+        build_tail_tables(
+            promoted,
+            folds=[1],
+            fold_ranges=ranges,
+            holdout_start="2027-10-19",
+        )
     marked = oof.copy()
     marked["is_holdout"] = True
     with pytest.raises(ValueError, match="holdout"):

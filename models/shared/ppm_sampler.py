@@ -40,7 +40,7 @@ class RateTailTables:
     floor: float = RATE_FLOOR
     cap: float = RATE_CAP
     quantile_levels: tuple[float, ...] = QUANTILE_LEVELS
-    holdout_start: str = "2025-10-21"
+    holdout_start: str = "2026-10-20"
     grouping: dict[str, str] | None = None
     groups: tuple[int, ...] = (0, 1)
     folds: tuple[int, ...] = ()
@@ -177,7 +177,9 @@ def probability_below_line(grids, lower_groups, upper_groups, tables, line) -> n
     return cdf_left(np.full(n_rows, float(line)), grids, lower_groups, upper_groups, tables)
 
 
-def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> RateTailTables:
+def build_tail_tables(
+    oof, *, folds, fold_ranges, grouping=None, holdout_start=None
+) -> RateTailTables:
     """Build pinned lower/upper tables from pre-holdout out-of-fold rates.
 
     Scoreless games (``rate == 0``) are kept. They enter the lower table
@@ -204,9 +206,11 @@ def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> RateTailTabl
     if not np.isfinite(rate).all() or np.any(rate < 0) or np.any(rate > RATE_CAP):
         raise ValueError("rate")
 
+    start = HOLDOUT_START if holdout_start is None else np.datetime64(holdout_start)
+    start_label = str(np.datetime64(start, "D"))
     game_dates = np.asarray(pd.to_datetime(oof["game_date"]), dtype="datetime64[ns]")
-    if not np.all(game_dates < HOLDOUT_START):
-        raise ValueError("2025-10-21")
+    if not np.all(game_dates < start):
+        raise ValueError(start_label)
 
     knot_cols = [f"q_{level:.2f}" for level in QUANTILE_LEVELS]
     prepared = prepare_quantile_grid(oof[knot_cols].to_numpy(dtype=float))
@@ -251,7 +255,7 @@ def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> RateTailTabl
         floor=RATE_FLOOR,
         cap=RATE_CAP,
         quantile_levels=QUANTILE_LEVELS,
-        holdout_start="2025-10-21",
+        holdout_start=start_label,
         grouping=rules,
         groups=(0, 1),
         folds=tuple(folds),
@@ -299,7 +303,7 @@ def load_tail_sidecar(path) -> RateTailTables:
     if oof is not None and len(oof):
         dates = np.asarray(pd.to_datetime(oof["game_date"]), dtype="datetime64[ns]")
         if not np.all(dates < HOLDOUT_START):
-            raise ValueError("2025-10-21")
+            raise ValueError(str(np.datetime64(HOLDOUT_START, "D")))
         if "is_holdout" in getattr(oof, "columns", []) and oof["is_holdout"].astype(bool).any():
             raise ValueError("holdout")
     return RateTailTables(
@@ -307,7 +311,7 @@ def load_tail_sidecar(path) -> RateTailTables:
         floor=payload["floor"],
         cap=payload["cap"],
         quantile_levels=tuple(payload["quantile_levels"]),
-        holdout_start=payload.get("holdout_start", "2025-10-21"),
+        holdout_start=payload.get("holdout_start", "2026-10-20"),
         grouping=dict(grouping),
         groups=tuple(payload.get("groups", (0, 1))),
         folds=tuple(payload["folds"]),

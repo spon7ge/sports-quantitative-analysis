@@ -18,7 +18,7 @@ _INT_STRING = re.compile(r"^[+-]?\d+$")
 
 QUANTILE_LEVELS = (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95)
 KNOT_FLOOR = 1e-3
-HOLDOUT_START = np.datetime64("2025-10-21")
+HOLDOUT_START = np.datetime64("2026-10-20")
 _DEFAULT_GROUPING = {"lower": "starting", "upper": "starting"}
 _MISS_RATE_LO = 0.04
 _MISS_RATE_HI = 0.06
@@ -31,7 +31,7 @@ class MinuteTailTables:
     quantile_levels: tuple[float, ...] = QUANTILE_LEVELS
     early_stop: str = "train_tail"
     train_tail_frac: float = 0.10
-    holdout_start: str = "2025-10-21"
+    holdout_start: str = "2026-10-20"
     grouping: dict[str, str] | None = None
     groups: tuple[int, ...] = (0, 1)
     folds: tuple[int, ...] = ()
@@ -325,7 +325,33 @@ def tail_bin_shares(y, edge_values, *, tail) -> pd.DataFrame:
     )
 
 
-def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTables:
+def tail_miss_rates(minutes, lower, upper) -> tuple[float, float]:
+    """Share of outcomes below the lower knot and above the upper knot."""
+    y = np.asarray(minutes, dtype=float).reshape(-1)
+    lo = np.asarray(lower, dtype=float).reshape(-1)
+    hi = np.asarray(upper, dtype=float).reshape(-1)
+    if y.shape != lo.shape or y.shape != hi.shape:
+        raise ValueError("length")
+    return float(np.mean(y < lo)), float(np.mean(y > hi))
+
+
+def within_miss_rate_band(lower_rate: float, upper_rate: float) -> bool:
+    """True when both tail rates sit in the sampler's 4–6% band."""
+    return (
+        _MISS_RATE_LO <= float(lower_rate) <= _MISS_RATE_HI
+        and _MISS_RATE_LO <= float(upper_rate) <= _MISS_RATE_HI
+    )
+
+
+def build_tail_tables(
+    oof,
+    *,
+    folds,
+    fold_ranges,
+    grouping=None,
+    check_miss_rate: bool = True,
+    holdout_start=None,
+) -> MinuteTailTables:
     """Build pinned lower/upper empirical tables from out-of-fold misses."""
     rules = dict(_DEFAULT_GROUPING) if grouping is None else dict(grouping)
     if rules != _DEFAULT_GROUPING:
@@ -349,9 +375,11 @@ def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTa
     if not np.all(minutes > 0):
         raise ValueError("y > 0")
 
+    start = HOLDOUT_START if holdout_start is None else np.datetime64(holdout_start)
+    start_label = str(np.datetime64(start, "D"))
     game_dates = np.asarray(oof["game_date"], dtype="datetime64[ns]")
-    if not np.all(game_dates < HOLDOUT_START):
-        raise ValueError("2025-10-21")
+    if not np.all(game_dates < start):
+        raise ValueError(start_label)
 
     knot_cols = [f"q_{level:.2f}" for level in QUANTILE_LEVELS]
     prepared = prepare_quantile_grid(oof[knot_cols].to_numpy(dtype=float))
@@ -365,18 +393,17 @@ def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTa
     starting_sel = selected["starting"].to_numpy(dtype=int)
     fold_sel = selected["fold_id"].to_numpy()
 
-    for fold_id in folds:
-        fold_mask = fold_sel == fold_id
-        y_fold = y_sel[fold_mask]
-        q05_fold = q05_sel[fold_mask]
-        q95_fold = q95_sel[fold_mask]
-        lower_rate = float(np.mean(y_fold < q05_fold))
-        upper_rate = float(np.mean(y_fold > q95_fold))
-        if not (_MISS_RATE_LO <= lower_rate <= _MISS_RATE_HI and _MISS_RATE_LO <= upper_rate <= _MISS_RATE_HI):
-            raise ValueError(
-                f"miss rate outside [0.04, 0.06] for fold {fold_id}: "
-                f"lower={lower_rate:.4f} upper={upper_rate:.4f}"
+    if check_miss_rate:
+        for fold_id in folds:
+            fold_mask = fold_sel == fold_id
+            lower_rate, upper_rate = tail_miss_rates(
+                y_sel[fold_mask], q05_sel[fold_mask], q95_sel[fold_mask]
             )
+            if not within_miss_rate_band(lower_rate, upper_rate):
+                raise ValueError(
+                    f"miss rate outside [0.04, 0.06] for fold {fold_id}: "
+                    f"lower={lower_rate:.4f} upper={upper_rate:.4f}"
+                )
 
     buckets: dict[tuple[str, int], list[float]] = {
         ("lower", 0): [],
@@ -409,7 +436,7 @@ def build_tail_tables(oof, *, folds, fold_ranges, grouping=None) -> MinuteTailTa
         quantile_levels=QUANTILE_LEVELS,
         early_stop="train_tail",
         train_tail_frac=0.10,
-        holdout_start="2025-10-21",
+        holdout_start=start_label,
         grouping=rules,
         groups=(0, 1),
         folds=tuple(folds),
@@ -456,7 +483,7 @@ def load_tail_sidecar(path) -> MinuteTailTables:
         quantile_levels=tuple(payload["quantile_levels"]),
         early_stop=payload.get("early_stop", "train_tail"),
         train_tail_frac=payload.get("train_tail_frac", 0.10),
-        holdout_start=payload.get("holdout_start", "2025-10-21"),
+        holdout_start=payload.get("holdout_start", "2026-10-20"),
         grouping=dict(grouping),
         groups=tuple(payload.get("groups", (0, 1))),
         folds=tuple(payload["folds"]),

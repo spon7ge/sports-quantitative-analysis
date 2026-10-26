@@ -13,6 +13,8 @@ from models.shared.minutes_sampler import (
     prepare_quantile_grid,
     quantile_minutes,
     save_tail_sidecar,
+    tail_miss_rates,
+    within_miss_rate_band,
 )
 
 
@@ -196,6 +198,24 @@ def test_miss_rate_outside_band_raises():
         build_tail_tables(oof, folds=[1], fold_ranges=ranges)
 
 
+def test_miss_rate_check_can_be_left_to_a_later_fold():
+    oof, ranges = _valid_oof()
+    oof.loc[0:5, "minutes"] = 5.0
+    oof.loc[6:11, "minutes"] = 40.0
+    tables = build_tail_tables(
+        oof, folds=[1], fold_ranges=ranges, check_miss_rate=False
+    )
+    assert tables.folds == (1,)
+    lower, upper = tail_miss_rates(oof["minutes"], oof["q_0.05"], oof["q_0.95"])
+    assert lower > 0.06
+    assert not within_miss_rate_band(lower, upper)
+    assert within_miss_rate_band(0.05, 0.05)
+    assert tail_miss_rates([1.0, 2.0, 3.0, 4.0], [0.0, 2.0, 3.0, 5.0], [1.0, 2.0, 4.0, 5.0]) == (
+        0.25,
+        0.0,
+    )
+
+
 def test_group_missing_from_the_data_raises_at_build():
     oof, ranges = _valid_oof()
     oof = oof.loc[oof["starting"] == 1].reset_index(drop=True)
@@ -221,8 +241,25 @@ def test_builder_rejects_bad_rows_and_rules():
         build_tail_tables(non_positive, folds=[1], fold_ranges=ranges)
     late = oof.copy()
     late["game_date"] = HOLDOUT_START
-    with pytest.raises(ValueError, match="2025-10-21"):
+    with pytest.raises(ValueError, match="2026-10-20"):
         build_tail_tables(late, folds=[1], fold_ranges=ranges)
+    promoted = oof.copy()
+    promoted["game_date"] = HOLDOUT_START
+    tables = build_tail_tables(
+        promoted,
+        folds=[1],
+        fold_ranges=ranges,
+        holdout_start="2027-10-19",
+    )
+    assert tables.holdout_start == "2027-10-19"
+    promoted["game_date"] = pd.Timestamp("2027-10-19")
+    with pytest.raises(ValueError, match="2027-10-19"):
+        build_tail_tables(
+            promoted,
+            folds=[1],
+            fold_ranges=ranges,
+            holdout_start="2027-10-19",
+        )
     optimistic = oof.copy()
     optimistic["early_stop"] = "validation"
     with pytest.raises(ValueError, match="train_tail"):

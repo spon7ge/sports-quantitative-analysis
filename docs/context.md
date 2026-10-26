@@ -20,7 +20,7 @@ The mean-plus-residual stack (`src/models/xgboost_models/`, joint overlay / slop
 | Minutes distribution | `models/shared/minutes_sampler.py` | Frozen tails `min_nba_tails_2026-04-12.joblib` |
 | Points-per-minute quantiles | `notebooks/nba/points/pts_nba_model.ipynb` | Notebook still fits `pts` until the retarget. Label will be `min(pts / minutes, 6.0)` |
 | Points PMF | `models/shared/simulate.py` | Priced path. Independent minutes and rate draws |
-| Holdout | `2025-26` | Closed for selection, tuning, and tail edits |
+| Holdout | `2026-27` | Closed for selection, tuning, and tail edits |
 
 Both models are `reg:quantileerror` with levels `0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95`. Training goes through `models/shared/`. Appearance filter is `minutes > 0`.
 
@@ -36,14 +36,14 @@ The minutes feature list is `MIN_FEATURES` in the minutes notebook. The rate mod
 4. **Minutes distribution.** Inverse of the 11 knots, with out-of-fold tails by starter/bench. A minutes line is `probability_below_line`, not a draw count.
 5. **Points distribution.** Rate sampler, then independent minutes and rate draws, then `points = minutes × rate` rounded to an integer PMF.
 
-Holdout season `2025-26` is not a place to retune. Next promotion window is `2026-27`.
+Holdout season `2026-27` is not a place to retune. `2025-26` is in the training pool.
 
 ---
 
 ## Shared training mechanics
 
 - Universe: silver NBA regular-season appearances, `minutes > 0`.
-- Silver seasons: `2019-20` through `2025-26`. Selection must not read `2025-26`.
+- Silver seasons: `2019-20` through `2026-27`. Selection must not read `2026-27`.
 - Walk-forward: `date_walk_forward_folds` (date blocks, no row from a date split across train and val).
 - Quantile crossing is fixed by sorting the row (`monotonize_quantiles`).
 - Minutes knots are floored at `1e-3` inside `prepare_quantile_grid`. Draws clip to `[0, maximum_minutes("nba")]` (63). The grid itself is not clipped to 63.
