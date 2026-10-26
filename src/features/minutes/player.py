@@ -315,6 +315,59 @@ def add_usage_features(
     return result
 
 
+def add_opponent_minutes_features(
+    frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Career minutes this player has already played against the opponent.
+
+    ``min_mean_vs_opp`` is the mean of earlier meetings, across
+    seasons. ``games_vs_opp`` is how many of those meetings had
+    observed minutes. The current game is excluded. Rows with no
+    opponent id stay missing so they do not share a history.
+    The frame must already be ordered by player, date, and game.
+    """
+    result = frame.copy()
+    result["min_mean_vs_opp"] = float("nan")
+    result["games_vs_opp"] = float("nan")
+    if "opp_team_id" not in result.columns:
+        return result
+
+    known = result["opp_team_id"].notna()
+    if not bool(known.any()):
+        return result
+
+    missing = pd.Series(
+        [f"__missing_{i}" for i in range(len(result))],
+        index=result.index,
+    )
+    result["_opp_for_minutes"] = result["opp_team_id"].where(
+        known,
+        missing,
+    )
+    keys = ["player_id", "_opp_for_minutes"]
+    result["min_mean_vs_opp"] = prior_expanding(
+        result,
+        "target_minutes",
+        keys,
+        "mean",
+    )
+    result["_opp_minute_obs"] = (
+        result["target_minutes"].notna().astype(float)
+    )
+    shifted = prior_shift(
+        result,
+        "_opp_minute_obs",
+        keys,
+    ).fillna(0)
+    result["games_vs_opp"] = shifted.groupby(
+        group_keys(result, keys),
+        sort=False,
+    ).cumsum()
+    result.loc[~known, "min_mean_vs_opp"] = float("nan")
+    result.loc[~known, "games_vs_opp"] = float("nan")
+    return result
+
+
 def _activity(frame: pd.DataFrame) -> pd.Series:
     parts = pd.concat(
         [

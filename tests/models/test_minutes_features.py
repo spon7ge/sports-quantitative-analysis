@@ -510,6 +510,133 @@ class MinutesFeatureLeakageTests(unittest.TestCase):
             third["fouls_per_36_10"],
         )
 
+    def test_career_minutes_against_opponent_use_only_prior_meetings(
+        self,
+    ) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2023-04-01",
+                    30,
+                    game_id=1,
+                    opp_team_id=200,
+                    season_year="2022-23",
+                ),
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    10,
+                    game_id=2,
+                    opp_team_id=300,
+                    season_year="2023-24",
+                ),
+                _player_row(
+                    2,
+                    "2024-01-02",
+                    40,
+                    game_id=3,
+                    opp_team_id=200,
+                    season_year="2023-24",
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    18,
+                    game_id=4,
+                    opp_team_id=200,
+                    season_year="2023-24",
+                ),
+                _player_row(
+                    1,
+                    "2024-01-05",
+                    36,
+                    game_id=5,
+                    opp_team_id=200,
+                    season_year="2023-24",
+                ),
+            ]
+        )
+        featured = add_minutes_features(frame)
+        self.assertIn("min_mean_vs_opp", featured.columns)
+        self.assertIn("games_vs_opp", featured.columns)
+
+        def at(game_id: int) -> pd.Series:
+            return featured.loc[
+                featured["game_id"].eq(game_id)
+            ].iloc[0]
+
+        first = at(1)
+        self.assertTrue(np.isnan(first["min_mean_vs_opp"]))
+        self.assertEqual(first["games_vs_opp"], 0)
+
+        other_opponent = at(2)
+        self.assertTrue(
+            np.isnan(other_opponent["min_mean_vs_opp"])
+        )
+        self.assertEqual(other_opponent["games_vs_opp"], 0)
+
+        other_player = at(3)
+        self.assertTrue(np.isnan(other_player["min_mean_vs_opp"]))
+        self.assertEqual(other_player["games_vs_opp"], 0)
+
+        second_meeting = at(4)
+        self.assertAlmostEqual(
+            second_meeting["min_mean_vs_opp"],
+            30,
+        )
+        self.assertEqual(second_meeting["games_vs_opp"], 1)
+
+        third_meeting = at(5)
+        self.assertAlmostEqual(
+            third_meeting["min_mean_vs_opp"],
+            24,
+        )
+        self.assertEqual(third_meeting["games_vs_opp"], 2)
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(5), "minutes"] = 0
+        mutated.loc[mutated["game_id"].eq(5), "min"] = 0
+        mutated.loc[
+            mutated["game_id"].eq(5), "min_sec"
+        ] = "0:00"
+        mutated_third = add_minutes_features(mutated).loc[
+            lambda rows: rows["game_id"].eq(5)
+        ].iloc[0]
+        self.assertAlmostEqual(
+            mutated_third["min_mean_vs_opp"],
+            third_meeting["min_mean_vs_opp"],
+        )
+        self.assertEqual(
+            mutated_third["games_vs_opp"],
+            third_meeting["games_vs_opp"],
+        )
+
+    def test_unknown_opponent_has_no_matchup_history(
+        self,
+    ) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    30,
+                    game_id=1,
+                    opp_team_id=np.nan,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    20,
+                    game_id=2,
+                    opp_team_id=np.nan,
+                ),
+            ]
+        )
+        featured = add_minutes_features(frame)
+        self.assertTrue(featured["min_mean_vs_opp"].isna().all())
+        self.assertTrue(featured["games_vs_opp"].isna().all())
+
     def test_default_feature_list_is_causal(self) -> None:
         overlap = FORBIDDEN_FEATURE_COLUMNS.intersection(
             CURRENT_MINUTES_FEATURES

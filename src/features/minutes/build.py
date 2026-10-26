@@ -9,6 +9,7 @@ from .columns import TIER1_MINUTES_FEATURES
 from .environment import add_environment_features
 from .player import (
     add_observation_columns,
+    add_opponent_minutes_features,
     add_player_role_features,
     add_season_and_stint_features,
     add_usage_features,
@@ -54,6 +55,7 @@ def add_minutes_features(
     result = add_player_role_features(result)
     result = add_season_and_stint_features(result)
     result = add_usage_features(result)
+    result = add_opponent_minutes_features(result)
 
     teams = build_team_games(result)
     teams = add_team_history_features(teams)
