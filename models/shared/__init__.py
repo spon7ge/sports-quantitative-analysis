@@ -19,6 +19,13 @@ from models.shared.baselines import (
     run_naive_comparison,
     run_quantile_linear_baseline,
 )
+from models.shared.conformal import (
+    apply_offsets,
+    base_knots,
+    calibration_group,
+    conformal_offset,
+    fit_offsets,
+)
 from models.shared.metrics import pinball_50, score_quantile_fold
 from models.shared.minutes_sampler import (
     HOLDOUT_START,
@@ -48,7 +55,12 @@ from models.shared.train import (
 
 __all__ = [
     "analyze_correlations",
+    "apply_offsets",
+    "base_knots",
+    "calibration_group",
     "compare_model_vs_naive",
+    "conformal_offset",
+    "fit_offsets",
     "date_walk_forward_folds",
     "ensure_naive_cols",
     "evaluate_holdout",

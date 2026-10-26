@@ -174,6 +174,14 @@ MINUTE_Q50_TIERS: tuple[tuple[str, float | None, float | None], ...] = (
     ("31+", 31.0, None),
 )
 
+# Cuts on predicted points-per-minute q50. Realized rate is not a tier.
+RATE_Q50_TIERS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("<0.30", None, 0.30),
+    ("0.30-0.50", 0.30, 0.50),
+    ("0.50-0.70", 0.50, 0.70),
+    ("0.70+", 0.70, None),
+)
+
 _COVERAGE_BANDS: tuple[tuple[str, float, float, float], ...] = (
     ("Q20-Q80", 0.20, 0.80, 0.60),
     ("Q10-Q90", 0.10, 0.90, 0.80),

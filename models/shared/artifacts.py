@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
 import pandas as pd
+
+from models.shared.metrics import MINUTE_Q50_TIERS, RATE_Q50_TIERS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SAVE_DIR = _REPO_ROOT / "models" / "saved_models"
@@ -25,6 +28,7 @@ def save_model_bundle(
     artifact_stem: str,
     naive_holdout_results: dict[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    calibration: Mapping[str, Any] | None = None,
     save_dir: str | Path | None = None,
 ) -> Path:
     """Persist quantile models + metrics under ``models/saved_models/``."""
@@ -48,6 +52,14 @@ def save_model_bundle(
         "val_end": holdout_df["game_date"].max(),
         "metadata": dict(metadata) if metadata is not None else None,
     }
+    if calibration is not None:
+        if "group_definition" not in calibration or "offsets" not in calibration:
+            raise ValueError(
+                "calibration must be the offset payload, including group_definition"
+            )
+        payload = dict(calibration)
+        payload["fingerprint"] = booster_fingerprint(models_ho, features)
+        bundle["calibration"] = payload
 
     save_path = out_dir / f"{artifact_stem}_{holdout_df['game_date'].max().date()}.joblib"
     joblib.dump(bundle, save_path)
@@ -56,10 +68,54 @@ def save_model_bundle(
 
 
 def load_model_bundle(path: str | Path) -> dict[str, Any]:
-    """Load a saved quantile model bundle."""
+    """Load a saved quantile model bundle.
+
+    A bundle that carries a calibration table is refused when the
+    boosters or the tier cuts are not the ones stored with that table.
+    """
     bundle = joblib.load(path)
+    _check_calibration(bundle)
     print(f"Loaded {path}")
     return bundle
+
+
+def booster_fingerprint(models: Mapping[str, Any], feature_names: Sequence[str]) -> str:
+    """Hash the booster bytes the calibration table was stored against."""
+    digest = sha256()
+    digest.update("\n".join(str(name) for name in feature_names).encode())
+    ordered = sorted(models, key=lambda key: float(str(key).split("_", 1)[1]))
+    for key in ordered:
+        raw = models[key].get_booster().save_raw()
+        if isinstance(raw, str):
+            raw = raw.encode()
+        digest.update(str(key).encode())
+        digest.update(raw)
+    return digest.hexdigest()
+
+
+def _expected_tiers(calibration: Mapping[str, Any]):
+    target = calibration.get("target", "minutes")
+    if target == "minutes":
+        return tuple(MINUTE_Q50_TIERS)
+    if target == "pts_per_min":
+        return tuple(RATE_Q50_TIERS)
+    raise ValueError(f"calibration target {target}")
+
+
+def _check_calibration(bundle: Mapping[str, Any]) -> None:
+    calibration = bundle.get("calibration")
+    if calibration is None:
+        return
+    found = booster_fingerprint(bundle["quantile_models"], bundle["feature_names"])
+    if found != calibration.get("fingerprint"):
+        raise ValueError("booster fingerprint does not match the calibration table")
+    definition = calibration.get("group_definition")
+    if not isinstance(definition, Mapping) or "tiers" not in definition:
+        raise ValueError("calibration payload is missing group_definition")
+    stored = definition["tiers"]
+    tiers = tuple(tuple(item) for item in stored)
+    if tiers != _expected_tiers(calibration):
+        raise ValueError("calibration tiers do not match the group definition")
 
 
 _TRAINING_PARAM_KEYS = (
@@ -126,3 +182,48 @@ def predict_quantiles(
     return pd.DataFrame({
         key: models[key].predict(player_features) for key in ordered
     })
+
+
+def predict_calibrated_quantiles(
+    bundle: Mapping[str, Any],
+    player_features: pd.DataFrame,
+) -> pd.DataFrame:
+    """Sort, replace cold starts, add the stored offsets, sort, and clip.
+
+    Groups are read from the base q50, after the cold-start replacement.
+    """
+    from models.shared.conformal import (  # noqa: PLC0415
+        apply_offsets,
+        base_knots,
+        calibration_group,
+    )
+
+    calibration = bundle["calibration"]
+    names = list(bundle["feature_names"])
+    raw = predict_quantiles(
+        bundle["quantile_models"],
+        names,
+        player_features.loc[:, names],
+    )
+    lag_col = str(calibration.get("lag_col", "min_lag_1"))
+    if lag_col not in player_features.columns:
+        raise KeyError(lag_col)
+    lag = player_features[lag_col]
+    stored = calibration.get("group_definition", {}).get("tiers", MINUTE_Q50_TIERS)
+    tiers = tuple(tuple(item) for item in stored)
+    base = base_knots(
+        raw,
+        player_features["starting"],
+        lag,
+        role_quantiles=calibration["role_quantiles"],
+    )
+    groups = calibration_group(base["q_0.50"], lag, tiers=tiers)
+    upper = calibration.get("clip_high", calibration["max_minutes"])
+    lower = calibration.get("clip_low", 1e-3)
+    return apply_offsets(
+        base,
+        groups,
+        calibration["offsets"],
+        float(upper),
+        lower=float(lower),
+    )
