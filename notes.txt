@@ -1,7 +1,33 @@
-baseball datasets:
-- baseball savant
-- statcast csv
-- mlb stats api
-- retrosheet 
-- chadwick
-- ladman database
+I'd build your development around three goals:
+- Think mathematically: understand why equations work, not just how to manipulate them.
+- Think scientifically: construct hypotheses, derive predictions, test them, and explain failures.
+- Think like a researcher: identify open questions, evaluate prior work, design experiments, and communicate novel findings.
+
+Things worth learning:
+1. probability and statistics
+2. linear algebra and calculus 
+3. statistical modeling and machine learning
+4. Market efficiency and decision theory
+
+How each test should look like:
+Step 1 — Collect data
+Historical odds, closing odds, game outcomes, team strength, rest days, injuries where reliably recorded, and other features available before the game.
+
+Step 2 — Build a baseline
+Convert odds into implied probabilities, remove the bookmaker's margin, and compare those probabilities with a simple Elo or logistic regression model.
+
+Step 3 — Test one hypothesis
+For example, investigate whether rest disadvantages add predictive information after accounting for team strength and the market's existing expectations.
+
+Step 4 — Evaluate honestly
+Use chronological holdouts, log loss, Brier score, calibration, and realistic odds available at the time. Keep feature selection separate from the final test period.
+
+Step 5 — Write up the result
+Document the hypothesis, methodology, baselines, uncertainty, failed experiments, and whether the evidence supports your original idea.
+
+How to fetch data:
+python -m src.pipeline.clean --league nba --season 2026-27 --fetch
+
+BR positions and rotowire game closing lines:
+python -m src.scrapers.basketball_reference_nba_positions --years 2021-2026
+python -m src.scrapers.rotowire_nba_odds --seasons 2019-2025
