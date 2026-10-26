@@ -207,8 +207,12 @@ def run_walk_forward(
     quantiles: Sequence[float] | None = None,
     early_stop: str = "train_tail",
     train_tail_frac: float = 0.10,
+    target_col: str = "minutes",
 ) -> dict[str, Any]:
     """Phase 2 — date-based walk-forward validation (production simulation)."""
+    outcome_col = str(target_col)
+    if not outcome_col:
+        raise ValueError("target_col")
     print(
         "\n── Phase 2: Walk-Forward Validation (XGBoost, date-based) ──────"
     )
@@ -279,7 +283,7 @@ def run_walk_forward(
         fold_oof = pd.DataFrame({k: preds[k] for k in preds}, index=X_val.index)
         fold_oof["fold_id"] = fold_id
         fold_oof["game_date"] = train_df.loc[val_mask, "game_date"].to_numpy()
-        fold_oof["minutes"] = y_val.to_numpy()
+        fold_oof[outcome_col] = y_val.to_numpy()
         fold_oof["starting"] = starting_val
         fold_oof["early_stop"] = early_stop
         fold_oof["train_tail_frac"] = train_tail_frac
@@ -382,13 +386,19 @@ def evaluate_holdout(
     wf_results: list[dict[str, Any]] | None = None,
     quantiles: Sequence[float] | None = None,
     fold_label: str = "Blind Holdout",
-    es_frac: float = 0.90,
+    train_tail_frac: float = 0.10,
 ) -> dict[str, Any]:
-    """Blind holdout evaluation on the held-out season."""
+    """Blind holdout evaluation on the held-out season.
+
+    Early stopping uses the last ``train_tail_frac`` of training dates,
+    the same rule as walk-forward. The holdout is predicted and is not
+    the stopping set.
+    """
     features = list(features)
     print(f"── {fold_label} ─────────────────────────────────────────────────")
     print(
-        f"  Train pool: {es_frac:.0%} rows for fit, remainder for early-stopping only; "
+        "  Train pool: last "
+        f"{train_tail_frac:.0%} of training dates for early-stopping only; "
         "predict holdout (never in eval_set)."
     )
 
@@ -398,19 +408,20 @@ def evaluate_holdout(
     y_ho = holdout_df[target_col]
     starting_ho = holdout_df[role_col].values
 
-    es_cutoff = int(len(X_train_full) * es_frac)
-    X_es_train = X_train_full.iloc[:es_cutoff]
-    y_es_train = y_train_full.iloc[:es_cutoff]
-    X_es_val = X_train_full.iloc[es_cutoff:]
-    y_es_val = y_train_full.iloc[es_cutoff:]
-
-    models_ho, _ = fit_quantile_models(
-        X_es_train, y_es_train, X_es_val, y_es_val,
+    models_ho, pred_frame = fit_quantile_models(
+        X_train_full,
+        y_train_full,
+        X_train_full,
+        y_train_full,
         quantiles=quantiles,
         xgb_params=xgb_params,
+        early_stop="train_tail",
+        train_dates=train_df["game_date"],
+        train_tail_frac=train_tail_frac,
+        X_predict=X_ho,
     )
     preds_ho = {
-        k: np.asarray(models_ho[k].predict(X_ho), dtype=float) for k in models_ho
+        key: np.asarray(value, dtype=float) for key, value in pred_frame.items()
     }
 
     ho_metrics = score_quantile_fold(

@@ -74,9 +74,8 @@ def oof_prediction_frame(
 ) -> pd.DataFrame:
     """Validation-fold predictions plus realized minutes and points.
 
-    ``oof['minutes']`` is the walk-forward training target, which is the
-    capped rate for the rate model. Realized minutes are read from
-    ``identity``.
+    Realized minutes and points are read from ``identity``. The
+    walk-forward outcome column is not read here.
     """
     if oof.index.duplicated().any():
         raise ValueError("walk-forward frame has duplicate rows")
