@@ -255,11 +255,14 @@ def fit_hierarchy(
     )
 
 
-def _impute_row_features(row: object, medians: np.ndarray) -> np.ndarray:
+def _impute_row_features(
+    row: object,
+    medians: np.ndarray,
+) -> tuple[np.ndarray, int]:
     raw = np.array([getattr(row, name) for name in FEATURE_COLUMNS], dtype=float)
     missing = ~np.isfinite(raw)
     raw[missing] = medians[missing]
-    return raw
+    return raw, int(missing.sum())
 
 
 def _design_row(
@@ -316,7 +319,7 @@ def filter_training_states(
                 if state.season != row.season_year
                 else config.state_drift_sd**2
             )
-        raw = _impute_row_features(row, fit.medians)
+        raw, _ = _impute_row_features(row, fit.medians)
         base = _base_prediction(fit, raw, row.pos, row.team_id)
         updated = kalman_update(
             state.mean,
@@ -366,7 +369,7 @@ def predict_fold(
                 else config.state_drift_sd**2
             )
 
-        raw = _impute_row_features(row, fit.medians)
+        raw, imputed_predictors = _impute_row_features(row, fit.medians)
         base = _base_prediction(fit, raw, row.pos, row.team_id)
         points = float(row.pts)
         scale = predictive_scale(variance, fit.observation_variance)
@@ -426,6 +429,7 @@ def predict_fold(
                 "season_boundary": season_boundary,
                 "new_team_flag": bool(row.new_team_flag),
                 "rookie_flag": bool(row.rookie_flag),
+                "imputed_predictors": imputed_predictors,
             }
         )
         states[row.player_id] = DynamicState(
@@ -494,6 +498,12 @@ def walk_forward_trace(
                 "evaluation_season": evaluation_season,
                 **fit_audit,
                 "predicted_rows": int(len(fold_trace)),
+                "evaluation_imputed_feature_cells": int(
+                    fold_trace["imputed_predictors"].sum()
+                ),
+                "evaluation_rows_with_imputation": int(
+                    fold_trace["imputed_predictors"].gt(0).sum()
+                ),
             }
         )
     if not fold_traces:

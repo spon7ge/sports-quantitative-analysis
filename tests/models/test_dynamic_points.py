@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.models.dynamic_points import (
+    FEATURE_COLUMNS,
     DynamicPointsConfig,
     build_causal_frame,
     kalman_update,
@@ -281,3 +282,31 @@ def test_unknown_evaluation_season_is_rejected() -> None:
             evaluation_seasons=("2030-31",),
             config=DynamicPointsConfig(),
         )
+
+
+def test_evaluation_imputations_are_recorded_in_trace_and_fold_audit() -> None:
+    frame, _ = build_causal_frame(_games())
+    evaluation_mask = frame["season_year"].eq("2024-25")
+    target = frame.index[
+        evaluation_mask & frame["player_id"].eq(1)
+    ][0]
+    frame.loc[target, ["min_lag_1", "fta_lag_1"]] = np.nan
+    expected = (
+        frame.loc[evaluation_mask]
+        .sort_values(["game_date", "game_id", "player_id"], kind="mergesort")
+        .loc[:, FEATURE_COLUMNS]
+        .isna()
+        .sum(axis=1)
+        .to_numpy()
+    )
+
+    trace, audits = walk_forward_trace(
+        frame,
+        evaluation_seasons=("2024-25",),
+        config=DynamicPointsConfig(),
+    )
+
+    assert trace["imputed_predictors"].to_numpy().tolist() == expected.tolist()
+    assert audits[0]["evaluation_imputed_feature_cells"] == int(expected.sum())
+    assert audits[0]["evaluation_rows_with_imputation"] == int((expected > 0).sum())
+    assert "imputed_feature_cells" in audits[0]
