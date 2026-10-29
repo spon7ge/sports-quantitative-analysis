@@ -13,6 +13,9 @@ from src.models.evaluation import crps, probability_integral_transform
 
 _LEVELS = (0.50, 0.80, 0.90, 0.95)
 _TIER_LABELS = ("0-9", "10-29", "30-59", "60+")
+_CRPS_NODES, _CRPS_WEIGHTS = np.polynomial.legendre.leggauss(2048)
+_CRPS_PROBABILITIES = (_CRPS_NODES + 1.0) / 2.0
+_CRPS_WEIGHTS = _CRPS_WEIGHTS / 2.0
 
 
 def _validate_trace(
@@ -160,7 +163,12 @@ def _group_records(
 
 
 def variance_decomposition(trace: pd.DataFrame) -> pd.DataFrame:
-    """Report uncertainty shares and calibration by experience tier."""
+    """Report squared-scale shares and calibration by experience tier.
+
+    ``predictive_var`` is the variance of the latent Gaussian mixture and the
+    squared scale of the Student-t predictive law. It is not the finite-df
+    Student-t mathematical variance.
+    """
     caller = "variance_decomposition"
     _validate_trace(
         trace,
@@ -178,9 +186,11 @@ def variance_decomposition(trace: pd.DataFrame) -> pd.DataFrame:
     _validate_predictive_inputs(trace, caller=caller)
     if (trace[["state_var_before", "obs_var"]] <= 0).any().any():
         raise ValueError(f"{caller} variance components must be positive")
-    expected = trace["state_var_before"] + trace["obs_var"]
-    if not np.allclose(trace["predictive_var"], expected):
-        raise ValueError(f"{caller} predictive variance must equal its components")
+    squared_scale = trace["state_var_before"] + trace["obs_var"]
+    if not np.allclose(trace["predictive_var"], squared_scale):
+        raise ValueError(
+            f"{caller} predictive_var must equal the Student-t squared scale"
+        )
 
     frame = trace.copy()
     frame["games_tier"] = games_played_tier(frame["games_in_model_before"])
@@ -192,8 +202,10 @@ def variance_decomposition(trace: pd.DataFrame) -> pd.DataFrame:
             {
                 "games_tier": tier,
                 "n": len(subset),
-                "state_variance_share": float(state_share.mean()),
-                "observation_variance_share": float(observation_share.mean()),
+                "state_scale_squared_share": float(state_share.mean()),
+                "observation_scale_squared_share": float(
+                    observation_share.mean()
+                ),
                 "mean_z": float(subset["z"].mean()),
                 "sd_z": _sample_sd(subset["z"]),
                 **_coverage_fields(subset),
@@ -489,11 +501,37 @@ def _finite_statistic(
     return float(result)
 
 
+def _student_t_row_crps(
+    points: np.ndarray,
+    means: np.ndarray,
+    scales: np.ndarray,
+    dfs: np.ndarray,
+) -> np.ndarray:
+    """Deterministic Student-t CRPS via 2,048-node quantile integration.
+
+    CRPS equals twice the integral of pinball loss over quantile levels.
+    Gauss-Legendre nodes avoid the infinite Student-t endpoint quantiles while
+    providing deterministic accuracy without pretending synthetic values are
+    posterior draws.
+    """
+    quantiles = means[:, None] + scales[:, None] * stats.t.ppf(
+        _CRPS_PROBABILITIES[None, :],
+        dfs[:, None],
+    )
+    errors = points[:, None] - quantiles
+    losses = np.where(
+        errors >= 0,
+        _CRPS_PROBABILITIES[None, :] * errors,
+        (_CRPS_PROBABILITIES[None, :] - 1.0) * errors,
+    )
+    return 2.0 * (losses @ _CRPS_WEIGHTS)
+
+
 def posterior_draw_summary(
     trace: pd.DataFrame,
     draws: np.ndarray | None,
 ) -> dict[str, object]:
-    """Compare empirical posterior draws with the Gaussian approximation."""
+    """Compare posterior draws with Gaussian and analytic Student-t models."""
     if draws is None:
         return {
             "status": "skipped",
@@ -508,10 +546,13 @@ def posterior_draw_summary(
             "predictive_mean",
             "predictive_var",
             "z",
+            "df",
         ),
     )
     if (trace["predictive_var"] <= 0).any():
         raise ValueError(f"{caller} predictive_var must be positive")
+    if (trace["df"] <= 1).any():
+        raise ValueError(f"{caller} df must exceed 1 for finite CRPS")
     samples = np.asarray(draws, dtype=float)
     if (
         samples.ndim != 2
@@ -526,6 +567,7 @@ def posterior_draw_summary(
     points = trace["points"].to_numpy(dtype=float)
     z = trace["z"].to_numpy(dtype=float)
     sigma = np.sqrt(trace["predictive_var"].to_numpy(dtype=float))
+    dfs = trace["df"].to_numpy(dtype=float)
     expected_z = (
         points - trace["predictive_mean"].to_numpy(dtype=float)
     ) / sigma
@@ -540,22 +582,40 @@ def posterior_draw_summary(
     )
     draw_pit = probability_integral_transform(samples, points)
     gaussian_pit = stats.norm.cdf(z)
+    student_t_pit = stats.t.cdf(z, dfs)
     draw_crps = crps(samples, points)
     gaussian_crps = _finite_statistic(gaussian_row_crps, np.mean)
+    student_t_row_crps = _student_t_row_crps(
+        points,
+        trace["predictive_mean"].to_numpy(dtype=float),
+        sigma,
+        dfs,
+    )
+    student_t_crps = _finite_statistic(student_t_row_crps, np.mean)
     draw_pit_mean = _finite_statistic(draw_pit, np.mean)
     gaussian_pit_mean = _finite_statistic(gaussian_pit, np.mean)
+    student_t_pit_mean = _finite_statistic(student_t_pit, np.mean)
     draw_pit_sd = _sample_sd(draw_pit)
     gaussian_pit_sd = _sample_sd(gaussian_pit)
+    student_t_pit_sd = _sample_sd(student_t_pit)
     return {
         "n": len(trace),
         "n_draws": samples.shape[1],
         "draw_crps": draw_crps,
         "gaussian_crps": gaussian_crps,
         "crps_difference": draw_crps - gaussian_crps,
+        "student_t_crps": student_t_crps,
+        "draw_vs_student_t_crps_difference": draw_crps - student_t_crps,
         "draw_pit_mean": draw_pit_mean,
         "draw_pit_sd": draw_pit_sd,
         "gaussian_pit_mean": gaussian_pit_mean,
         "gaussian_pit_sd": gaussian_pit_sd,
+        "student_t_pit_mean": student_t_pit_mean,
+        "student_t_pit_sd": student_t_pit_sd,
         "pit_mean_difference": draw_pit_mean - gaussian_pit_mean,
         "pit_sd_difference": draw_pit_sd - gaussian_pit_sd,
+        "draw_vs_student_t_pit_mean_difference": (
+            draw_pit_mean - student_t_pit_mean
+        ),
+        "draw_vs_student_t_pit_sd_difference": draw_pit_sd - student_t_pit_sd,
     }

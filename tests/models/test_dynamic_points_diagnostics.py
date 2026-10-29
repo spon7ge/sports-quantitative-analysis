@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 from src.models.dynamic_points_diagnostics import (
     core_calibration,
     gain_summary,
@@ -13,6 +14,24 @@ from src.models.dynamic_points_diagnostics import (
     shrinkage_summary,
     variance_decomposition,
 )
+
+
+def _high_resolution_student_t_crps(
+    outcome: float,
+    mean: float,
+    scale: float,
+    df: float,
+) -> float:
+    """Independent midpoint-quantile reference for Student-t CRPS."""
+    probabilities = (np.arange(400_000, dtype=float) + 0.5) / 400_000
+    quantiles = mean + scale * stats.t.ppf(probabilities, df)
+    errors = outcome - quantiles
+    losses = np.where(
+        errors >= 0,
+        probabilities * errors,
+        (probabilities - 1.0) * errors,
+    )
+    return float(2.0 * losses.mean())
 
 
 def _trace() -> pd.DataFrame:
@@ -67,7 +86,8 @@ def test_games_played_tiers_have_requested_boundaries() -> None:
 def test_variance_shares_sum_to_one_and_keep_coverage() -> None:
     result = variance_decomposition(_trace())
     assert np.allclose(
-        result["state_variance_share"] + result["observation_variance_share"],
+        result["state_scale_squared_share"]
+        + result["observation_scale_squared_share"],
         1.0,
     )
     assert {
@@ -170,6 +190,52 @@ def test_draw_metrics_compare_empirical_and_gaussian_approximations() -> None:
     assert result["pit_mean_difference"] == pytest.approx(
         result["draw_pit_mean"] - result["gaussian_pit_mean"]
     )
+    assert result["draw_vs_student_t_crps_difference"] == pytest.approx(
+        result["draw_crps"] - result["student_t_crps"]
+    )
+    assert result["draw_vs_student_t_pit_mean_difference"] == pytest.approx(
+        result["draw_pit_mean"] - result["student_t_pit_mean"]
+    )
+
+
+def test_student_t_pit_uses_each_rows_exact_df_and_predictive_scale() -> None:
+    trace = _trace().iloc[:3].copy()
+    trace["df"] = [3.0, 7.0, 30.0]
+    trace["points"] = trace["predictive_mean"] + [0.0, 2.0, -3.0]
+    trace["innovation"] = trace["points"] - trace["predictive_mean"]
+    trace["z"] = trace["innovation"] / np.sqrt(trace["predictive_var"])
+    draws = np.tile(trace["predictive_mean"].to_numpy()[:, None], (1, 3))
+
+    result = posterior_draw_summary(trace, draws)
+
+    expected = stats.t.cdf(
+        trace["z"].to_numpy(),
+        trace["df"].to_numpy(),
+    )
+    assert result["student_t_pit_mean"] == pytest.approx(expected.mean(), abs=1e-12)
+    assert result["student_t_pit_sd"] == pytest.approx(
+        np.std(expected, ddof=1),
+        abs=1e-12,
+    )
+
+
+def test_student_t_crps_matches_high_resolution_quantile_reference() -> None:
+    trace = _trace().iloc[:1].copy()
+    trace["df"] = 5.0
+    trace["points"] = 23.0
+    trace["innovation"] = trace["points"] - trace["predictive_mean"]
+    trace["z"] = trace["innovation"] / np.sqrt(trace["predictive_var"])
+    draws = np.array([[19.0, 20.0, 21.0]])
+
+    result = posterior_draw_summary(trace, draws)
+
+    expected = _high_resolution_student_t_crps(
+        outcome=23.0,
+        mean=20.0,
+        scale=float(np.sqrt(trace.iloc[0]["predictive_var"])),
+        df=5.0,
+    )
+    assert result["student_t_crps"] == pytest.approx(expected, abs=2e-6)
 
 
 @pytest.mark.parametrize(

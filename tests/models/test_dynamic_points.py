@@ -113,6 +113,40 @@ def test_causal_features_use_only_prior_games() -> None:
     assert audit["output_rows"] == len(_games())
 
 
+def test_zero_minute_row_is_not_a_prediction_state_update_or_lag_source() -> None:
+    games = _games()
+    dnp = (
+        games["season_year"].eq("2024-25")
+        & games["player_id"].eq(1)
+        & games["game_id"].eq("2024-25-1")
+    )
+    games.loc[dnp, ["minutes", "fga", "fta", "pts"]] = [0.0, 99.0, 99.0, 0.0]
+
+    frame, audit = build_causal_frame(games)
+    trace, _ = walk_forward_trace(
+        frame,
+        evaluation_seasons=("2024-25",),
+        config=DynamicPointsConfig(),
+    )
+
+    player_frame = frame.loc[
+        frame["season_year"].eq("2024-25") & frame["player_id"].eq(1)
+    ].sort_values("game_date")
+    player_trace = trace.loc[trace["player_id"].eq(1)].sort_values("game_date")
+    assert player_frame["game_id"].tolist() == ["2024-25-0", "2024-25-2"]
+    assert player_frame.iloc[1]["min_lag_1"] == pytest.approx(
+        player_frame.iloc[0]["minutes"]
+    )
+    assert player_frame.iloc[1]["fga_lag_1"] == pytest.approx(
+        player_frame.iloc[0]["fga"]
+    )
+    assert player_trace["game_id"].tolist() == ["2024-25-0", "2024-25-2"]
+    assert player_trace.iloc[1]["games_in_model_before"] == (
+        player_trace.iloc[0]["games_in_model_before"] + 1
+    )
+    assert audit["nonpositive_minute_rows_removed"] == 1
+
+
 def test_opponent_defense_prior_excludes_current_game() -> None:
     games = _games()
     current_game = games["game_id"].eq("2023-24-0")
@@ -155,6 +189,51 @@ def test_malformed_numeric_source_values_are_rejected(column: str) -> None:
     games.loc[games.index[0], column] = "not-a-number"
 
     with pytest.raises(ValueError, match=rf"{column}.*1"):
+        build_causal_frame(games)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("pts", None),
+        ("pts", ""),
+        ("pts", np.inf),
+        ("game_id", None),
+        ("game_id", " "),
+        ("game_id", np.inf),
+        ("player_id", None),
+        ("player_id", ""),
+        ("player_id", -np.inf),
+        ("team_id", None),
+        ("team_id", "\t"),
+        ("team_id", np.inf),
+        ("opp_team_id", None),
+        ("opp_team_id", ""),
+        ("opp_team_id", -np.inf),
+    ],
+)
+def test_required_outcome_and_ids_reject_invalid_values(
+    column: str,
+    value: object,
+) -> None:
+    games = _games()
+    games[column] = games[column].astype(object)
+    games.loc[games.index[0], column] = value
+
+    with pytest.raises(ValueError, match=column):
+        build_causal_frame(games)
+
+
+@pytest.mark.parametrize("column", ["minutes", "fga", "fta", "team_def_rating"])
+@pytest.mark.parametrize("value", [np.inf, -np.inf])
+def test_numeric_sources_reject_nonfinite_values(
+    column: str,
+    value: float,
+) -> None:
+    games = _games()
+    games.loc[games.index[0], column] = value
+
+    with pytest.raises(ValueError, match=column):
         build_causal_frame(games)
 
 
@@ -280,6 +359,38 @@ def test_unknown_evaluation_season_is_rejected() -> None:
         walk_forward_trace(
             frame,
             evaluation_seasons=("2030-31",),
+            config=DynamicPointsConfig(),
+        )
+
+
+def test_walk_forward_rejects_duplicate_player_game_input() -> None:
+    frame, _ = build_causal_frame(_games())
+    duplicate = pd.concat([frame, frame.iloc[[0]]], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate player/game"):
+        walk_forward_trace(
+            duplicate,
+            evaluation_seasons=("2024-25",),
+            config=DynamicPointsConfig(),
+        )
+
+
+def test_walk_forward_rejects_empty_evaluation_seasons() -> None:
+    frame, _ = build_causal_frame(_games())
+    with pytest.raises(ValueError, match="evaluation_seasons"):
+        walk_forward_trace(
+            frame,
+            evaluation_seasons=(),
+            config=DynamicPointsConfig(),
+        )
+
+
+def test_walk_forward_rejects_fold_without_eligible_predictions() -> None:
+    frame, _ = build_causal_frame(_games())
+    frame.loc[frame["season_year"].eq("2024-25"), "minutes"] = 0.0
+    with pytest.raises(ValueError, match="no eligible predictions"):
+        walk_forward_trace(
+            frame,
+            evaluation_seasons=("2024-25",),
             config=DynamicPointsConfig(),
         )
 

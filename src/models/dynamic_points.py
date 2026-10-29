@@ -35,6 +35,7 @@ REQUIRED_RAW_COLUMNS = {
     "team_def_rating",
 }
 _NUMERIC_SOURCE_COLUMNS = ("minutes", "fga", "fta", "team_def_rating")
+_REQUIRED_ID_COLUMNS = ("game_id", "player_id", "team_id", "opp_team_id")
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,11 @@ def kalman_update(
 
 
 def predictive_scale(state_variance: float, observation_variance: float) -> float:
+    """Return the Student-t scale from its latent Gaussian variance terms.
+
+    The squared result is not the mathematical variance of a finite-df
+    Student-t distribution.
+    """
     variances = (state_variance, observation_variance)
     if any(value <= 0 or not math.isfinite(value) for value in variances):
         raise ValueError("state and observation variances must be positive and finite")
@@ -139,6 +145,18 @@ def predictive_scale(state_variance: float, observation_variance: float) -> floa
 def _category_map(values: pd.Series) -> dict[Any, int]:
     unique = sorted(values.dropna().unique().tolist())
     return {value: index for index, value in enumerate(unique)}
+
+
+def _positive_minute_rows(frame: pd.DataFrame, *, caller: str) -> pd.DataFrame:
+    if "minutes" not in frame:
+        raise ValueError(f"{caller} requires minutes")
+    minutes = pd.to_numeric(frame["minutes"], errors="coerce")
+    invalid = frame["minutes"].notna() & (
+        minutes.isna() | ~np.isfinite(minutes)
+    )
+    if invalid.any():
+        raise ValueError(f"{caller} minutes must be finite or missing")
+    return frame.loc[minutes.gt(0)].copy()
 
 
 def _one_hot(
@@ -168,13 +186,7 @@ def fit_hierarchy(
     if missing:
         raise ValueError(f"missing hierarchy columns: {sorted(missing)}")
 
-    minutes = pd.to_numeric(frame["minutes"], errors="coerce")
-    invalid_minutes = frame["minutes"].notna() & (
-        minutes.isna() | ~np.isfinite(minutes)
-    )
-    if invalid_minutes.any():
-        raise ValueError("training minutes must be finite")
-    usable = frame.loc[minutes.gt(0)].copy()
+    usable = _positive_minute_rows(frame, caller="hierarchy")
     if usable.empty:
         raise ValueError("hierarchy requires positive-minute training rows")
 
@@ -304,7 +316,8 @@ def filter_training_states(
 ) -> dict[object, DynamicState]:
     states: dict[object, DynamicState] = {}
     initial_variance = fit.observation_variance / config.player_prior_precision
-    ordered = frame.sort_values(
+    eligible = _positive_minute_rows(frame, caller="filter_training_states")
+    ordered = eligible.sort_values(
         ["game_date", "game_id", "player_id"], kind="mergesort"
     )
     for row in ordered.itertuples(index=False):
@@ -348,7 +361,8 @@ def predict_fold(
     end_training = dict(training_states)
     seen_in_evaluation: set[object] = set()
     records: list[dict[str, object]] = []
-    ordered = evaluation.sort_values(
+    eligible = _positive_minute_rows(evaluation, caller="predict_fold")
+    ordered = eligible.sort_values(
         ["game_date", "game_id", "player_id"], kind="mergesort"
     )
 
@@ -421,6 +435,8 @@ def predict_fold(
                     else initial_variance
                 ),
                 "obs_var": fit.observation_variance,
+                # Canonical trace name: latent Gaussian variance and,
+                # equivalently, the squared Student-t predictive scale.
                 "predictive_var": variance + fit.observation_variance,
                 "kalman_gain": updated.gain,
                 "games_in_model_before": state.games,
@@ -458,6 +474,10 @@ def walk_forward_trace(
         raise ValueError(f"missing walk-forward columns: {sorted(missing)}")
     if frame.empty:
         raise ValueError("walk-forward frame must not be empty")
+    if not evaluation_seasons:
+        raise ValueError("evaluation_seasons must not be empty")
+    if frame.duplicated(["player_id", "game_id"]).any():
+        raise ValueError("duplicate player/game rows")
 
     season_order = (
         frame.groupby("season_year", sort=False)["game_date"]
@@ -491,6 +511,10 @@ def walk_forward_trace(
         fit, fit_audit = fit_hierarchy(train, config)
         training_states = filter_training_states(fit, train, config)
         fold_trace = predict_fold(fit, evaluation, training_states, config)
+        if fold_trace.empty:
+            raise ValueError(
+                f"evaluation season {evaluation_season} yields no eligible predictions"
+            )
         fold_traces.append(fold_trace)
         fold_audits.append(
             {
@@ -518,6 +542,30 @@ def build_causal_frame(
     if missing:
         raise ValueError(f"missing required columns: {sorted(missing)}")
     frame = games.copy()
+    for column in _REQUIRED_ID_COLUMNS:
+        source = frame[column]
+        blank = source.map(
+            lambda value: isinstance(value, str) and not value.strip()
+        )
+        numeric_nonfinite = source.map(
+            lambda value: (
+                isinstance(value, (int, float, np.integer, np.floating))
+                and not isinstance(value, (bool, np.bool_))
+                and not np.isfinite(value)
+            )
+        )
+        invalid_count = int((source.isna() | blank | numeric_nonfinite).sum())
+        if invalid_count:
+            raise ValueError(
+                f"{column} contains {invalid_count} null, blank, or nonfinite values"
+            )
+    points = pd.to_numeric(frame["pts"], errors="coerce")
+    invalid_points = points.isna() | ~np.isfinite(points)
+    if invalid_points.any():
+        raise ValueError(
+            f"pts contains {int(invalid_points.sum())} null, blank, or nonfinite values"
+        )
+    frame["pts"] = points
     source_missing_counts: dict[str, int] = {}
     for column in _NUMERIC_SOURCE_COLUMNS:
         source = frame[column]
@@ -534,8 +582,13 @@ def build_causal_frame(
         frame[column] = numeric
     frame["game_date"] = pd.to_datetime(frame["game_date"], errors="raise")
     frame = frame.loc[frame["season_type"].eq("Regular Season")].copy()
+    non_regular_season_rows_removed = int(len(games) - len(frame))
     if frame.duplicated(["player_id", "game_id"]).any():
         raise ValueError("duplicate player/game rows")
+    nonpositive_minutes = frame["minutes"].notna() & frame["minutes"].le(0)
+    nonpositive_minute_rows_removed = int(nonpositive_minutes.sum())
+    missing_minute_rows_removed = int(frame["minutes"].isna().sum())
+    frame = frame.loc[frame["minutes"].gt(0)].copy()
     frame = frame.sort_values(
         ["player_id", "game_date", "game_id"], kind="mergesort"
     )
@@ -586,7 +639,9 @@ def build_causal_frame(
     )
     return frame, {
         "input_rows": int(len(games)),
-        "non_regular_season_rows_removed": int(len(games) - len(frame)),
+        "non_regular_season_rows_removed": non_regular_season_rows_removed,
+        "nonpositive_minute_rows_removed": nonpositive_minute_rows_removed,
+        "missing_minute_rows_removed": missing_minute_rows_removed,
         "output_rows": int(len(frame)),
         **source_missing_counts,
     }
