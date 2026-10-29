@@ -8,6 +8,7 @@ from src.models.dynamic_points import (
     build_causal_frame,
     kalman_update,
     predictive_scale,
+    walk_forward_trace,
 )
 
 
@@ -28,7 +29,7 @@ def _games() -> pd.DataFrame:
                         "season_year": season,
                         "season_type": "Regular Season",
                         "game_date": pd.Timestamp(start)
-                        + pd.Timedelta(days=game * 2),
+                        + pd.Timedelta(days=game * (game + 1)),
                         "game_id": f"{season}-{game}",
                         "player_id": player_id,
                         "player_name": f"Player {player_id}",
@@ -184,3 +185,99 @@ def test_non_regular_season_removal_is_truthfully_audited() -> None:
 def test_config_rejects_nonpositive_uncertainty() -> None:
     with pytest.raises(ValueError, match="positive"):
         DynamicPointsConfig(state_drift_sd=0.0)
+
+
+def test_walk_forward_is_out_of_sample_and_predicts_before_update() -> None:
+    frame, _ = build_causal_frame(_games())
+    trace, audits = walk_forward_trace(
+        frame,
+        evaluation_seasons=("2024-25",),
+        config=DynamicPointsConfig(train_window_seasons=2),
+    )
+    assert set(trace["season_year"]) == {"2024-25"}
+    assert audits[0]["train_seasons"] == ("2022-23", "2023-24")
+    assert audits[0]["evaluation_season"] == "2024-25"
+    first = trace.sort_values(["game_date", "game_id", "player_id"]).iloc[0]
+    expected_innovation = first["points"] - first["predictive_mean"]
+    assert first["innovation"] == pytest.approx(expected_innovation)
+    expected_after = (
+        first["state_before"] + first["kalman_gain"] * first["innovation"]
+    )
+    assert first["state_after"] == pytest.approx(expected_after)
+
+
+def test_offseason_variance_is_added_once_without_moving_mean() -> None:
+    frame, _ = build_causal_frame(_games())
+    config = DynamicPointsConfig(
+        state_drift_sd=0.5,
+        offseason_drift_sd=2.0,
+        train_window_seasons=2,
+    )
+    trace, _ = walk_forward_trace(
+        frame,
+        evaluation_seasons=("2024-25",),
+        config=config,
+    )
+    player = trace.loc[trace["player_id"].eq(1)].sort_values("game_date")
+    first, second = player.iloc[0], player.iloc[1]
+    assert bool(first["season_boundary"])
+    assert first["state_before"] == pytest.approx(first["state_end_training"])
+    assert first["state_var_before"] == pytest.approx(
+        first["state_var_end_training"] + config.offseason_drift_sd**2
+    )
+    assert not bool(second["season_boundary"])
+    assert second["state_var_before"] == pytest.approx(
+        first["state_var_after"] + config.state_drift_sd**2
+    )
+
+
+def test_trace_contains_finite_variance_and_identity_columns() -> None:
+    frame, _ = build_causal_frame(_games())
+    trace, _ = walk_forward_trace(
+        frame,
+        evaluation_seasons=("2024-25",),
+        config=DynamicPointsConfig(),
+    )
+    required = {
+        "team_id",
+        "opp_team_id",
+        "position",
+        "state_var_before",
+        "obs_var",
+        "predictive_var",
+        "games_in_model_before",
+        "returning_player",
+        "new_team_flag",
+        "rookie_flag",
+        "z",
+        "pit",
+        "df",
+    }
+    assert required.issubset(trace.columns)
+    finite_numeric = [
+        "team_id",
+        "opp_team_id",
+        "state_var_before",
+        "obs_var",
+        "predictive_var",
+        "games_in_model_before",
+        "z",
+        "pit",
+        "df",
+    ]
+    assert np.isfinite(trace[finite_numeric]).all().all()
+    assert (trace["predictive_var"] > 0).all()
+    assert np.allclose(
+        trace["predictive_var"],
+        trace["state_var_before"] + trace["obs_var"],
+    )
+
+
+def test_unknown_evaluation_season_is_rejected() -> None:
+    frame, _ = build_causal_frame(_games())
+    with pytest.raises(ValueError, match="evaluation season"):
+        walk_forward_trace(
+            frame,
+            evaluation_seasons=("2030-31",),
+            config=DynamicPointsConfig(),
+        )
