@@ -66,6 +66,38 @@ def test_predictive_scale_adds_variances() -> None:
     assert predictive_scale(9.0, 16.0) == pytest.approx(5.0)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"mean": np.nan}, "state inputs"),
+        ({"observation": np.inf}, "state inputs"),
+        ({"base_mean": -np.inf}, "state inputs"),
+        ({"variance": np.nan}, "variances"),
+        ({"observation_variance": np.inf}, "variances"),
+    ],
+)
+def test_kalman_update_rejects_nonfinite_inputs(
+    kwargs: dict[str, float],
+    match: str,
+) -> None:
+    inputs = {
+        "mean": 3.0,
+        "variance": 4.0,
+        "observation": 20.0,
+        "base_mean": 12.0,
+        "observation_variance": 16.0,
+    }
+    inputs.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        kalman_update(**inputs)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_predictive_scale_rejects_nonfinite_variances(value: float) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        predictive_scale(value, 16.0)
+
+
 def test_causal_features_use_only_prior_games() -> None:
     frame, audit = build_causal_frame(_games())
     player = frame.loc[frame["player_id"].eq(1)].sort_values("game_date")
@@ -77,6 +109,19 @@ def test_causal_features_use_only_prior_games() -> None:
     assert player.iloc[1]["fta_lag_1"] == pytest.approx(player.iloc[0]["fta"])
     assert audit["input_rows"] == len(_games())
     assert audit["output_rows"] == len(_games())
+
+
+def test_opponent_defense_prior_excludes_current_game() -> None:
+    games = _games()
+    current_game = games["game_id"].eq("2023-24-0")
+    games.loc[current_game & games["team_id"].eq(20), "team_def_rating"] = 999.0
+
+    frame, _ = build_causal_frame(games)
+
+    player_game = frame.loc[
+        frame["player_id"].eq(1) & frame["game_id"].eq("2023-24-0")
+    ].iloc[0]
+    assert player_game["opp_def_prior"] == pytest.approx(113.0)
 
 
 def test_team_and_model_rookie_flags_follow_prior_history() -> None:
@@ -96,6 +141,44 @@ def test_duplicate_player_game_is_rejected() -> None:
     duplicate = pd.concat([_games(), _games().iloc[[0]]], ignore_index=True)
     with pytest.raises(ValueError, match="duplicate player/game"):
         build_causal_frame(duplicate)
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["minutes", "fga", "fta", "team_def_rating"],
+)
+def test_malformed_numeric_source_values_are_rejected(column: str) -> None:
+    games = _games()
+    games[column] = games[column].astype(object)
+    games.loc[games.index[0], column] = "not-a-number"
+
+    with pytest.raises(ValueError, match=rf"{column}.*1"):
+        build_causal_frame(games)
+
+
+def test_legitimate_numeric_missing_values_are_audited() -> None:
+    games = _games()
+    games.loc[games.index[0], "minutes"] = np.nan
+    games.loc[games.index[1], "fga"] = None
+    games.loc[games.index[2], "fta"] = pd.NA
+    games.loc[games.index[3], "team_def_rating"] = np.nan
+
+    _, audit = build_causal_frame(games)
+
+    assert audit["minutes_missing_values"] == 1
+    assert audit["fga_missing_values"] == 1
+    assert audit["fta_missing_values"] == 1
+    assert audit["team_def_rating_missing_values"] == 1
+
+
+def test_non_regular_season_removal_is_truthfully_audited() -> None:
+    games = _games()
+    games.loc[games.index[0], "season_type"] = "Playoffs"
+
+    _, audit = build_causal_frame(games)
+
+    assert audit["non_regular_season_rows_removed"] == 1
+    assert "postseason_rows_removed" not in audit
 
 
 def test_config_rejects_nonpositive_uncertainty() -> None:

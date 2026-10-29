@@ -33,6 +33,7 @@ REQUIRED_RAW_COLUMNS = {
     "pts",
     "team_def_rating",
 }
+_NUMERIC_SOURCE_COLUMNS = ("minutes", "fga", "fta", "team_def_rating")
 
 
 @dataclass(frozen=True)
@@ -110,8 +111,13 @@ def kalman_update(
     base_mean: float,
     observation_variance: float,
 ) -> KalmanUpdate:
-    if variance <= 0 or observation_variance <= 0:
-        raise ValueError("state and observation variances must be positive")
+    variances = (variance, observation_variance)
+    if any(value <= 0 or not math.isfinite(value) for value in variances):
+        raise ValueError("state and observation variances must be positive and finite")
+    if any(
+        not math.isfinite(value) for value in (mean, observation, base_mean)
+    ):
+        raise ValueError("state inputs must be finite")
     innovation = observation - (base_mean + mean)
     gain = variance / (variance + observation_variance)
     return KalmanUpdate(
@@ -123,8 +129,9 @@ def kalman_update(
 
 
 def predictive_scale(state_variance: float, observation_variance: float) -> float:
-    if state_variance <= 0 or observation_variance <= 0:
-        raise ValueError("state and observation variances must be positive")
+    variances = (state_variance, observation_variance)
+    if any(value <= 0 or not math.isfinite(value) for value in variances):
+        raise ValueError("state and observation variances must be positive and finite")
     return math.sqrt(state_variance + observation_variance)
 
 
@@ -135,6 +142,20 @@ def build_causal_frame(
     if missing:
         raise ValueError(f"missing required columns: {sorted(missing)}")
     frame = games.copy()
+    source_missing_counts: dict[str, int] = {}
+    for column in _NUMERIC_SOURCE_COLUMNS:
+        source = frame[column]
+        source_missing_counts[f"{column}_missing_values"] = int(
+            source.isna().sum()
+        )
+        numeric = pd.to_numeric(source, errors="coerce")
+        invalid = source.notna() & (numeric.isna() | ~np.isfinite(numeric))
+        invalid_count = int(invalid.sum())
+        if invalid_count:
+            raise ValueError(
+                f"{column} contains {invalid_count} invalid numeric values"
+            )
+        frame[column] = numeric
     frame["game_date"] = pd.to_datetime(frame["game_date"], errors="raise")
     frame = frame.loc[frame["season_type"].eq("Regular Season")].copy()
     if frame.duplicated(["player_id", "game_id"]).any():
@@ -147,8 +168,7 @@ def build_causal_frame(
         ("fga", "fga_lag_1"),
         ("fta", "fta_lag_1"),
     ):
-        numeric = pd.to_numeric(frame[source], errors="coerce")
-        frame[target] = numeric.groupby(frame["player_id"], sort=False).shift(1)
+        frame[target] = frame.groupby("player_id", sort=False)[source].shift(1)
     frame["rest_days"] = (
         frame.groupby(["player_id", "season_year"], sort=False)["game_date"]
         .diff()
@@ -162,7 +182,7 @@ def build_causal_frame(
         .drop_duplicates(["team_id", "game_id"])
         .sort_values(["team_id", "game_date", "game_id"], kind="mergesort")
     )
-    defense = pd.to_numeric(teams["team_def_rating"], errors="coerce")
+    defense = teams["team_def_rating"]
     prior = defense.groupby(teams["team_id"], sort=False).shift(1)
     teams["opp_def_prior"] = (
         prior.groupby(teams["team_id"], sort=False)
@@ -190,6 +210,7 @@ def build_causal_frame(
     )
     return frame, {
         "input_rows": int(len(games)),
-        "postseason_rows_removed": int(len(games) - len(frame)),
+        "non_regular_season_rows_removed": int(len(games) - len(frame)),
         "output_rows": int(len(frame)),
+        **source_missing_counts,
     }
