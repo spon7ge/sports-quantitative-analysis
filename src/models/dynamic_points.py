@@ -103,6 +103,7 @@ class HierarchicalFit:
 
     @property
     def observation_variance(self) -> float:
+        """Posterior-mean observation variance used as a plug-in scale term."""
         return self.beta / (self.alpha - 1.0)
 
 
@@ -131,10 +132,13 @@ def kalman_update(
 
 
 def predictive_scale(state_variance: float, observation_variance: float) -> float:
-    """Return the Student-t scale from its latent Gaussian variance terms.
+    """Return an approximate plug-in Student-t predictive scale.
 
-    The squared result is not the mathematical variance of a finite-df
-    Student-t distribution.
+    The hierarchy supplies ``observation_variance`` as the posterior mean
+    ``beta / (alpha - 1)``, not the exact conjugate Student-t scale term
+    ``beta / alpha``. Adding filtered state uncertainty is also approximate.
+    The squared result is therefore neither an exact Student-t scale nor the
+    mathematical variance of a finite-df Student-t distribution.
     """
     variances = (state_variance, observation_variance)
     if any(value <= 0 or not math.isfinite(value) for value in variances):
@@ -435,8 +439,8 @@ def predict_fold(
                     else initial_variance
                 ),
                 "obs_var": fit.observation_variance,
-                # Canonical trace name: latent Gaussian variance and,
-                # equivalently, the squared Student-t predictive scale.
+                # Compatibility name: approximate plug-in Student-t squared
+                # scale using beta / (alpha - 1) plus filtered state variance.
                 "predictive_var": variance + fit.observation_variance,
                 "kalman_gain": updated.gain,
                 "games_in_model_before": state.games,

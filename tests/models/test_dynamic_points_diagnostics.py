@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
+from src.models import dynamic_points_diagnostics
 from src.models.dynamic_points_diagnostics import (
     core_calibration,
     gain_summary,
@@ -86,8 +87,8 @@ def test_games_played_tiers_have_requested_boundaries() -> None:
 def test_variance_shares_sum_to_one_and_keep_coverage() -> None:
     result = variance_decomposition(_trace())
     assert np.allclose(
-        result["state_scale_squared_share"]
-        + result["observation_scale_squared_share"],
+        result["state_plugin_scale_squared_share"]
+        + result["observation_plugin_scale_squared_share"],
         1.0,
     )
     assert {
@@ -236,6 +237,59 @@ def test_student_t_crps_matches_high_resolution_quantile_reference() -> None:
         df=5.0,
     )
     assert result["student_t_crps"] == pytest.approx(expected, abs=2e-6)
+
+
+def test_student_t_crps_processes_rows_in_bounded_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk_limit = dynamic_points_diagnostics._STUDENT_T_CRPS_CHUNK_ROWS
+    n_rows = 2 * chunk_limit + 17
+    processed_sizes: list[int] = []
+    evaluate_chunk = dynamic_points_diagnostics._student_t_crps_chunk
+
+    def record_chunk(
+        points: np.ndarray,
+        means: np.ndarray,
+        scales: np.ndarray,
+        dfs: np.ndarray,
+    ) -> np.ndarray:
+        assert len(points) == len(means) == len(scales) == len(dfs)
+        processed_sizes.append(len(points))
+        return evaluate_chunk(points, means, scales, dfs)
+
+    monkeypatch.setattr(
+        dynamic_points_diagnostics,
+        "_student_t_crps_chunk",
+        record_chunk,
+    )
+    points = np.linspace(10.0, 30.0, n_rows)
+    means = np.linspace(12.0, 28.0, n_rows)
+    scales = np.linspace(2.0, 8.0, n_rows)
+    dfs = np.linspace(3.0, 50.0, n_rows)
+
+    result = dynamic_points_diagnostics._student_t_row_crps(
+        points,
+        means,
+        scales,
+        dfs,
+    )
+    reference_chunk_rows = 7
+    reference = np.concatenate(
+        [
+            evaluate_chunk(
+                points[start : start + reference_chunk_rows],
+                means[start : start + reference_chunk_rows],
+                scales[start : start + reference_chunk_rows],
+                dfs[start : start + reference_chunk_rows],
+            )
+            for start in range(0, n_rows, reference_chunk_rows)
+        ]
+    )
+
+    assert result.shape == (n_rows,)
+    assert processed_sizes == [chunk_limit, chunk_limit, 17]
+    assert max(processed_sizes) <= chunk_limit
+    np.testing.assert_allclose(result, reference, rtol=1e-14, atol=1e-14)
 
 
 @pytest.mark.parametrize(

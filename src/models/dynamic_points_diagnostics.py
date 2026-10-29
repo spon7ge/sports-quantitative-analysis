@@ -16,6 +16,9 @@ _TIER_LABELS = ("0-9", "10-29", "30-59", "60+")
 _CRPS_NODES, _CRPS_WEIGHTS = np.polynomial.legendre.leggauss(2048)
 _CRPS_PROBABILITIES = (_CRPS_NODES + 1.0) / 2.0
 _CRPS_WEIGHTS = _CRPS_WEIGHTS / 2.0
+# At 2,048 quadrature nodes, 128 float64 rows occupy 2 MiB per matrix.
+# Keeping chunks this small bounds the several temporary matrices used below.
+_STUDENT_T_CRPS_CHUNK_ROWS = 128
 
 
 def _validate_trace(
@@ -165,9 +168,11 @@ def _group_records(
 def variance_decomposition(trace: pd.DataFrame) -> pd.DataFrame:
     """Report squared-scale shares and calibration by experience tier.
 
-    ``predictive_var`` is the variance of the latent Gaussian mixture and the
-    squared scale of the Student-t predictive law. It is not the finite-df
-    Student-t mathematical variance.
+    ``predictive_var`` is a plug-in squared scale for an approximate Student-t
+    predictive law. Its observation term uses ``beta / (alpha - 1)`` rather
+    than the exact conjugate ``beta / alpha`` scale, and adding filtered state
+    uncertainty is another approximation. It is not the finite-df Student-t
+    mathematical variance.
     """
     caller = "variance_decomposition"
     _validate_trace(
@@ -202,8 +207,8 @@ def variance_decomposition(trace: pd.DataFrame) -> pd.DataFrame:
             {
                 "games_tier": tier,
                 "n": len(subset),
-                "state_scale_squared_share": float(state_share.mean()),
-                "observation_scale_squared_share": float(
+                "state_plugin_scale_squared_share": float(state_share.mean()),
+                "observation_plugin_scale_squared_share": float(
                     observation_share.mean()
                 ),
                 "mean_z": float(subset["z"].mean()),
@@ -501,19 +506,13 @@ def _finite_statistic(
     return float(result)
 
 
-def _student_t_row_crps(
+def _student_t_crps_chunk(
     points: np.ndarray,
     means: np.ndarray,
     scales: np.ndarray,
     dfs: np.ndarray,
 ) -> np.ndarray:
-    """Deterministic Student-t CRPS via 2,048-node quantile integration.
-
-    CRPS equals twice the integral of pinball loss over quantile levels.
-    Gauss-Legendre nodes avoid the infinite Student-t endpoint quantiles while
-    providing deterministic accuracy without pretending synthetic values are
-    posterior draws.
-    """
+    """Evaluate one bounded chunk of plug-in Student-t row CRPS values."""
     quantiles = means[:, None] + scales[:, None] * stats.t.ppf(
         _CRPS_PROBABILITIES[None, :],
         dfs[:, None],
@@ -527,11 +526,36 @@ def _student_t_row_crps(
     return 2.0 * (losses @ _CRPS_WEIGHTS)
 
 
+def _student_t_row_crps(
+    points: np.ndarray,
+    means: np.ndarray,
+    scales: np.ndarray,
+    dfs: np.ndarray,
+) -> np.ndarray:
+    """Deterministic plug-in Student-t CRPS in 128-row bounded chunks.
+
+    CRPS equals twice the integral of pinball loss over quantile levels.
+    Gauss-Legendre nodes avoid the infinite Student-t endpoint quantiles while
+    providing deterministic accuracy without pretending synthetic values are
+    posterior draws.
+    """
+    values = np.empty(len(points), dtype=float)
+    for start in range(0, len(points), _STUDENT_T_CRPS_CHUNK_ROWS):
+        stop = min(start + _STUDENT_T_CRPS_CHUNK_ROWS, len(points))
+        values[start:stop] = _student_t_crps_chunk(
+            points[start:stop],
+            means[start:stop],
+            scales[start:stop],
+            dfs[start:stop],
+        )
+    return values
+
+
 def posterior_draw_summary(
     trace: pd.DataFrame,
     draws: np.ndarray | None,
 ) -> dict[str, object]:
-    """Compare posterior draws with Gaussian and analytic Student-t models."""
+    """Compare draws with Gaussian and approximate plug-in Student-t models."""
     if draws is None:
         return {
             "status": "skipped",
