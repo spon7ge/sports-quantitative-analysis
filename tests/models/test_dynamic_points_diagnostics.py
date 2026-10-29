@@ -109,6 +109,21 @@ def test_group_flags_respect_minimum_sample() -> None:
     assert not result["actionable_flag"].any()
 
 
+def test_group_calibration_defaults_to_30_minimum_samples() -> None:
+    result = group_calibration(_trace().iloc[:20], "position")
+    assert (result["n"] < 30).all()
+    assert result["low_sample"].all()
+    assert not result["actionable_flag"].any()
+
+
+@pytest.mark.parametrize("min_n", [True, 1, 2.5])
+def test_group_calibration_rejects_invalid_minimum_samples(
+    min_n: object,
+) -> None:
+    with pytest.raises(ValueError, match="integer at least 2"):
+        group_calibration(_trace(), "position", min_n=min_n)  # type: ignore[arg-type]
+
+
 def test_core_metrics_name_sample_and_seasons() -> None:
     result = core_calibration(_trace())
     assert result["n"] == 80

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from numbers import Integral
 
 import numpy as np
 import pandas as pd
@@ -341,11 +342,15 @@ def offseason_summary(
 def group_calibration(
     trace: pd.DataFrame,
     group_column: str,
-    min_n: int,
+    min_n: int = 30,
 ) -> pd.DataFrame:
     """Report calibration and actionable flags for an arbitrary trace slice."""
-    if min_n < 2:
-        raise ValueError("group_calibration min_n must be at least 2")
+    if (
+        isinstance(min_n, bool)
+        or not isinstance(min_n, Integral)
+        or min_n < 2
+    ):
+        raise ValueError("group_calibration min_n must be an integer at least 2")
     caller = "group_calibration"
     _validate_trace(
         trace,
