@@ -117,9 +117,7 @@ def kalman_update(
     variances = (variance, observation_variance)
     if any(value <= 0 or not math.isfinite(value) for value in variances):
         raise ValueError("state and observation variances must be positive and finite")
-    if any(
-        not math.isfinite(value) for value in (mean, observation, base_mean)
-    ):
+    if any(not math.isfinite(value) for value in (mean, observation, base_mean)):
         raise ValueError("state inputs must be finite")
     innovation = observation - (base_mean + mean)
     gain = variance / (variance + observation_variance)
@@ -155,9 +153,7 @@ def _positive_minute_rows(frame: pd.DataFrame, *, caller: str) -> pd.DataFrame:
     if "minutes" not in frame:
         raise ValueError(f"{caller} requires minutes")
     minutes = pd.to_numeric(frame["minutes"], errors="coerce")
-    invalid = frame["minutes"].notna() & (
-        minutes.isna() | ~np.isfinite(minutes)
-    )
+    invalid = frame["minutes"].notna() & (minutes.isna() | ~np.isfinite(minutes))
     if invalid.any():
         raise ValueError(f"{caller} minutes must be finite or missing")
     return frame.loc[minutes.gt(0)].copy()
@@ -506,9 +502,7 @@ def walk_forward_trace(
         if set(train_seasons) & {evaluation_season}:
             raise AssertionError("evaluation season leaked into training")
         train = frame.loc[frame["season_year"].astype(str).isin(train_seasons)]
-        evaluation = frame.loc[
-            frame["season_year"].astype(str).eq(evaluation_season)
-        ]
+        evaluation = frame.loc[frame["season_year"].astype(str).eq(evaluation_season)]
         if train["game_date"].max() >= evaluation["game_date"].min():
             raise AssertionError("training dates must precede evaluation dates")
 
@@ -548,9 +542,7 @@ def build_causal_frame(
     frame = games.copy()
     for column in _REQUIRED_ID_COLUMNS:
         source = frame[column]
-        blank = source.map(
-            lambda value: isinstance(value, str) and not value.strip()
-        )
+        blank = source.map(lambda value: isinstance(value, str) and not value.strip())
         numeric_nonfinite = source.map(
             lambda value: (
                 isinstance(value, (int, float, np.integer, np.floating))
@@ -573,9 +565,7 @@ def build_causal_frame(
     source_missing_counts: dict[str, int] = {}
     for column in _NUMERIC_SOURCE_COLUMNS:
         source = frame[column]
-        source_missing_counts[f"{column}_missing_values"] = int(
-            source.isna().sum()
-        )
+        source_missing_counts[f"{column}_missing_values"] = int(source.isna().sum())
         numeric = pd.to_numeric(source, errors="coerce")
         invalid = source.notna() & (numeric.isna() | ~np.isfinite(numeric))
         invalid_count = int(invalid.sum())
@@ -593,9 +583,7 @@ def build_causal_frame(
     nonpositive_minute_rows_removed = int(nonpositive_minutes.sum())
     missing_minute_rows_removed = int(frame["minutes"].isna().sum())
     frame = frame.loc[frame["minutes"].gt(0)].copy()
-    frame = frame.sort_values(
-        ["player_id", "game_date", "game_id"], kind="mergesort"
-    )
+    frame = frame.sort_values(["player_id", "game_date", "game_id"], kind="mergesort")
     for source, target in (
         ("minutes", "min_lag_1"),
         ("fga", "fga_lag_1"),
@@ -649,3 +637,203 @@ def build_causal_frame(
         "output_rows": int(len(frame)),
         **source_missing_counts,
     }
+
+
+def _season_label(day: pd.Timestamp) -> str:
+    start = day.year if day.month >= 10 else day.year - 1
+    return f"{start}-{(start + 1) % 100:02d}"
+
+
+def predict_upcoming(
+    causal: pd.DataFrame,
+    upcoming: pd.DataFrame,
+    slate_date: str | pd.Timestamp,
+    config: DynamicPointsConfig | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Pregame Student-t for players who have not played on ``slate_date``.
+
+    The hierarchy is fit on the two seasons before the slate season. Kalman
+    states then absorb completed games strictly before the slate, including
+    earlier games of the slate season. The slate date itself is not a feature
+    and does not update the state.
+    """
+    config = config or DynamicPointsConfig()
+    required_history = {
+        "season_year",
+        "game_date",
+        "game_id",
+        "player_id",
+        "player_name",
+        "team_id",
+        "pos",
+        "minutes",
+        "fga",
+        "fta",
+        "pts",
+        "team_def_rating",
+        "season_game_number",
+        "new_team_flag",
+        "rookie_flag",
+    }
+    missing = required_history - set(causal.columns)
+    if missing:
+        raise ValueError(f"missing causal columns: {sorted(missing)}")
+    if "player_id" not in upcoming.columns:
+        raise ValueError("upcoming players need player_id")
+    if upcoming["player_id"].duplicated().any():
+        raise ValueError("duplicate upcoming player ids")
+
+    slate = pd.Timestamp(slate_date).normalize()
+    dates = pd.to_datetime(causal["game_date"]).dt.normalize()
+    history = causal.loc[dates < slate].copy()
+    if history.empty:
+        raise ValueError("no completed games before the slate date")
+    if (pd.to_datetime(history["game_date"]).dt.normalize() >= slate).any():
+        raise AssertionError("slate-date games entered the pregame history")
+
+    slate_season = _season_label(slate)
+    seasons = sorted(
+        history["season_year"].astype(str).unique(),
+        key=lambda value: int(value.split("-")[0]),
+    )
+    preceding = [season for season in seasons if season < slate_season]
+    if len(preceding) < config.train_window_seasons:
+        raise ValueError(
+            f"{slate_season} needs {config.train_window_seasons} preceding seasons"
+        )
+    train_seasons = tuple(preceding[-config.train_window_seasons :])
+    if slate_season in train_seasons:
+        raise AssertionError("slate season leaked into the hierarchical fit")
+
+    train = history.loc[history["season_year"].astype(str).isin(train_seasons)]
+    current = history.loc[history["season_year"].astype(str).eq(slate_season)]
+    fit, fit_audit = fit_hierarchy(train, config)
+    training_states = filter_training_states(fit, train, config)
+    carried = dict(training_states)
+    if not current.empty:
+        trace = predict_fold(fit, current, training_states, config)
+        latest = (
+            trace.sort_values(["player_id", "game_date", "game_id"], kind="mergesort")
+            .groupby("player_id", sort=False)
+            .tail(1)
+        )
+        for row in latest.itertuples(index=False):
+            carried[row.player_id] = DynamicState(
+                float(row.state_after),
+                float(row.state_var_after),
+                int(row.games_in_model_before) + 1,
+                str(row.season_year),
+            )
+
+    predictions, no_history = _upcoming_rows(
+        history, upcoming, slate, slate_season, fit, carried, config
+    )
+    audit: dict[str, object] = {
+        "slate_date": str(slate.date()),
+        "slate_season": slate_season,
+        "train_seasons": train_seasons,
+        "history_rows": int(len(history)),
+        "current_season_rows": int(len(current)),
+        "predicted": int(len(predictions)),
+        "no_history": int(no_history),
+        **fit_audit,
+    }
+    return predictions, audit
+
+
+def _upcoming_rows(
+    history: pd.DataFrame,
+    upcoming: pd.DataFrame,
+    slate: pd.Timestamp,
+    slate_season: str,
+    fit: HierarchicalFit,
+    carried: dict[object, DynamicState],
+    config: DynamicPointsConfig,
+) -> tuple[pd.DataFrame, int]:
+    initial_variance = fit.observation_variance / config.player_prior_precision
+    records: list[dict[str, object]] = []
+    no_history = 0
+    optional = [
+        column
+        for column in ("opp_team_id", "is_home", "team_id", "pos")
+        if column in upcoming.columns
+    ]
+    players = upcoming.loc[:, ["player_id", *optional]]
+    for row in players.itertuples(index=False):
+        played = history.loc[history["player_id"].eq(row.player_id)].sort_values(
+            ["game_date", "game_id"], kind="mergesort"
+        )
+        if played.empty:
+            no_history += 1
+            continue
+        last = played.iloc[-1]
+        prior_date = pd.Timestamp(last["game_date"]).normalize()
+        if prior_date >= slate:
+            raise AssertionError("a pregame row used a game on or after the slate")
+        same_season = str(last["season_year"]) == slate_season
+        rest_days = (slate - prior_date).days if same_season else np.nan
+        opponent = getattr(row, "opp_team_id", np.nan)
+        home = getattr(row, "is_home", np.nan)
+        team_id = getattr(row, "team_id", np.nan)
+        position = getattr(row, "pos", np.nan)
+        if pd.isna(team_id):
+            team_id = last["team_id"]
+        if pd.isna(position):
+            position = last["pos"]
+        feature_row = pd.DataFrame(
+            [
+                {
+                    "min_lag_1": float(last["minutes"]),
+                    "fga_lag_1": float(last["fga"]),
+                    "fta_lag_1": float(last["fta"]),
+                    "rest_days": rest_days,
+                    "opp_def_prior": _opponent_defense(history, opponent),
+                    "is_home": home,
+                }
+            ]
+        ).iloc[0]
+        raw, imputed = _impute_row_features(feature_row, fit.medians)
+        state = carried.get(
+            row.player_id,
+            DynamicState(0.0, initial_variance, 0),
+        )
+        boundary = bool(state.games) and state.season != slate_season
+        variance = state.variance
+        if state.games:
+            drift = config.offseason_drift_sd if boundary else config.state_drift_sd
+            variance += drift**2
+        scale = predictive_scale(variance, fit.observation_variance)
+        records.append(
+            {
+                "player_id": row.player_id,
+                "slate_date": slate,
+                "predictive_mean": float(_base_prediction(fit, raw, position, team_id))
+                + state.mean,
+                "predictive_scale": scale,
+                "df": fit.df,
+                "prior_player_game_date": prior_date,
+                "min_lag_1": float(last["minutes"]),
+                "opp_def_prior": feature_row["opp_def_prior"],
+                "is_home": home,
+                "imputed_predictors": imputed,
+                "season_boundary": boundary,
+            }
+        )
+    return pd.DataFrame.from_records(records), no_history
+
+
+def _opponent_defense(history: pd.DataFrame, opponent_id: object) -> float:
+    if pd.isna(opponent_id):
+        return np.nan
+    played = history.loc[
+        history["team_id"].eq(opponent_id),
+        ["game_id", "game_date", "team_def_rating"],
+    ]
+    played = played.drop_duplicates("game_id").sort_values(
+        ["game_date", "game_id"], kind="mergesort"
+    )
+    ratings = pd.to_numeric(played["team_def_rating"], errors="coerce").dropna()
+    window = ratings.tail(10)
+    if len(window) < 3:
+        return np.nan
+    return float(window.mean())

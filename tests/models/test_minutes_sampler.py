@@ -284,9 +284,11 @@ from models.shared.train import fit_quantile_models, run_walk_forward
 class _FakeBooster:
     def __init__(self, **kwargs):
         self.eval_rows = None
+        self.best_iteration = 0
 
     def fit(self, X, y, eval_set=None, verbose=False):
-        self.eval_rows = len(eval_set[0][0])
+        if eval_set is not None:
+            self.eval_rows = len(eval_set[0][0])
 
     def predict(self, X):
         return np.arange(len(X), dtype=float)
@@ -334,7 +336,7 @@ def test_train_tail_walk_forward_stops_on_training_dates_and_keeps_every_fold(mo
     assert 1 in result["fold_ranges"]
     assert "q_0.50" in oof.columns
     assert len(oof) == int(frame["game_date"].isin(frame["game_date"].unique()[5:7]).sum())
-    assert result["models_last"]["q_0.50"].eval_rows < 5
+    assert result["models_last"]["q_0.50"].stopping_rows < 5
 
 
 def _four_fold_tables():

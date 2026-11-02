@@ -224,6 +224,29 @@ def _valid_oof():
     return oof, ranges
 
 
+def test_builder_accepts_points_when_the_cap_is_raised():
+    oof, ranges = _valid_oof()
+    starter_hi = oof.index[oof["starting"].eq(1)][1]
+    bench_hi = oof.index[oof["starting"].eq(0)][4]
+    oof.loc[starter_hi, "rate"] = 40.0
+    oof.loc[bench_hi, "rate"] = 55.0
+    with pytest.raises(ValueError, match="rate"):
+        build_tail_tables(oof, folds=[1], fold_ranges=ranges)
+
+    tables = build_tail_tables(oof, folds=[1], fold_ranges=ranges, cap=100.0)
+    assert tables.cap == 100.0
+    row = oof.loc[[starter_hi], [f"q_{level:.2f}" for level in QUANTILE_LEVELS]]
+    drawn = ppf(
+        np.array([[1.0]]),
+        row.to_numpy(dtype=float),
+        np.array([1]),
+        np.array([1]),
+        tables,
+    )
+    assert drawn[0, 0] > RATE_CAP
+    assert drawn[0, 0] <= 100.0
+
+
 def test_builder_records_exact_scoreless_zeros():
     oof, ranges = _valid_oof()
     tables = build_tail_tables(oof, folds=[1], fold_ranges=ranges)

@@ -1,6 +1,6 @@
 """RotoWire projected fives as abbreviation → five names."""
 
-from src.live.nba_lineup import projected_lineups
+from src.live.nba_lineup import get_starter_status, projected_lineups
 
 CARD = """
 <div class="lineup is-nba">
@@ -33,6 +33,13 @@ CARD = """
   </ul>
 </div>
 """
+
+
+def test_starter_status_is_one_only_for_a_projected_starter() -> None:
+    lineups = projected_lineups(html=CARD)
+
+    assert get_starter_status("Jayson Tatum", "2026-10-28", lineups=lineups) == 1
+    assert get_starter_status("Payton Pritchard", "2026-10-28", lineups=lineups) == 0
 
 
 def test_projected_lineups_map_each_abbreviation_to_five_names() -> None:

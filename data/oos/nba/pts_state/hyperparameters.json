@@ -1,0 +1,124 @@
+{
+  "decision": "drop",
+  "reason": "dynamic pinball is worse than calibrated XGB",
+  "acf_1": 0.06818175637083096,
+  "icc": 0.04383641612421559,
+  "acf_lags_1_to_10": [
+    0.06818175637083096,
+    0.07240873237035823,
+    0.05398024195549786,
+    0.04709643669663785,
+    0.03911759656104509,
+    0.03801977001591741,
+    0.03404488034843011,
+    0.0262218811981912,
+    0.022460408591789865,
+    0.017745635529051493
+  ],
+  "slices": [
+    {
+      "slice": "season_boundary",
+      "n": 1385,
+      "acf_1": 0.086424,
+      "icc": 0.107295
+    },
+    {
+      "slice": "within_season",
+      "n": 102199,
+      "acf_1": 0.067723,
+      "icc": 0.043288
+    },
+    {
+      "slice": "early",
+      "n": 13011,
+      "acf_1": 0.074023,
+      "icc": 0.089463
+    },
+    {
+      "slice": "tier 0-10",
+      "n": 60733,
+      "acf_1": 0.061801,
+      "icc": 0.03653
+    },
+    {
+      "slice": "tier 10-20",
+      "n": 33544,
+      "acf_1": 0.025146,
+      "icc": 0.014242
+    },
+    {
+      "slice": "tier 20-30",
+      "n": 9306,
+      "acf_1": 0.002104,
+      "icc": 0.016199
+    },
+    {
+      "slice": "tier 30+",
+      "n": 1,
+      "acf_1": null,
+      "icc": null
+    }
+  ],
+  "prediction_hash": "a42ede2bdafca638b6022a8b1516ddd50e57fd1d898a40153bff7b826d2c4a90",
+  "model_path": "/Users/alexgonzalez/Documents/nba_quant/models/saved_models/pts_nba_model_2026-10-29.joblib",
+  "model_sha256": "8a7c95acdabd8a45be2174d2cac604304918b9258665baa1871b7385a66023b4",
+  "unscored_positive_minute_games": 1659,
+  "played_positive_minute_games": 106840,
+  "gate": {
+    "acf": 0.02,
+    "icc": 0.02,
+    "passed": true
+  },
+  "warmup_window": 1,
+  "scored_windows": [
+    2,
+    3,
+    4
+  ],
+  "holdout_window": -1,
+  "market_counts": {
+    "quotes": 691,
+    "matched": 679,
+    "unmatched": 12
+  },
+  "market_covers_scored_windows": false,
+  "closing_span": [
+    "2026-10-15",
+    "2026-10-28"
+  ],
+  "rung_b_market": {
+    "n_settled": 679,
+    "brier": 0.2739980275039727,
+    "log_loss": 0.7499178230348397,
+    "market_log_loss": 0.6864942265293262
+  },
+  "process_fit": [
+    {
+      "window": 2,
+      "per_game": 0.25,
+      "offseason": 1.0,
+      "initial": 1.0,
+      "obs_var": 2.0,
+      "loglik": -47080.30002108459,
+      "tau2": 0.2646536121825972
+    },
+    {
+      "window": 3,
+      "per_game": 0.25,
+      "offseason": 1.0,
+      "initial": 1.0,
+      "obs_var": 2.0,
+      "loglik": -95661.72301511333,
+      "tau2": 0.293520916276453
+    },
+    {
+      "window": 4,
+      "per_game": 0.25,
+      "offseason": 1.0,
+      "initial": 1.0,
+      "obs_var": 2.0,
+      "loglik": -143928.42114663488,
+      "tau2": 0.3264308756951745
+    }
+  ]
+}

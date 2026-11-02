@@ -496,6 +496,7 @@ except ImportError:  # python nba_novig.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 _DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "novig", "nba")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -1165,13 +1166,35 @@ def _event_market_workers() -> int:
         return 6
 
 
+def pregame_events(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Drop games that are live, finished, or already past start."""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for event in events:
+        game = event.get("game") if isinstance(event, dict) else None
+        start = game.get("scheduled_start") if isinstance(game, dict) else None
+        status = event.get("status") if isinstance(event, dict) else None
+        if isinstance(event, dict) and game_has_started(start, status=status, now=now):
+            dropped += 1
+            continue
+        if isinstance(event, dict):
+            kept.append(event)
+    if dropped:
+        logger.info("Skipping %s Novig game(s) that already started", dropped)
+    return kept
+
+
 def _fetch_graphql_snapshots(
     session: requests.Session,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    events = fetch_nba_events(session)
+    events = pregame_events(fetch_nba_events(session))
     event_ids = [
         str(event.get("id"))
         for event in events

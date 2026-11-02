@@ -35,6 +35,7 @@ except ImportError:  # python nba_prophetx.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 _DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "prophetx", "nba")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -495,6 +496,27 @@ def _include_period_markets() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def pregame_events(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Drop games that are live, finished, or already past start."""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for event in events:
+        if isinstance(event, dict) and game_has_started(
+            event.get("scheduled"), status=event.get("status"), now=now
+        ):
+            dropped += 1
+            continue
+        if isinstance(event, dict):
+            kept.append(event)
+    if dropped:
+        logger.info("Skipping %s ProphetX game(s) that already started", dropped)
+    return kept
+
+
 def run() -> None:
     from concurrent.futures import ThreadPoolExecutor
 
@@ -511,7 +533,7 @@ def run() -> None:
     report = StageReport(book="prophetx", league="nba")
     session = requests.Session()
     with stage_timer(report, "download"):
-        events = fetch_nba_events(session)
+        events = pregame_events(fetch_nba_events(session))
         event_ids = [
             int(event["id"]) for event in events if event.get("id") is not None
         ]

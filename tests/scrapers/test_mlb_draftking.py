@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from curl_cffi.requests.exceptions import HTTPError as CurlHTTPError
+
 from src.scrapers.mlb.mlb_draftking import (
     _DEFAULT_OUTPUT_DIR,
     _ROOT,
     Event,
     Subcategory,
+    build_session,
     extract_offer_picks,
     fetch_event_group,
+    fetch_json,
     payload_to_offers,
     subcategories_from_nav,
 )
@@ -139,6 +143,36 @@ def _outs_ou_payload() -> dict:
             },
         ],
     }
+
+
+def test_build_session_impersonates_chrome_for_akamai() -> None:
+    session = build_session({"Accept": "application/json"})
+    assert session.impersonate == "chrome"
+
+
+def test_fetch_json_retries_curl_cffi_http_errors(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    class _Session:
+        def get(self, url, params=None, timeout=None):
+            calls["n"] += 1
+            raise CurlHTTPError("403 Client Error")
+
+    monkeypatch.setattr("src.scrapers.mlb.mlb_draftking.time.sleep", lambda _seconds: None)
+    try:
+        fetch_json(
+            _Session(),
+            "https://example.test/markets",
+            {},
+            timeout=1,
+            max_retries=3,
+            label="subcategory",
+        )
+    except CurlHTTPError:
+        pass
+    else:
+        raise AssertionError("fetch_json swallowed the browser-client HTTP error")
+    assert calls["n"] == 3
 
 
 def test_draftkings_root_is_repo_root_not_src() -> None:

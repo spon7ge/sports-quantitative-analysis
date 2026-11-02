@@ -9,7 +9,7 @@ from .columns import (
     ROLE_TAIL_MINUTES_FEATURES,
     TIER1_MINUTES_FEATURES,
 )
-from .starters import add_starter_features
+from .starters import add_starter_features, add_total_stars_active
 
 __all__ = [
     "CURRENT_MINUTES_37",
@@ -20,4 +20,5 @@ __all__ = [
     "TIER1_MINUTES_FEATURES",
     "add_minutes_features",
     "add_starter_features",
+    "add_total_stars_active",
 ]

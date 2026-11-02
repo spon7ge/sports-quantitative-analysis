@@ -8,6 +8,7 @@ from src.models.dynamic_points import (
     DynamicPointsConfig,
     build_causal_frame,
     kalman_update,
+    predict_upcoming,
     predictive_scale,
     walk_forward_trace,
 )
@@ -37,9 +38,7 @@ def _games() -> pd.DataFrame:
                         "team_id": team_id,
                         "opp_team_id": opponent_id,
                         "pos": position,
-                        "matchup": "AAA vs. BBB"
-                        if team_id == 10
-                        else "BBB @ AAA",
+                        "matchup": "AAA vs. BBB" if team_id == 10 else "BBB @ AAA",
                         "minutes": 30.0 + player_id + game,
                         "fga": 10.0 + player_id + game,
                         "fta": 2.0 + game,
@@ -100,13 +99,44 @@ def test_predictive_scale_rejects_nonfinite_variances(value: float) -> None:
         predictive_scale(value, 16.0)
 
 
+def test_upcoming_prediction_ignores_the_slate_date() -> None:
+    games = _games()
+    slate = pd.Timestamp("2024-10-07")
+    same_day = (
+        games.loc[games["season_year"].eq("2024-25") & games["player_id"].eq(1)]
+        .iloc[-1]
+        .copy()
+    )
+    same_day["game_date"] = slate
+    same_day["game_id"] = "slate-game"
+    same_day["minutes"] = 999.0
+    same_day["fga"] = 999.0
+    same_day["fta"] = 999.0
+    same_day["pts"] = 80.0
+    games = pd.concat([games, pd.DataFrame([same_day])], ignore_index=True)
+    causal, _ = build_causal_frame(games)
+    previous = causal.loc[
+        causal["player_id"].eq(1) & causal["game_date"].lt(slate)
+    ].sort_values("game_date")
+
+    predicted, audit = predict_upcoming(
+        causal,
+        pd.DataFrame([{"player_id": 1, "opp_team_id": 20, "is_home": 1.0}]),
+        slate,
+    )
+
+    assert audit["train_seasons"] == ("2022-23", "2023-24")
+    assert predicted.iloc[0]["min_lag_1"] == pytest.approx(previous.iloc[-1]["minutes"])
+    assert predicted.iloc[0]["prior_player_game_date"] == previous.iloc[-1]["game_date"]
+    assert predicted.iloc[0]["prior_player_game_date"] < slate
+    assert predicted.iloc[0]["min_lag_1"] != pytest.approx(999.0)
+
+
 def test_causal_features_use_only_prior_games() -> None:
     frame, audit = build_causal_frame(_games())
     player = frame.loc[frame["player_id"].eq(1)].sort_values("game_date")
     assert np.isnan(player.iloc[0]["min_lag_1"])
-    assert player.iloc[1]["min_lag_1"] == pytest.approx(
-        player.iloc[0]["minutes"]
-    )
+    assert player.iloc[1]["min_lag_1"] == pytest.approx(player.iloc[0]["minutes"])
     assert player.iloc[1]["fga_lag_1"] == pytest.approx(player.iloc[0]["fga"])
     assert player.iloc[1]["fta_lag_1"] == pytest.approx(player.iloc[0]["fta"])
     assert audit["input_rows"] == len(_games())
@@ -280,9 +310,7 @@ def test_walk_forward_is_out_of_sample_and_predicts_before_update() -> None:
     first = trace.sort_values(["game_date", "game_id", "player_id"]).iloc[0]
     expected_innovation = first["points"] - first["predictive_mean"]
     assert first["innovation"] == pytest.approx(expected_innovation)
-    expected_after = (
-        first["state_before"] + first["kalman_gain"] * first["innovation"]
-    )
+    expected_after = first["state_before"] + first["kalman_gain"] * first["innovation"]
     assert first["state_after"] == pytest.approx(expected_after)
 
 
@@ -398,9 +426,7 @@ def test_walk_forward_rejects_fold_without_eligible_predictions() -> None:
 def test_evaluation_imputations_are_recorded_in_trace_and_fold_audit() -> None:
     frame, _ = build_causal_frame(_games())
     evaluation_mask = frame["season_year"].eq("2024-25")
-    target = frame.index[
-        evaluation_mask & frame["player_id"].eq(1)
-    ][0]
+    target = frame.index[evaluation_mask & frame["player_id"].eq(1)][0]
     frame.loc[target, ["min_lag_1", "fta_lag_1"]] = np.nan
     expected = (
         frame.loc[evaluation_mask]

@@ -1,4 +1,10 @@
-"""SHAP, permutation importance, and the keep/drop audit."""
+"""SHAP and permutation importance.
+
+The table ranks features. It does not decide which ones to drop: a
+negative leave-one-out delta only says the feature is replaceable by
+the others, and a permutation p-value on one fixed model is not
+evidence that the feature helps on new data.
+"""
 
 from __future__ import annotations
 
@@ -74,6 +80,38 @@ def permutation_importance_table(
     return table, result
 
 
+def shap_center_and_width(
+    shap_by_quantile: dict,
+    columns,
+) -> pd.DataFrame:
+    """Mean absolute SHAP of the median, and of the q10–q90 width.
+
+    SHAP values add, so the width column is the mean absolute
+    difference between the q90 and q10 explanations on the same rows.
+    """
+    needed = ("q_0.10", "q_0.50", "q_0.90")
+    missing = [key for key in needed if key not in shap_by_quantile]
+    if missing:
+        raise KeyError(f"shap values missing {missing}")
+    names = list(columns)
+    arrays = {
+        key: np.asarray(shap_by_quantile[key], dtype=float) for key in needed
+    }
+    for key, values in arrays.items():
+        if values.ndim != 2 or values.shape[1] != len(names):
+            raise ValueError(f"{key} shape {values.shape} does not match {len(names)} columns")
+        if not np.isfinite(values).all():
+            raise ValueError(f"{key} shap values must be finite")
+    table = pd.DataFrame(
+        {
+            "center": np.abs(arrays["q_0.50"]).mean(axis=0),
+            "width": np.abs(arrays["q_0.90"] - arrays["q_0.10"]).mean(axis=0),
+        },
+        index=pd.Index(names, name="feature"),
+    )
+    return table.sort_values(["width", "center"], ascending=False)
+
+
 def feature_consensus(
     features: list[str],
     shap_mean: pd.Series,
@@ -83,9 +121,8 @@ def feature_consensus(
 ) -> pd.DataFrame:
     """Rank features by the average of normalized SHAP and permutation importance.
 
-    ``keep`` requires a permutation p-value under 0.05 and a positive
-    ablation delta. The p-value is recomputed with NaNs omitted, matching
-    the notebook audit rather than the rounded table p-value.
+    ``perm_pvalue`` restates how stable the shuffles were on this one
+    model and this one frame. It is not a reason to drop a column.
     """
     shap_table = pd.DataFrame(
         {
@@ -140,5 +177,4 @@ def feature_consensus(
     audit["consensus"] = (audit["shap_norm"] + audit["perm_norm"]) / 2
     audit = audit.sort_values("consensus", ascending=False).reset_index(drop=True)
     audit.index += 1
-    audit["keep"] = (audit["perm_pvalue"] < 0.05) & (audit["ablation_delta"] > 0)
     return audit

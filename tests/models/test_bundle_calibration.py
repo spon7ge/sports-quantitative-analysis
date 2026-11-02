@@ -6,8 +6,6 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
-from xgboost import XGBRegressor
-
 from models.shared.artifacts import (
     booster_fingerprint,
     load_model_bundle,
@@ -15,6 +13,7 @@ from models.shared.artifacts import (
     save_model_bundle,
 )
 from models.shared.metrics import MINUTE_Q50_TIERS, RATE_Q50_TIERS
+from xgboost import XGBRegressor
 
 
 def _tiny_model(shift: float) -> XGBRegressor:
@@ -196,6 +195,31 @@ def test_predict_reads_a_rate_lag_beside_the_model_features_and_clips_at_the_cap
     np.testing.assert_allclose(out["q_0.50"].to_numpy(), [0.0, 6.0])
 
 
+def test_scaled_payload_loads_without_a_group_table(tmp_path):
+    train, holdout = _frames()
+    path = save_model_bundle(
+        {"q_0.50": _tiny_model(0.0)},
+        train_df=train,
+        holdout_df=holdout,
+        wf_results=[{"pinball": 1.0}],
+        ho_metrics={"pinball": 1.0},
+        features=["starting"],
+        artifact_stem="pts_scaled",
+        calibration={
+            "method": "scaled_quantile",
+            "offsets": np.array([0.1, -0.1]),
+            "taus": np.array([0.10, 0.90]),
+            "clip_low": 0.0,
+            "clip_high": 100.0,
+            "target": "pts",
+        },
+        save_dir=tmp_path,
+    )
+    loaded = load_model_bundle(path)
+    assert loaded["calibration"]["method"] == "scaled_quantile"
+    np.testing.assert_allclose(loaded["calibration"]["offsets"], [0.1, -0.1])
+
+
 def test_a_bundle_without_calibration_still_loads(tmp_path):
     train, holdout = _frames()
     path = save_model_bundle(
@@ -257,3 +281,26 @@ def test_predict_sorts_replaces_cold_starts_then_adds_the_offset_and_clips():
     np.testing.assert_allclose(out.iloc[0].to_numpy(), [2.0, 4.0, 6.0])
     np.testing.assert_allclose(out.iloc[1].to_numpy(), [1e-3, 5.0, 63.0])
     np.testing.assert_allclose(out.iloc[2].to_numpy(), [10.0, 20.0, 30.0])
+
+
+def test_scaled_predict_sorts_then_clips():
+    bundle = {
+        "quantile_models": {
+            "q_0.10": _Column([2.0, 0.0]),
+            "q_0.90": _Column([1.0, 4.0]),
+        },
+        "feature_names": ["starting"],
+        "calibration": {
+            "method": "scaled_quantile",
+            "offsets": np.array([0.0, 0.0]),
+            "taus": np.array([0.10, 0.90]),
+            "clip_low": 0.0,
+            "clip_high": 1.5,
+            "target": "pts",
+        },
+    }
+    out = predict_calibrated_quantiles(
+        bundle, pd.DataFrame({"starting": [1.0, 0.0]})
+    )
+    # Row 0 sorts to (1, 2) then clips at 1.5. Row 1 sorts to (0, 4) then clips.
+    np.testing.assert_allclose(out.to_numpy(), [[1.0, 1.5], [0.0, 1.5]])

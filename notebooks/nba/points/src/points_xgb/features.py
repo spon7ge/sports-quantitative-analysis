@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from points_xgb.config import EXCLUDED_FEATURES, PTS_FEATURES, RATE_CAP, TARGET_COL
+from points_xgb.config import EXCLUDED_FEATURES, RATE_CAP, TARGET_COL
 from points_xgb.paths import ensure_repo_on_path
 
 ensure_repo_on_path()
@@ -13,7 +13,7 @@ from models.shared.splits import tukey_fences  # noqa: E402
 from src.features.minutes.rolling import prior_expanding, prior_shift  # noqa: E402
 
 
-def assert_no_leak(features: list[str] | tuple[str, ...] = PTS_FEATURES) -> None:
+def assert_no_leak(features: list[str] | tuple[str, ...]) -> None:
     """Refuse game-N outcomes in the model feature list."""
     leaked = EXCLUDED_FEATURES.intersection(features)
     if leaked:
@@ -21,10 +21,35 @@ def assert_no_leak(features: list[str] | tuple[str, ...] = PTS_FEATURES) -> None
 
 
 def build_model_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add the shared points features."""
+    """Add starter rank, then the shared points features.
+
+    ``starting`` is the recorded G/F/C flag from ``start_position`` when
+    the loader has not already set it. Rank uses prior starts and prior
+    minutes only, the same definition as the minutes model.
+    ``starter_min_missing_teammates`` and ``total_stars_active`` use who
+    played in this game, so they are known once inactives are confirmed.
+    """
+    from src.features.minutes import add_starter_features, add_total_stars_active
     from src.features.points import add_points_features
 
-    return add_points_features(frame)
+    prepared = _with_starting_flag(frame)
+    featured = add_points_features(add_starter_features(prepared))
+    return add_total_stars_active(featured)
+
+
+def _with_starting_flag(frame: pd.DataFrame) -> pd.DataFrame:
+    if "starting" in frame.columns:
+        return frame
+    out = frame.copy()
+    start = (
+        out["start_position"]
+        if "start_position" in out.columns
+        else pd.Series("", index=out.index)
+    )
+    out["starting"] = (
+        start.astype("string").str.strip().isin(["G", "F", "C"]).astype(int)
+    )
+    return out
 
 
 def positive_minutes(frame: pd.DataFrame) -> pd.DataFrame:

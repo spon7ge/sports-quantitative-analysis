@@ -37,6 +37,7 @@ except ImportError:  # python nba_underdog.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 _DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "underdogs", "nba")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -313,6 +314,23 @@ def build_player_lookup(
     return out
 
 
+def _started_match_ids(payload: dict[str, Any]) -> set[str]:
+    """Match ids whose game is live, finished, or already past start."""
+    started: set[str] = set()
+    for key in ("games", "solo_games"):
+        for game in payload.get(key) or []:
+            if not isinstance(game, dict) or game.get("id") is None:
+                continue
+            start = (
+                game.get("scheduled_at")
+                or game.get("scheduledAt")
+                or game.get("start_time")
+            )
+            if game_has_started(start, status=game.get("status")):
+                started.add(str(game["id"]))
+    return started
+
+
 def extract_picks(
     payload: dict[str, Any],
     sport_allowlist: frozenset[str] | None,
@@ -341,7 +359,14 @@ def extract_picks(
     suspended_lines = 0
     skipped_options = 0
     skipped_sport = 0
+    skipped_started = 0
     added = 0
+    started_matches = _started_match_ids(payload)
+    match_by_appearance = {
+        str(appearance.get("id")): appearance.get("match_id")
+        for appearance in (payload.get("appearances") or [])
+        if isinstance(appearance, dict) and appearance.get("id") is not None
+    }
 
     for line in lines:
         # Skip suspended lines
@@ -376,6 +401,11 @@ def extract_picks(
             if not aid:
                 continue
 
+            match_id = match_by_appearance.get(str(aid))
+            if match_id is not None and str(match_id) in started_matches:
+                skipped_started += 1
+                continue
+
             sid = app_sports.get(str(aid), "")
 
             # Filter by sport if allowlist is set
@@ -408,7 +438,7 @@ def extract_picks(
     logger.info(
         f"Extraction complete: added={added}, "
         f"suspended_lines={suspended_lines}, suspended_options={skipped_options}, "
-        f"skipped_sport={skipped_sport}"
+        f"skipped_sport={skipped_sport}, skipped_started={skipped_started}"
     )
 
     return picks

@@ -6,9 +6,9 @@ import unittest
 
 import numpy as np
 import pandas as pd
-
 from src.features.points.pregame import (
     appearances_before,
+    blank_outcomes,
     build_pregame_points_features,
 )
 
@@ -116,3 +116,19 @@ class AsOfCutoffTests(unittest.TestCase):
         self.assertEqual(featured.iloc[0]["pts_lag_1"], 18)
         self.assertEqual(featured.iloc[0]["min_lag_1"], 32)
         self.assertNotEqual(featured.iloc[0]["pts_lag_1"], 99)
+
+    def test_blank_outcomes_clears_foul_and_attempt_quality(self) -> None:
+        blanked = blank_outcomes(
+            pd.Series(
+                {
+                    "pfd": 4,
+                    "cfga": 8,
+                    "ufga": 3,
+                    "pos": "PG",
+                    "pts": 20,
+                }
+            )
+        )
+        for column in ("pfd", "cfga", "ufga", "pts"):
+            self.assertTrue(pd.isna(blanked[column]), column)
+        self.assertEqual(blanked["pos"], "PG")

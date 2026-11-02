@@ -1,7 +1,8 @@
 """
 FanDuel Sportsbook prop odds scraper — NBA edition.
 
-Fetches NBA player prop markets from the FanDuel Sportsbook API and exports clean JSON.
+Fetches NBA player props and full-game team lines (moneyline, spread, total)
+from the FanDuel Sportsbook API and exports clean JSON.
 
 Includes detailed logging at each step to make debugging easy.
 
@@ -60,6 +61,7 @@ except ImportError:  # python nba_fanduel.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 
 _BOOK_DIR = os.path.join(_ROOT, "data", "props", "fanduel")
 _DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "nba")
@@ -153,6 +155,24 @@ _GAME_MARKET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"both\s+teams|either\s+team|\brace\s+to\b|\bmargin\b"),
 )
 
+# Full-game lines on the NBA page. Period and alternate boards stay out so
+# they cannot be paired with another book's full-game number.
+_PERIOD_MARKET = re.compile(
+    r"\bquarter\b|\b1st\s+half\b|\bfirst\s+half\b|"
+    r"\b2nd\s+half\b|\bsecond\s+half\b|\bhalftime\b"
+)
+_TEAM_LINE_TYPES = {
+    "MONEY_LINE": "moneyline",
+    "MATCH_HANDICAP_(2-WAY)": "spread",
+    "TOTAL_POINTS_(OVER/UNDER)": "total",
+}
+_TEAM_LINE_NAMES = {
+    "moneyline": "moneyline",
+    "spread": "spread",
+    "point spread": "spread",
+    "total points": "total",
+}
+
 _NAME_SPLIT = re.compile(r"\s+[-–|]\s+")
 _TEAM_SPLIT = re.compile(r"\s+(?:@|v|vs\.?|at)\s+", re.IGNORECASE)
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
@@ -211,6 +231,29 @@ class Event:
     competition: str
 
 @dataclass
+class GameLine:
+    """One side of a full-game moneyline, spread, or total."""
+
+    market: str
+    side: str
+    line: float | None
+    american: int
+    event_name: str
+    start_time: str | None
+    sport_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to the flat game_lines shape the arbitrage reader expects."""
+        return {
+            "market": self.market,
+            "event_name": self.event_name,
+            "start_time": self.start_time,
+            "side": self.side,
+            "line": self.line,
+            "american": self.american,
+        }
+
+@dataclass
 class ExportData:
     """Complete export payload."""
 
@@ -218,12 +261,15 @@ class ExportData:
     fetched_at: str = ""
     count: int = 0
     picks: list[dict[str, Any]] | None = None
+    game_lines: list[dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if not self.fetched_at:
             self.fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if self.picks is None:
             self.picks = []
+        if self.game_lines is None:
+            self.game_lines = []
         self.count = len(self.picks) if self.picks else 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -233,6 +279,7 @@ class ExportData:
             "fetched_at": self.fetched_at,
             "count": self.count,
             "picks": self.picks or [],
+            "game_lines": self.game_lines or [],
         }
 
 # ============================================================================
@@ -437,8 +484,8 @@ def fetch_json(
     assert last_error is not None
     raise last_error
 
-def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
-    """Discover today's NBA events from the sportsbook's managed NBA page."""
+def fetch_page(session: requests.Session, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Fetch the managed NBA page. Its markets include each game's main lines."""
     params = {
         **_BASE_PARAMS,
         "page": "CUSTOM",
@@ -455,7 +502,10 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
         label=f"NBA page ({cfg.get('fd_page_id')})",
     )
     _maybe_dump(payload, f"page_{cfg.get('fd_page_id')}")
+    return payload
 
+def events_from_page(payload: dict[str, Any], cfg: dict[str, Any]) -> list[Event]:
+    """Discover NBA games from a content-managed-page payload."""
     records = list(_iter_records(_dig(payload, "attachments", "events")))
     markets = list(_iter_records(_dig(payload, "attachments", "markets")))
     competitions = _competition_names(payload)
@@ -464,6 +514,7 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
     allow = {str(c).upper() for c in (cfg.get("fd_competition_names") or [])}
     events: list[Event] = []
     skipped_competition = 0
+    skipped_started = 0
 
     for rec in records:
         event_id = rec.get("eventId") or rec.get("id")
@@ -473,17 +524,27 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
         if allow and competition.upper() not in allow:
             skipped_competition += 1
             continue
+        start_time = rec.get("openDate") or rec.get("startTime") or rec.get("eventTime")
+        in_play = rec.get("inPlay") is True or rec.get("inplay") is True
+        status = "live" if in_play else (rec.get("status") or rec.get("eventStatus"))
+        if game_has_started(start_time, status=status):
+            skipped_started += 1
+            continue
         events.append(
             Event(
                 event_id=str(event_id),
                 name=str(rec.get("name") or ""),
-                start_time=rec.get("openDate") or rec.get("startTime") or rec.get("eventTime"),
+                start_time=start_time,
                 competition=competition or "NBA",
             )
         )
 
     events.sort(key=lambda e: (e.start_time or "", e.name))
-    logger.info(f"Discovered {len(events)} events (skipped_competition={skipped_competition})")
+    logger.info(
+        f"Discovered {len(events)} events "
+        f"(skipped_competition={skipped_competition}, "
+        f"skipped_started={skipped_started})"
+    )
 
     cap = os.environ.get("FANDUEL_MAX_EVENTS", "").strip()
     if cap.isdigit() and int(cap) > 0:
@@ -491,6 +552,10 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
         events = events[: int(cap)]
 
     return events
+
+def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
+    """Discover today's NBA events from the sportsbook's managed NBA page."""
+    return events_from_page(fetch_page(session, cfg), cfg)
 
 def fetch_event_tab_markets(
     session: requests.Session,
@@ -685,6 +750,143 @@ def looks_like_person(name: str, teams: set[str]) -> bool:
     if any(cleaned.lower() in team for team in teams):
         return False
     return 2 <= len(cleaned.split()) <= 5
+
+def _team_market_kind(market_name: str, market_type: str) -> str | None:
+    """Map a full-game board onto moneyline, spread, or total."""
+    lowered = (market_name or "").strip().lower()
+    if not lowered or "alternate" in lowered or "team total" in lowered:
+        return None
+    if _PERIOD_MARKET.search(lowered):
+        return None
+    kind = _TEAM_LINE_TYPES.get((market_type or "").strip())
+    if kind:
+        return kind
+    return _TEAM_LINE_NAMES.get(lowered)
+
+def _game_line_sides(
+    market: dict[str, Any],
+    kind: str,
+    event: Event,
+) -> tuple[list[GameLine], float] | None:
+    """Both priced sides of one board, plus how far the prices sit from even."""
+    teams = team_names(event.name)
+    rows: list[GameLine] = []
+    implieds: list[float] = []
+    for runner in _iter_records(market.get("runners")):
+        status = str(runner.get("runnerStatus") or "").upper()
+        if status in ("SUSPENDED", "CLOSED", "REMOVED"):
+            continue
+        american, _decimal, implied = extract_prices(runner)
+        if american is None or american == 0:
+            continue
+        name = str(runner.get("runnerName") or "").strip()
+        if kind == "total":
+            choice, value = parse_runner_selection(name, runner.get("handicap"))
+            if choice not in ("over", "under"):
+                continue
+            line = value if value is not None else _to_float(runner.get("handicap"))
+            if line is None:
+                continue
+            side = choice
+            number: float | None = abs(line)
+        else:
+            if name.lower() not in teams:
+                continue
+            side = name
+            if kind == "moneyline":
+                number = None
+            else:
+                number = _to_float(runner.get("handicap"))
+                if number is None:
+                    number = _first_number(name)
+                if number is None:
+                    continue
+        rows.append(
+            GameLine(
+                market=kind,
+                side=side,
+                line=number,
+                american=american,
+                event_name=event.name,
+                start_time=event.start_time,
+                sport_id=(event.competition or "NBA").upper(),
+            )
+        )
+        implieds.append(implied if implied is not None else 1.0)
+
+    kept: list[GameLine] = []
+    kept_implied: list[float] = []
+    seen: set[str] = set()
+    for row, implied in zip(rows, implieds, strict=True):
+        token = row.side.lower()
+        if token in seen:
+            continue
+        seen.add(token)
+        kept.append(row)
+        kept_implied.append(implied)
+    if kind == "total":
+        complete = seen == {"over", "under"}
+    else:
+        complete = len(kept) == 2
+    if not complete:
+        return None
+    score = sum(abs(price - 0.5) for price in kept_implied)
+    return kept, score
+
+def extract_game_lines(
+    markets: Any,
+    events: list[Event],
+    sport_allowlist: frozenset[str] | None = None,
+) -> list[GameLine]:
+    """
+    Pull each event's main full-game moneyline, spread, and total.
+
+    The league page lists one main board per game plus a futures event. When
+    more than one full-game board is present, keep the prices closest to even,
+    which is the number the other books post as the main line.
+    """
+    selected: list[Event] = []
+    for event in events:
+        sport_id = (event.competition or "NBA").upper()
+        if sport_allowlist is not None and sport_id not in sport_allowlist:
+            continue
+        selected.append(event)
+    by_id = {event.event_id: event for event in selected}
+    chosen: dict[str, dict[str, tuple[float, int, list[GameLine]]]] = {}
+
+    for market in _iter_records(markets):
+        status = str(market.get("marketStatus") or "").upper()
+        if status in ("SUSPENDED", "CLOSED", "RESULTED"):
+            continue
+        kind = _team_market_kind(
+            str(market.get("marketName") or ""),
+            str(market.get("marketType") or ""),
+        )
+        event_id = str(market.get("eventId") or "")
+        event = by_id.get(event_id)
+        if kind is None or event is None:
+            continue
+        built = _game_line_sides(market, kind, event)
+        if built is None:
+            continue
+        rows, score = built
+        name = str(market.get("marketName") or "").strip().lower()
+        name_rank = 0 if name in _TEAM_LINE_NAMES else 1
+        current = chosen.setdefault(event.event_id, {}).get(kind)
+        if current is None or (score, name_rank) < (current[0], current[1]):
+            chosen[event.event_id][kind] = (score, name_rank, rows)
+
+    out: list[GameLine] = []
+    for event in selected:
+        boards = chosen.get(event.event_id) or {}
+        for kind in ("moneyline", "spread", "total"):
+            board = boards.get(kind)
+            if board is not None:
+                out.extend(board[2])
+    logger.info(
+        f"Extracted {len(out)} full-game team line(s) from {len(selected)} event(s)"
+    )
+    return out
 
 def extract_event_picks(
     markets: list[dict[str, Any]],
@@ -955,6 +1157,14 @@ def group_picks_by_sport(picks: list[Pick]) -> dict[str, list[Pick]]:
         grouped.setdefault(key, []).append(pick)
     return grouped
 
+def group_game_lines_by_sport(lines: list[GameLine]) -> dict[str, list[GameLine]]:
+    """Group team lines by sport_id (empty → unknown)."""
+    grouped: dict[str, list[GameLine]] = {}
+    for line in lines:
+        key = line.sport_id or "unknown"
+        grouped.setdefault(key, []).append(line)
+    return grouped
+
 def sport_to_league(sport: str) -> str | None:
     """Map FanDuel competition name to odds league slug (nba only)."""
     normalized = sport.strip().upper()
@@ -962,15 +1172,21 @@ def sport_to_league(sport: str) -> str | None:
         return "nba"
     return None
 
-def save_picks(picks: list[Pick], path: str) -> None:
+def save_picks(
+    picks: list[Pick],
+    path: str,
+    game_lines: list[GameLine] | None = None,
+) -> None:
     """
-    Save picks to JSON file.
+    Save picks and full-game team lines to one JSON file.
 
     Args:
         picks: List of Pick objects
         path: Output file path
+        game_lines: Moneyline, spread, and total sides for the same games
     """
-    logger.info(f"Saving {len(picks)} picks to {path}...")
+    lines = game_lines or []
+    logger.info(f"Saving {len(picks)} picks and {len(lines)} game lines to {path}...")
 
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
@@ -978,7 +1194,10 @@ def save_picks(picks: list[Pick], path: str) -> None:
         logger.debug(f"Ensured directory exists: {parent}")
 
     pick_dicts = [p.to_dict() for p in picks]
-    export = ExportData(picks=pick_dicts)
+    export = ExportData(
+        picks=pick_dicts,
+        game_lines=[line.to_dict() for line in lines],
+    )
 
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -1000,6 +1219,7 @@ class FanDuelScraper:
         self.config = load_config()
         self.output_paths: list[str] = []
         self.picks: list[Pick] = []
+        self.game_lines: list[GameLine] = []
         self.scraped_at: datetime | None = None
         self._db_failed = False
         self._db_rows = 0
@@ -1042,27 +1262,35 @@ class FanDuelScraper:
             logger.info("\n[Step 1/3] Discovering events...")
             session = build_session(self.config.get("headers", {}))
             sport_allowlist = get_sport_allowlist(self.config)
-            if report and stage_timer:
-                with stage_timer(report, "download"):
-                    events = fetch_events(session, self.config)
-                    logger.info("\n[Step 2/3] Extracting picks...")
-                    self.picks = extract_picks(
-                        session, self.config, events, sport_allowlist
-                    )
-            else:
-                events = fetch_events(session, self.config)
+
+            def _download() -> None:
+                page = fetch_page(session, self.config)
+                events = events_from_page(page, self.config)
+                self.game_lines = extract_game_lines(
+                    _dig(page, "attachments", "markets"),
+                    events,
+                    sport_allowlist,
+                )
                 logger.info("\n[Step 2/3] Extracting picks...")
                 self.picks = extract_picks(
                     session, self.config, events, sport_allowlist
                 )
 
+            if report and stage_timer:
+                with stage_timer(report, "download"):
+                    _download()
+            else:
+                _download()
+
             logger.info("\n[Step 3/3] Saving to file...")
             self.scraped_at = datetime.now(timezone.utc)
             grouped = group_picks_by_sport(self.picks)
+            lines_grouped = group_game_lines_by_sport(self.game_lines)
             self.output_paths = []
 
             def _save_and_load() -> None:
-                if not grouped:
+                sports = sorted(set(grouped) | set(lines_grouped))
+                if not sports:
                     fallback = "NBA"
                     if sport_allowlist:
                         fallback = sorted(sport_allowlist)[0]
@@ -1071,10 +1299,16 @@ class FanDuelScraper:
                     self._load_sport_to_supabase(fallback, [])
                     self.output_paths.append(path)
                 else:
-                    for sport, sport_picks in sorted(grouped.items()):
+                    for sport in sports:
                         path = resolve_output_path(sport)
-                        save_picks(sport_picks, path)
-                        self._load_sport_to_supabase(sport, sport_picks)
+                        save_picks(
+                            grouped.get(sport, []),
+                            path,
+                            game_lines=lines_grouped.get(sport, []),
+                        )
+                        self._load_sport_to_supabase(
+                            sport, grouped.get(sport, [])
+                        )
                         self.output_paths.append(path)
 
             if report and stage_timer:
@@ -1084,18 +1318,22 @@ class FanDuelScraper:
                 _save_and_load()
 
             if report:
-                report.mark_json(ok=True, rows=len(self.picks))
+                report.mark_json(
+                    ok=True, rows=len(self.picks) + len(self.game_lines)
+                )
                 report.mark_db(ok=not self._db_failed, rows=self._db_rows)
                 report.set_stage("total", sum(report.stages_s.values()))
 
             logger.info("=" * 70)
             if self._db_failed:
                 logger.error(
-                    f"JSON saved ({len(self.picks)} picks) but Supabase load failed"
+                    f"JSON saved ({len(self.picks)} picks, "
+                    f"{len(self.game_lines)} game lines) but Supabase load failed"
                 )
             else:
                 logger.info(
-                    f"✓ SUCCESS: {len(self.picks)} picks saved across "
+                    f"✓ SUCCESS: {len(self.picks)} picks and "
+                    f"{len(self.game_lines)} game lines saved across "
                     f"{len(self.output_paths)} file(s)"
                 )
             logger.info("=" * 70)

@@ -53,15 +53,23 @@ def save_model_bundle(
         "metadata": dict(metadata) if metadata is not None else None,
     }
     if calibration is not None:
-        if "group_definition" not in calibration or "offsets" not in calibration:
+        payload = dict(calibration)
+        scaled = payload.get("method") == "scaled_quantile"
+        pit = payload.get("method") == "pit_cdf"
+        grouped = "group_definition" in payload and "offsets" in payload
+        if scaled and ("offsets" not in payload or "taus" not in payload):
+            raise ValueError("scaled calibration needs offsets and taus")
+        if pit and any(key not in payload for key in ("pit_x", "pit_y", "taus")):
+            raise ValueError("pit calibration needs the isotonic knots and taus")
+        if not scaled and not pit and not grouped:
             raise ValueError(
                 "calibration must be the offset payload, including group_definition"
             )
-        payload = dict(calibration)
         payload["fingerprint"] = booster_fingerprint(models_ho, features)
         bundle["calibration"] = payload
 
-    save_path = out_dir / f"{artifact_stem}_{holdout_df['game_date'].max().date()}.joblib"
+    stamp = holdout_df["game_date"].max().date()
+    save_path = out_dir / f"{artifact_stem}_{stamp}.joblib"
     joblib.dump(bundle, save_path)
     print(f"Saved to {save_path}")
     return save_path
@@ -109,6 +117,23 @@ def _check_calibration(bundle: Mapping[str, Any]) -> None:
     found = booster_fingerprint(bundle["quantile_models"], bundle["feature_names"])
     if found != calibration.get("fingerprint"):
         raise ValueError("booster fingerprint does not match the calibration table")
+    if calibration.get("method") == "scaled_quantile":
+        offsets = np.asarray(calibration["offsets"], dtype=float).reshape(-1)
+        taus = np.asarray(calibration["taus"], dtype=float).reshape(-1)
+        if offsets.shape != taus.shape or not np.isfinite(offsets).all():
+            raise ValueError("scaled offsets")
+        return
+    if calibration.get("method") == "pit_cdf":
+        pit_x = np.asarray(calibration["pit_x"], dtype=float).reshape(-1)
+        pit_y = np.asarray(calibration["pit_y"], dtype=float).reshape(-1)
+        taus = np.asarray(calibration["taus"], dtype=float).reshape(-1)
+        if pit_x.size == 0 or pit_x.shape != pit_y.shape:
+            raise ValueError("pit map")
+        if not np.isfinite(pit_x).all() or not np.isfinite(pit_y).all():
+            raise ValueError("pit map")
+        if taus.size < 2 or not np.isfinite(taus).all():
+            raise ValueError("pit taus")
+        return
     definition = calibration.get("group_definition")
     if not isinstance(definition, Mapping) or "tiers" not in definition:
         raise ValueError("calibration payload is missing group_definition")
@@ -188,8 +213,12 @@ def predict_calibrated_quantiles(
     bundle: Mapping[str, Any],
     player_features: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Sort, replace cold starts, add the stored offsets, sort, and clip.
+    """Sort, replace cold starts, apply the stored calibration, and clip.
 
+    A ``pit_cdf`` payload maps the whole CDF through one isotonic PIT
+    recalibrator, then reads the quantile grid back off that CDF. A
+    ``scaled_quantile`` payload shifts each tau by that row's q10–q90
+    width. Grouped payloads still add one offset per minute or rate tier.
     Groups are read from the base q50, after the cold-start replacement.
     """
     from models.shared.conformal import (  # noqa: PLC0415
@@ -205,6 +234,45 @@ def predict_calibrated_quantiles(
         names,
         player_features.loc[:, names],
     )
+    if calibration.get("method") in {"scaled_quantile", "pit_cdf"}:
+        levels = np.asarray(calibration["taus"], dtype=float)
+        keys = [f"q_{level:.2f}" for level in levels]
+        if "role_quantiles" in calibration:
+            lag_col = str(calibration.get("lag_col", "min_lag_1"))
+            if lag_col not in player_features.columns:
+                raise KeyError(lag_col)
+            base = base_knots(
+                raw,
+                player_features["starting"],
+                player_features[lag_col],
+                role_quantiles=calibration["role_quantiles"],
+            )
+        else:
+            base = raw
+        grid = np.column_stack([base[key].to_numpy(dtype=float) for key in keys])
+        if calibration.get("method") == "pit_cdf":
+            from models.shared.points_calibration import (  # noqa: PLC0415
+                calibrated_quantile_grid,
+                pit_map_from_thresholds,
+            )
+
+            grid.sort(axis=1)
+            calibrator = pit_map_from_thresholds(
+                calibration["pit_x"], calibration["pit_y"]
+            )
+            adjusted = calibrated_quantile_grid(grid, levels, calibrator)
+        else:
+            from models.shared.quantile_offsets import (  # noqa: PLC0415
+                apply_offsets as apply_scaled_offsets,
+            )
+
+            adjusted = apply_scaled_offsets(grid, calibration["offsets"], levels)
+        adjusted = np.clip(
+            adjusted,
+            float(calibration["clip_low"]),
+            float(calibration["clip_high"]),
+        )
+        return pd.DataFrame(adjusted, index=raw.index, columns=keys)
     lag_col = str(calibration.get("lag_col", "min_lag_1"))
     if lag_col not in player_features.columns:
         raise KeyError(lag_col)

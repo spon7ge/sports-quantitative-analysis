@@ -29,5 +29,15 @@ How to fetch data:
 python -m src.pipeline.clean --league nba --season 2026-27 --fetch
 
 BR positions and rotowire game closing lines:
-python -m src.scrapers.basketball_reference_nba_positions --years 2021-2026
-python -m src.scrapers.rotowire_nba_odds --seasons 2019-2025
+python -m src.scrapers.basketball_reference_nba_positions --years 2027
+python -m src.scrapers.rotowire_nba_odds --seasons 2026
+
+python -m src.pipeline.clean --league nba --season 2026-27 --fetch && \
+python -m src.scrapers.basketball_reference_nba_positions --years 2027 && \
+python -m src.scrapers.rotowire_nba_odds --seasons 2026
+
+XGBoost (point estimate: projected points)
+    → Negative binomial / Normal distribution (P(over) at the line)
+        → Calibration layer (fit on 2-yr holdout)
+            → Edge = calibrated P(over) − book implied
+                → Fractional Kelly if edge > threshold   

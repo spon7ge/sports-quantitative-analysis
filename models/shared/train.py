@@ -11,7 +11,11 @@ from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBRegressor
 
 from models.shared.metrics import DEFAULT_MIN_TIERS, score_quantile_fold
-from models.shared.splits import date_walk_forward_folds
+from models.shared.splits import (
+    date_walk_forward_folds,
+    early_season_mask,
+    regular_season_mask,
+)
 
 DEFAULT_QUANTILES = [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
 
@@ -27,17 +31,34 @@ def fit_quantile_models(
     early_stop: str = "validation",
     train_dates: pd.Series | np.ndarray | Sequence | None = None,
     train_tail_frac: float = 0.10,
+    regular_mask: np.ndarray | None = None,
     X_predict: pd.DataFrame | None = None,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """Train one XGB quantile model per quantile; return models + preds."""
+    """Train one XGB quantile model per quantile; return models + preds.
+
+    ``X_predict`` is scored after fitting. It is not an early-stopping
+    set and it is not used to impute. With ``train_tail``, the round
+    count comes from the latest regular-season dates, then each model
+    is refit on the full training window for that many trees.
+    """
+    refit = False
+    es_fit_mask: np.ndarray | None = None
     if early_stop == "train_tail":
         if train_dates is None:
             raise ValueError("train_tail requires train_dates")
         dates = pd.to_datetime(np.asarray(train_dates))
         if len(dates) != len(X_train):
             raise ValueError("train_dates must align with X_train rows")
-        unique_dates = pd.unique(dates)
-        n_unique = len(unique_dates)
+        if regular_mask is None:
+            eligible_rows = np.ones(len(dates), dtype=bool)
+        else:
+            eligible_rows = np.asarray(regular_mask, dtype=bool)
+            if eligible_rows.shape != (len(dates),):
+                raise ValueError("regular_mask must align with X_train rows")
+        if not bool(eligible_rows.any()):
+            raise ValueError("train_tail requires a regular-season row")
+        eligible_dates = np.sort(pd.to_datetime(pd.unique(dates[eligible_rows])))
+        n_unique = len(eligible_dates)
         if n_unique < 2:
             raise ValueError("train_tail requires at least two training dates")
         n_stop = int(np.floor(n_unique * train_tail_frac))
@@ -48,14 +69,28 @@ def fit_quantile_models(
                 f"train_tail n_stop={n_stop} must be strictly less than "
                 f"n_unique={n_unique}"
             )
-        stop_dates = set(unique_dates[-n_stop:])
-        fit_mask = ~pd.Series(dates).isin(stop_dates).to_numpy()
-        stop_mask = pd.Series(dates).isin(stop_dates).to_numpy()
-        X_fit = X_train.iloc[fit_mask] if hasattr(X_train, "iloc") else X_train[fit_mask]
-        y_fit = y_train.iloc[fit_mask] if hasattr(y_train, "iloc") else y_train[fit_mask]
-        X_es = X_train.iloc[stop_mask] if hasattr(X_train, "iloc") else X_train[stop_mask]
-        y_es = y_train.iloc[stop_mask] if hasattr(y_train, "iloc") else y_train[stop_mask]
+        tail_start = eligible_dates[-n_stop]
+        stop_mask = eligible_rows & (dates >= tail_start)
+        # Rows on or after the tail, including a postseason that follows
+        # it, are not used to grow the trees that pick the round count.
+        es_fit_mask = np.asarray(dates < tail_start, dtype=bool)
+        if not bool(es_fit_mask.any()) or not bool(stop_mask.any()):
+            raise ValueError("train_tail split is empty")
+        print(
+            "  Non-regular rows excluded from the stopping tail: "
+            f"{int((~eligible_rows).sum())}"
+        )
+        def _take(frame, mask):
+            if hasattr(frame, "iloc"):
+                return frame.iloc[mask]
+            return frame[mask]
+
+        X_fit = _take(X_train, es_fit_mask)
+        y_fit = _take(y_train, es_fit_mask)
+        X_es = _take(X_train, stop_mask)
+        y_es = _take(y_train, stop_mask)
         predict_X = X_val if X_predict is None else X_predict
+        refit = True
     elif early_stop == "validation":
         X_fit, y_fit = X_train, y_train
         X_es, y_es = X_val, y_val
@@ -70,11 +105,25 @@ def fit_quantile_models(
     models: dict[str, Any] = {}
     preds: dict[str, np.ndarray] = {}
     for q in quantiles:
-        m = XGBRegressor(**params, quantile_alpha=q)
-        m.fit(X_fit, y_fit, eval_set=[(X_es, y_es)], verbose=False)
+        stopped = XGBRegressor(**params, quantile_alpha=q)
+        stopped.fit(X_fit, y_fit, eval_set=[(X_es, y_es)], verbose=False)
         key = f"q_{q:.2f}"
-        models[key] = m
-        preds[key] = m.predict(predict_X)
+        model = stopped
+        if refit:
+            best = getattr(stopped, "best_iteration", None)
+            if best is None or es_fit_mask is None:
+                raise RuntimeError(f"{key} early stopping did not set best_iteration")
+            n_fit = int(np.asarray(es_fit_mask).sum())
+            n_trees = max(int((int(best) + 1) * len(X_train) / n_fit), 1)
+            final_params = dict(params)
+            final_params.pop("early_stopping_rounds", None)
+            final_params["n_estimators"] = n_trees
+            model = XGBRegressor(**final_params, quantile_alpha=q)
+            model.fit(X_train, y_train)
+            model.early_stop_iteration = int(best)
+            model.stopping_rows = int(np.asarray(stop_mask).sum())
+        models[key] = model
+        preds[key] = model.predict(predict_X)
     return models, preds
 
 
@@ -133,19 +182,22 @@ def tune_xgb_quantile(
     n_trials: int = 40,
     n_splits: int = 4,
     quantile_alpha: float = 0.50,
+    quantiles: Sequence[float] | None = None,
     seed: int = 42,
     fixed_params: dict | None = None,
     show_progress_bar: bool = True,
 ) -> dict[str, Any]:
     """Optuna-tune one XGB quantile model via TimeSeriesSplit pinball loss.
 
-    Use train-pool ``X`` / ``y`` only — never the locked holdout.
-    Returns merged ``best_params`` (ready for ``XGB_PARAMS``), ``best_value``,
-    and the Optuna ``study``.
+    Pass ``quantiles`` to score the mean pinball across the grid. A single
+    ``quantile_alpha`` is kept for a one-knot search. Use train-pool ``X``
+    / ``y`` only — never the locked holdout. Returns merged ``best_params``
+    (ready for ``XGB_PARAMS``), ``best_value``, and the Optuna ``study``.
     """
     import optuna
 
     from models.shared.metrics import pinball_loss
+    from models.shared.quantile_offsets import mean_pinball
 
     fixed = {
         "objective": "reg:quantileerror",
@@ -169,12 +221,24 @@ def tune_xgb_quantile(
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
         }
         losses: list[float] = []
+        if quantiles is None:
+            levels = [float(quantile_alpha)]
+        else:
+            levels = [float(level) for level in quantiles]
         for train_idx, val_idx in tscv.split(X):
             X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-            m = XGBRegressor(**params, quantile_alpha=quantile_alpha)
-            m.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
-            losses.append(pinball_loss(y_val, m.predict(X_val), quantile_alpha))
+            columns = []
+            for level in levels:
+                m = XGBRegressor(**params, quantile_alpha=level)
+                m.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+                columns.append(m.predict(X_val))
+            if len(levels) == 1:
+                losses.append(pinball_loss(y_val, columns[0], levels[0]))
+            else:
+                losses.append(
+                    mean_pinball(y_val, np.column_stack(columns), np.asarray(levels))
+                )
         return float(np.mean(losses))
 
     study = optuna.create_study(
@@ -208,38 +272,57 @@ def run_walk_forward(
     early_stop: str = "train_tail",
     train_tail_frac: float = 0.10,
     target_col: str = "minutes",
+    folds: Sequence[Mapping[str, Any]] | None = None,
+    early_team_games: int | None = None,
 ) -> dict[str, Any]:
-    """Phase 2 — date-based walk-forward validation (production simulation)."""
+    """Phase 2 — walk-forward validation (production simulation).
+
+    ``folds`` overrides the date-percentage windows. Season folds from
+    ``season_walk_forward_folds`` use the same dict. ``early_team_games``
+    scores the first team games of each validation season a second time.
+    """
     outcome_col = str(target_col)
     if not outcome_col:
         raise ValueError("target_col")
-    print(
-        "\n── Phase 2: Walk-Forward Validation (XGBoost, date-based) ──────"
-    )
+    print("\n── Phase 2: Walk-Forward Validation (XGBoost) ─────────────────")
     if not train_df["game_date"].is_monotonic_increasing:
         raise ValueError("train_df must be sorted by game_date")
 
-    unique_dates = train_df["game_date"].unique()
-    n_dates = len(unique_dates)
-    train_window = round(n_dates * train_frac)
-    step_size = round(n_dates * step_frac)
     tier_map = dict(DEFAULT_MIN_TIERS if tiers is None else tiers)
-
-    print(f"Unique game dates in pool : {n_dates}")
-    print(f"Training window           : {train_window} dates (~{train_window / n_dates:.0%})")
-    print(f"Step size                 : {step_size} dates (~{step_size / n_dates:.0%})")
+    if folds is None:
+        unique_dates = np.sort(pd.to_datetime(train_df["game_date"]).unique())
+        n_dates = len(unique_dates)
+        train_window = round(n_dates * train_frac)
+        step_size = round(n_dates * step_frac)
+        print(f"Unique game dates in pool : {n_dates}")
+        window_share = train_window / n_dates
+        step_share = step_size / n_dates
+        print(f"Training window           : {train_window} dates (~{window_share:.0%})")
+        print(f"Step size                 : {step_size} dates (~{step_share:.0%})")
+        fold_list = list(
+            date_walk_forward_folds(
+                train_df,
+                train_frac=train_frac,
+                step_frac=step_frac,
+                n_folds=n_folds,
+            )
+        )
+    else:
+        fold_list = list(folds)
+        n_folds = len(fold_list)
+        print(f"Supplied folds            : {n_folds}")
 
     wf_results: list[dict[str, Any]] = []
     oof_parts: list[pd.DataFrame] = []
     fold_ranges: dict[int, dict[str, Any]] = {}
     models_last = preds_last = X_val_last = y_val_last = starting_last = None
+    early_rows = (
+        None
+        if early_team_games is None
+        else early_season_mask(train_df, n_games=int(early_team_games)).to_numpy()
+    )
 
-    for fold_info in date_walk_forward_folds(
-        train_df,
-        train_frac=train_frac,
-        step_frac=step_frac,
-        n_folds=n_folds,
-    ):
+    for fold_info in fold_list:
         train_mask = fold_info["train_mask"]
         val_mask = fold_info["val_mask"]
         train_dates = fold_info["train_dates"]
@@ -258,6 +341,10 @@ def run_walk_forward(
         if early_stop == "train_tail":
             fit_kwargs["train_dates"] = train_df.loc[train_mask, "game_date"]
             fit_kwargs["X_predict"] = X_val
+            if "season_type" in train_df.columns:
+                fit_kwargs["regular_mask"] = regular_season_mask(
+                    train_df.loc[train_mask, "season_type"]
+                )
 
         models, preds = fit_quantile_models(
             X_tr, y_tr, X_val, y_val,
@@ -271,6 +358,25 @@ def run_walk_forward(
             models=models,
             tiers=tier_map,
         )
+        if early_rows is not None:
+            on_val = np.asarray(val_mask, dtype=bool)
+            chosen = np.asarray(early_rows, dtype=bool)[on_val]
+            if bool(chosen.any()):
+                early_metrics = score_quantile_fold(
+                    np.asarray(y_val)[chosen],
+                    {key: np.asarray(value)[chosen] for key, value in preds.items()},
+                    fold_label=(
+                        f"{fold_info['label']} | first {early_team_games} team games"
+                    ),
+                    starting=np.asarray(starting_val)[chosen],
+                    tiers=tier_map,
+                )
+                metrics["early_n"] = early_metrics["n"]
+                metrics["early_mean_pinball"] = early_metrics["mean_pinball"]
+                metrics["early_pinball"] = early_metrics["pinball"]
+                metrics["early_coverage_80pct"] = early_metrics.get(
+                    "coverage_80pct", float("nan")
+                )
         metrics.update({
             "train_start": train_dates[0],
             "train_end": train_dates[-1],
@@ -312,36 +418,54 @@ def run_walk_forward(
         "last_fold": None,
         "oof": pd.DataFrame(),
         "fold_ranges": {},
+        "folds": fold_list,
     }
     if not wf_results:
         print("No walk-forward folds produced.")
         return empty_return
 
     pinballs = [r["pinball"] for r in wf_results]
+    means = [r.get("mean_pinball", float("nan")) for r in wf_results]
     covs = [r.get("coverage_80pct", float("nan")) for r in wf_results]
     cov_mean = float(np.nanmean(covs)) if np.any(~np.isnan(covs)) else float("nan")
     cov_std = float(np.nanstd(covs)) if np.any(~np.isnan(covs)) else float("nan")
 
     print(f"\n{'─' * 60}")
     print(f"Walk-Forward Summary ({len(wf_results)}/{n_folds} folds)")
-    print(f"  Pinball q50 : {np.mean(pinballs):.3f} ± {np.std(pinballs):.3f}")
+    print(f"  Mean pinball  : {np.mean(means):.3f} ± {np.std(means):.3f}")
+    print(f"  Pinball q50   : {np.mean(pinballs):.3f} ± {np.std(pinballs):.3f}")
     if np.isnan(cov_mean):
         print("  Coverage 80%: n/a (q10/q90 not fit)")
     else:
         print(f"  Coverage 80%: {cov_mean:.1%} ± {cov_std:.1%}  (target 80%)")
 
     print(f"\n{'─' * 60}")
-    print("Per-fold pinball (q50) and 80% coverage:")
-    print(f"  {'Fold':<45} {'Pinball':>10}  {'Coverage':>10}  {'Starters':>10}  {'Bench':>10}")
+    print("Per-fold mean pinball, q50 pinball, and 80% coverage:")
+    print(
+        f"  {'Fold':<45} {'Mean':>10}  {'q50':>10}  {'Coverage':>10}  "
+        f"{'Starters':>10}  {'Bench':>10}"
+    )
     for r in wf_results:
         s_cov = r.get("coverage_Starters", float("nan"))
         b_cov = r.get("coverage_Bench", float("nan"))
         cov80 = r.get("coverage_80pct", float("nan"))
         print(
-            f"  {r['fold']:<45} {r['pinball']:>10.3f}  "
+            f"  {r['fold']:<45} {r.get('mean_pinball', float('nan')):>10.3f}  "
+            f"{r['pinball']:>10.3f}  "
             f"{cov80:>9.1%}  "
             f"{s_cov:>9.1%}  {b_cov:>9.1%}"
         )
+    if any("early_n" in r for r in wf_results):
+        print(f"\nFirst {early_team_games} team games of each validation season:")
+        for r in wf_results:
+            if "early_n" not in r:
+                continue
+            early_cov = r.get("early_coverage_80pct", float("nan"))
+            print(
+                f"  {r['fold']:<45} n={r['early_n']:5d}  "
+                f"mean pinball {r['early_mean_pinball']:.3f}  "
+                f"80% coverage {early_cov:.1%}"
+            )
 
     print("\nPer-fold pinball (q50) by tier:")
     tier_keys = list(tier_map.keys())
@@ -354,11 +478,12 @@ def run_walk_forward(
         )
         print(row)
 
-    max_pinball = max(pinballs) if pinballs else 1.0
-    print("\nPinball q50 over folds (stable = good, rising = model aging):")
+    max_pinball = max(means) if means else 1.0
+    print("\nMean pinball over folds (stable = good, rising = model aging):")
     for r in wf_results:
-        bar = "█" * int((r["pinball"] / max_pinball) * 20) if max_pinball else ""
-        print(f"  {r['fold']:<45} {r['pinball']:.3f}  {bar}")
+        value = r.get("mean_pinball", float("nan"))
+        bar = "█" * int((value / max_pinball) * 20) if max_pinball else ""
+        print(f"  {r['fold']:<45} {value:.3f}  {bar}")
 
     oof = pd.concat(oof_parts, axis=0) if oof_parts else pd.DataFrame()
     return {
@@ -371,6 +496,7 @@ def run_walk_forward(
         "last_fold": wf_results[-1],
         "oof": oof,
         "fold_ranges": fold_ranges,
+        "folds": fold_list,
     }
 
 
@@ -390,16 +516,16 @@ def evaluate_holdout(
 ) -> dict[str, Any]:
     """Blind holdout evaluation on the held-out season.
 
-    Early stopping uses the last ``train_tail_frac`` of training dates,
-    the same rule as walk-forward. The holdout is predicted and is not
-    the stopping set.
+    The round count comes from the last ``train_tail_frac`` of
+    regular-season training dates. The model is then refit on the full
+    window. The holdout is predicted and is not the stopping set.
     """
     features = list(features)
     print(f"── {fold_label} ─────────────────────────────────────────────────")
     print(
-        "  Train pool: last "
-        f"{train_tail_frac:.0%} of training dates for early-stopping only; "
-        "predict holdout (never in eval_set)."
+        "  Round count from the last "
+        f"{train_tail_frac:.0%} of regular-season training dates; "
+        "refit on the full window; predict holdout (never in eval_set)."
     )
 
     X_train_full = train_df[features]
@@ -408,6 +534,9 @@ def evaluate_holdout(
     y_ho = holdout_df[target_col]
     starting_ho = holdout_df[role_col].values
 
+    holdout_kwargs: dict[str, Any] = {}
+    if "season_type" in train_df.columns:
+        holdout_kwargs["regular_mask"] = regular_season_mask(train_df["season_type"])
     models_ho, pred_frame = fit_quantile_models(
         X_train_full,
         y_train_full,
@@ -419,6 +548,7 @@ def evaluate_holdout(
         train_dates=train_df["game_date"],
         train_tail_frac=train_tail_frac,
         X_predict=X_ho,
+        **holdout_kwargs,
     )
     preds_ho = {
         key: np.asarray(value, dtype=float) for key, value in pred_frame.items()
@@ -432,17 +562,39 @@ def evaluate_holdout(
         tiers=tiers,
     )
 
+    early_cols = {"team_id", "game_id", "season_year"}
+    if early_cols.issubset(holdout_df.columns):
+        early = early_season_mask(holdout_df, n_games=10).to_numpy()
+        if bool(early.any()):
+            early_metrics = score_quantile_fold(
+                y_ho.to_numpy()[early],
+                {key: np.asarray(value)[early] for key, value in preds_ho.items()},
+                fold_label=f"{fold_label} | first 10 team games",
+                starting=np.asarray(starting_ho)[early],
+                tiers=tiers,
+            )
+            ho_metrics["early_n"] = early_metrics["n"]
+            ho_metrics["early_mean_pinball"] = early_metrics["mean_pinball"]
+            ho_metrics["early_pinball"] = early_metrics["pinball"]
+            ho_metrics["early_coverage_80pct"] = early_metrics.get(
+                "coverage_80pct", float("nan")
+            )
+
     if wf_results:
+        wf_mean = float(np.mean([r.get("mean_pinball", np.nan) for r in wf_results]))
         wf_pinball = float(np.mean([r["pinball"] for r in wf_results]))
         wf_coverage = float(np.mean([r["coverage_80pct"] for r in wf_results]))
+        ho_mean = ho_metrics["mean_pinball"]
         ho_pinball = ho_metrics["pinball"]
         ho_coverage = ho_metrics["coverage_80pct"]
         pinball_gap = ho_pinball - wf_pinball
         print(f"\n{'─' * 55}")
+        print(f"  Walk-forward mean pinball       : {wf_mean:.3f}")
+        print(f"  Holdout mean pinball            : {ho_mean:.3f}")
         print(f"  Walk-forward pinball q50 (mean) : {wf_pinball:.3f}")
         print(f"  Holdout pinball q50             : {ho_pinball:.3f}")
         print(
-            f"  Pinball gap                     : {pinball_gap:+.3f}  "
+            f"  q50 pinball gap                 : {pinball_gap:+.3f}  "
             f"{'⚠ investigate' if abs(pinball_gap) > 0.25 else '✓ acceptable'}"
         )
         print(f"  Walk-forward 80% coverage (mean): {wf_coverage:.1%}")

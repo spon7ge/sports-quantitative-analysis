@@ -83,6 +83,7 @@ except ImportError:  # python nba_prizepick.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 _DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "prizepicks")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -1361,6 +1362,7 @@ def extract_projections(
     skipped_wrong_type = 0
     skipped_no_line_score = 0
     skipped_no_player = 0
+    skipped_started = 0
     added = 0
 
     for proj in raw_projections:
@@ -1373,6 +1375,10 @@ def extract_projections(
 
         if line_score is None:
             skipped_no_line_score += 1
+            continue
+
+        if game_has_started(attrs.get("start_time"), status=attrs.get("status")):
+            skipped_started += 1
             continue
 
         rel = proj.get("relationships") or {}
@@ -1403,7 +1409,8 @@ def extract_projections(
 
     logger.info(
         f"Extraction complete ({league}): added={added}, skipped_type={skipped_wrong_type}, "
-        f"skipped_no_line={skipped_no_line_score}, skipped_no_player={skipped_no_player}"
+        f"skipped_no_line={skipped_no_line_score}, skipped_no_player={skipped_no_player}, "
+        f"skipped_started={skipped_started}"
     )
 
     return projections

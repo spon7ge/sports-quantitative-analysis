@@ -14,7 +14,6 @@ select = ["E", "F", "I", "UP"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/mlb"]
 ignore_missing_imports = true
 warn_unused_ignores = false
 check_untyped_defs = true

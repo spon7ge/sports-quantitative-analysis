@@ -73,6 +73,11 @@ TREND_FEATURES = [
     "pts_mean_3_minus_10",
     "ppm_10_minus_season",
     "fga_per_min_5_minus_season",
+    "min_trend",
+    "pts_trend",
+    "cfga_trend",
+    "ufga_trend",
+    "usg_trend",
 ]
 
 STACKED_INTERACTIONS = [

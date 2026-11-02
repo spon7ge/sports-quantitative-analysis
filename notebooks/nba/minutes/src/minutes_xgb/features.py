@@ -14,22 +14,10 @@ def add_total_stars_active(frame: pd.DataFrame) -> pd.DataFrame:
     minutes counts as not having played. Every row in the team-game
     receives the same count, including players outside the top three.
     """
-    result = frame.copy()
-    stars = result["starter_rank"].le(3)
-    played = result["minutes"].fillna(0).gt(0)
-    active = (
-        result.loc[stars, ["team_id", "game_id"]]
-        .assign(played=played.loc[stars].astype(int))
-        .groupby(["team_id", "game_id"], sort=False)["played"]
-        .sum()
-    )
-    result["total_stars_active"] = (
-        result.set_index(["team_id", "game_id"])
-        .index.map(active)
-        .fillna(0)
-        .astype(int)
-    )
-    return result
+    ensure_repo_on_path()
+    from src.features.minutes import add_total_stars_active as shared_star_count
+
+    return shared_star_count(frame)
 
 
 def build_model_frame(frame: pd.DataFrame) -> pd.DataFrame:

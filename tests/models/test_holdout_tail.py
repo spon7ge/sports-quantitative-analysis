@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
 from models.shared import train as train_mod
 from models.shared.train import evaluate_holdout
 
@@ -15,8 +14,11 @@ def test_holdout_stops_on_the_last_training_dates_and_not_the_holdout(monkeypatc
     class _FakeBooster:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.best_iteration = 0
 
         def fit(self, X, y, eval_set=None, verbose=False):
+            if eval_set is None:
+                return
             seen["eval_index"] = eval_set[0][0].index.to_numpy().copy()
             seen["eval_y"] = np.asarray(eval_set[0][1], dtype=float).copy()
 

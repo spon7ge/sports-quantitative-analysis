@@ -46,6 +46,10 @@ RATE_SPEC = ConformalSpec(
 TAIL_FOLDS = (1, 2, 3, 4)
 
 
+def _active_spec(spec: ConformalSpec | None) -> ConformalSpec:
+    return RATE_SPEC if spec is None else spec
+
+
 def oof_player_games(oof: pd.DataFrame, ppm_df: pd.DataFrame) -> pd.DataFrame:
     """Player-games for the OOF rows. Duplicate rows are an error."""
     if oof.index.duplicated().any():
@@ -85,9 +89,7 @@ def oof_leakage_table(
             }
         )
         if oof_dates & train_dates or oof_dates & stop or oof_dates != val_dates:
-            raise RuntimeError(
-                f"fold {fold['fold']} leaks or does not match its dates"
-            )
+            raise RuntimeError(f"fold {fold['fold']} leaks or does not match its dates")
     return pd.DataFrame(rows)
 
 
@@ -109,8 +111,15 @@ def fold_base_knots(
     oof: pd.DataFrame,
     ppm_df: pd.DataFrame,
     train_masks: Sequence,
+    *,
+    spec: ConformalSpec | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
-    """Sort each fold, then fill cold starts from that fold's training rates."""
+    """Sort each fold, then fill cold starts from that fold's training rows.
+
+    The default spec is the points-per-minute contract. A points run
+    passes its own spec so the history column and lag match the label.
+    """
+    chosen = _active_spec(spec)
     require_preholdout(oof)
     fold_ids = sorted(int(value) for value in oof["fold_id"].unique())
     if fold_ids != list(range(1, len(train_masks) + 1)):
@@ -119,14 +128,14 @@ def fold_base_knots(
     parts = []
     for fold_id, part in oof.groupby("fold_id", sort=True):
         history = ppm_df.loc[
-            train_masks[int(fold_id) - 1], ["starting", TARGET_COL]
+            train_masks[int(fold_id) - 1], ["starting", chosen.target_col]
         ]
         built = base_knots(
             part[knots],
             part["starting"].to_numpy(),
-            ppm_df.loc[part.index, LAG_COL].to_numpy(),
+            ppm_df.loc[part.index, chosen.lag_col].to_numpy(),
             history,
-            target_col=TARGET_COL,
+            target_col=chosen.target_col,
         )
         parts.append(built)
     base = pd.concat(parts).reindex(oof.index)
@@ -134,20 +143,30 @@ def fold_base_knots(
         raise RuntimeError("base knots are not finite")
     group = calibration_group(
         base["q_0.50"].to_numpy(),
-        ppm_df.loc[oof.index, LAG_COL].to_numpy(),
-        tiers=RATE_Q50_TIERS,
+        ppm_df.loc[oof.index, chosen.lag_col].to_numpy(),
+        tiers=chosen.tiers,
     )
     return base, group
 
 
-def calibration_table(y, dates, base, group, *, starting, n_boot: int, seed: int):
-    """Per-knot gap on the rate spec."""
+def calibration_table(
+    y,
+    dates,
+    base,
+    group,
+    *,
+    starting,
+    n_boot: int,
+    seed: int,
+    spec: ConformalSpec | None = None,
+):
+    """Per-knot gap on the given spec, or the rate spec when omitted."""
     return _calibration_table(
         y,
         dates,
         base,
         group,
-        spec=RATE_SPEC,
+        spec=_active_spec(spec),
         starting=starting,
         n_boot=n_boot,
         seed=seed,
@@ -162,42 +181,56 @@ def nested_offset_backtest(
     folds: Sequence[int] = (3, 4, 5),
     n_boot: int,
     seed: int,
+    spec: ConformalSpec | None = None,
 ) -> dict:
-    """Fit rate offsets on earlier folds and score fold k."""
+    """Fit offsets on earlier folds and score fold k."""
     require_preholdout(oof)
     return _nested_offset_backtest(
         oof,
         base,
         group,
-        RATE_SPEC,
+        _active_spec(spec),
         folds=folds,
         n_boot=n_boot,
         seed=seed,
     )
 
 
-def holdout_role_quantiles(ppm_df: pd.DataFrame) -> pd.DataFrame:
+def holdout_role_quantiles(
+    ppm_df: pd.DataFrame,
+    *,
+    spec: ConformalSpec | None = None,
+) -> pd.DataFrame:
     """Starter and bench quantiles from the pre-holdout pool."""
+    chosen = _active_spec(spec)
     return role_quantile_table(
-        ppm_df[["starting", TARGET_COL]],
+        ppm_df[["starting", chosen.target_col]],
         QUANTILES,
-        target_col=TARGET_COL,
+        target_col=chosen.target_col,
     )
 
 
-def rate_payload(offsets, groups, dates, role_quantiles) -> dict:
+def rate_payload(
+    offsets,
+    groups,
+    dates,
+    role_quantiles,
+    *,
+    spec: ConformalSpec | None = None,
+) -> dict:
     """Payload stored on the points bundle."""
+    chosen = _active_spec(spec)
     return calibration_payload(
         offsets,
         groups,
         dates,
-        min_n=RATE_SPEC.min_n,
+        min_n=chosen.min_n,
         role_quantiles=role_quantiles,
-        max_minutes=RATE_SPEC.clip_high,
-        target=TARGET_COL,
-        lag_col=LAG_COL,
-        tiers=RATE_Q50_TIERS,
-        clip_low=RATE_SPEC.clip_low,
+        max_minutes=chosen.clip_high,
+        target=chosen.target_col,
+        lag_col=chosen.lag_col,
+        tiers=chosen.tiers,
+        clip_low=chosen.clip_low,
     )
 
 
@@ -206,42 +239,55 @@ def holdout_calibrated(
     ppm_holdout: pd.DataFrame,
     offsets: pd.DataFrame,
     role_quantiles: pd.DataFrame,
+    *,
+    spec: ConformalSpec | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
     """Base knots, groups, and clipped offsets for the holdout. No fit."""
+    chosen = _active_spec(spec)
     base = base_knots(
         preds_ho,
         ppm_holdout["starting"],
-        ppm_holdout[LAG_COL],
+        ppm_holdout[chosen.lag_col],
         role_quantiles=role_quantiles,
-        target_col=TARGET_COL,
+        target_col=chosen.target_col,
     )
     group = calibration_group(
         base["q_0.50"],
-        ppm_holdout[LAG_COL],
-        tiers=RATE_Q50_TIERS,
+        ppm_holdout[chosen.lag_col],
+        tiers=chosen.tiers,
     )
     calibrated = apply_offsets(
         base,
         group,
         offsets,
-        RATE_SPEC.clip_high,
-        lower=RATE_SPEC.clip_low,
+        chosen.clip_high,
+        lower=chosen.clip_low,
     )
     return base, group, calibrated
 
 
-def fit_rate_offsets(base: pd.DataFrame, oof: pd.DataFrame, group) -> pd.DataFrame:
+def fit_rate_offsets(
+    base: pd.DataFrame,
+    oof: pd.DataFrame,
+    group,
+    *,
+    spec: ConformalSpec | None = None,
+) -> pd.DataFrame:
     """One offset table on every pre-holdout out-of-fold row."""
+    chosen = _active_spec(spec)
     require_preholdout(oof)
     knots = _knot_columns(base)
     levels = {key: float(key.split("_", 1)[1]) for key in knots}
     return fit_offsets(
         base,
-        oof[TARGET_COL],
+        oof[chosen.target_col],
         group,
         levels,
-        min_n=RATE_SPEC.min_n,
-        group_order=("cold_start", *[name for name, _low, _high in RATE_Q50_TIERS]),
+        min_n=chosen.min_n,
+        group_order=(
+            "cold_start",
+            *[name for name, _low, _high in chosen.tiers],
+        ),
     )
 
 
@@ -250,17 +296,19 @@ def calibrated_tail_frame(
     calibrated: pd.DataFrame,
     *,
     folds: Sequence[int] = TAIL_FOLDS,
+    spec: ConformalSpec | None = None,
 ) -> pd.DataFrame:
     """Calibrated knots with the outcome column renamed to ``rate``.
 
     Fold 5 stays in the notebook's miss-rate table and is left out of
     the sidecar ``ppm_sampler.load_tail_sidecar`` can load.
     """
+    active = _active_spec(spec)
     require_preholdout(oof)
     keep = oof["fold_id"].isin(list(folds))
     chosen = oof.loc[keep].copy()
     knots = _knot_columns(calibrated)
     for column in knots:
         chosen[column] = calibrated.loc[keep, column].to_numpy(dtype=float)
-    chosen["rate"] = chosen[TARGET_COL].to_numpy(dtype=float)
-    return chosen.drop(columns=[TARGET_COL]).reset_index(drop=True)
+    chosen["rate"] = chosen[active.target_col].to_numpy(dtype=float)
+    return chosen.drop(columns=[active.target_col]).reset_index(drop=True)

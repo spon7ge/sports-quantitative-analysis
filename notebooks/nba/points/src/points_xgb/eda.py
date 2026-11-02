@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -62,9 +65,11 @@ def plot_missingness(miss: pd.DataFrame):
 def rate_outlier_summary(
     frame: pd.DataFrame,
     target_col: str,
-    cap: float,
-) -> dict[str, float | int]:
-    """Tukey fence and cap count for the points-per-minute label."""
+    cap: float | None = None,
+    *,
+    unit: str = "points per minute",
+) -> dict[str, float | int | str | None]:
+    """Tukey fence for the label, plus a cap count when a cap is set."""
     rate = frame[target_col]
     q1, q3 = rate.quantile(0.25), rate.quantile(0.75)
     iqr = q3 - q1
@@ -78,30 +83,34 @@ def rate_outlier_summary(
         "fence_low": float(lo),
         "fence_high": float(hi),
         "n_outside": n_tukey,
-        "n_at_cap": int((rate >= cap).sum()),
-        "cap": float(cap),
+        "n_at_cap": 0 if cap is None else int((rate >= cap).sum()),
+        "cap": None if cap is None else float(cap),
+        "unit": unit,
     }
 
 
-def format_rate_outliers(stats: dict[str, float | int]) -> str:
+def format_rate_outliers(stats: dict[str, float | int | str | None]) -> str:
     n = int(stats["n"])
     outside = int(stats["n_outside"])
-    return "\n".join(
-        [
-            (
-                f"n={n:,}  min={stats['min']:.2f}  "
-                f"p50={stats['p50']:.2f}  max={stats['max']:.2f}"
-            ),
-            (
-                f"Tukey fence [{stats['fence_low']:.2f}, {stats['fence_high']:.2f}]  "
-                f"outside={outside:,} ({outside / n:.1%})"
-            ),
-            (
-                f"Rows at the {float(stats['cap']):g} points-per-minute cap: "
-                f"{int(stats['n_at_cap']):,}"
-            ),
-        ]
-    )
+    lines = [
+        (
+            f"n={n:,}  min={stats['min']:.2f}  "
+            f"p50={stats['p50']:.2f}  max={stats['max']:.2f}"
+        ),
+        (
+            f"Tukey fence [{stats['fence_low']:.2f}, {stats['fence_high']:.2f}]  "
+            f"outside={outside:,} ({outside / n:.1%})"
+        ),
+    ]
+    if stats["cap"] is not None:
+        unit = stats["unit"]
+        if unit == "points per minute":
+            unit = "points-per-minute"
+        lines.append(
+            f"Rows at the {float(stats['cap']):g} {unit} cap: "
+            f"{int(stats['n_at_cap']):,}"
+        )
+    return "\n".join(lines)
 
 
 def top_rate_rows(frame: pd.DataFrame, target_col: str, n: int = 8) -> pd.DataFrame:
@@ -112,16 +121,28 @@ def top_rate_rows(frame: pd.DataFrame, target_col: str, n: int = 8) -> pd.DataFr
     )
 
 
-def plot_rate(frame: pd.DataFrame, target_col: str, upper_fence: float):
+def plot_rate(
+    frame: pd.DataFrame,
+    target_col: str,
+    upper_fence: float,
+    *,
+    unit: str = "points per minute",
+):
     rate = frame[target_col]
+    title = unit[:1].upper() + unit[1:]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     axes[0].hist(rate, bins=48, color="C0", edgecolor="white")
-    axes[0].axvline(upper_fence, color="C3", ls="--", label=f"upper fence {upper_fence:.1f}")
-    axes[0].set_title("Points per minute")
-    axes[0].set_xlabel("points per minute")
+    axes[0].axvline(
+        upper_fence,
+        color="C3",
+        ls="--",
+        label=f"upper fence {upper_fence:.1f}",
+    )
+    axes[0].set_title(title)
+    axes[0].set_xlabel(unit)
     axes[0].legend()
     sns.boxplot(x=rate, ax=axes[1], color="C0")
-    axes[1].set_title("Points per minute")
+    axes[1].set_title(title)
     fig.tight_layout()
     return fig
 
@@ -246,3 +267,48 @@ def season_coverage(frame: pd.DataFrame, features: list[str]) -> pd.DataFrame:
         .round(2)
     )
     return coverage
+
+
+def plot_reliability(curves: Mapping[str, pd.DataFrame]):
+    """Nominal tau against jittered coverage. The diagonal is perfect calibration.
+
+    Each frame is a ``calibration_table`` result with ``tau`` and ``coverage``.
+    The shaded band is tau 0.3–0.7, the range the line-gap check uses.
+    """
+    if not curves:
+        raise ValueError("reliability curve needs at least one table")
+    fig, ax = plt.subplots(figsize=(6.5, 6))
+    ax.axvspan(0.3, 0.7, color="0.92", zorder=0)
+    ax.plot([0, 1], [0, 1], color="0.45", ls="--", label="perfect calibration")
+    for name, table in curves.items():
+        tau, coverage = _reliability_xy(table)
+        ax.plot(tau, coverage, marker="o", label=str(name))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("nominal quantile")
+    ax.set_ylabel("empirical coverage")
+    ax.set_title("Reliability")
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def _reliability_xy(table: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    if not isinstance(table, pd.DataFrame):
+        raise ValueError("reliability curve expects a calibration table")
+    missing = [column for column in ("tau", "coverage") if column not in table.columns]
+    if missing:
+        raise ValueError("reliability table missing " + ", ".join(missing))
+    if table.empty:
+        raise ValueError("reliability table is empty")
+    tau = table["tau"].to_numpy(dtype=float)
+    coverage = table["coverage"].to_numpy(dtype=float)
+    if not np.isfinite(tau).all() or not np.isfinite(coverage).all():
+        raise ValueError("tau and coverage must be finite")
+    if np.any((tau <= 0.0) | (tau >= 1.0)):
+        raise ValueError("tau must be in (0, 1)")
+    if np.any((coverage < 0.0) | (coverage > 1.0)):
+        raise ValueError("coverage must be in [0, 1]")
+    order = np.argsort(tau, kind="mergesort")
+    return tau[order], coverage[order]

@@ -496,6 +496,7 @@ except ImportError:  # python mlb_novig.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 _DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "novig", "mlb")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -1162,10 +1163,32 @@ def fetch_via_selenium() -> tuple[list[dict[str, Any]], dict[str, list[dict[str,
     )
 
 
+def pregame_events(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Drop games that are live, finished, or already past start."""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for event in events:
+        game = event.get("game") if isinstance(event, dict) else None
+        start = game.get("scheduled_start") if isinstance(game, dict) else None
+        status = event.get("status") if isinstance(event, dict) else None
+        if isinstance(event, dict) and game_has_started(start, status=status, now=now):
+            dropped += 1
+            continue
+        if isinstance(event, dict):
+            kept.append(event)
+    if dropped:
+        logger.info("Skipping %s Novig game(s) that already started", dropped)
+    return kept
+
+
 def _fetch_graphql_snapshots(
     session: requests.Session,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    events = fetch_mlb_events(session)
+    events = pregame_events(fetch_mlb_events(session))
     markets_by_event_id: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         event_id = event.get("id")

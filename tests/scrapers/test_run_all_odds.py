@@ -227,6 +227,33 @@ def test_run_on_marks_waits_for_quarter_hours_and_skips_overrun_slots() -> None:
     ]
 
 
+def test_run_all_prints_arbitrage_under_the_succeeded_line(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("src.scrapers.run_all_odds.run_job", lambda job, **_kwargs: 0)
+
+    def fake_report(*, league, not_before, root=None):
+        print("ARB_MARKER", flush=True)
+        assert league == "nba"
+        assert not_before is not None
+        return 0
+
+    monkeypatch.setattr("src.scrapers.run_all_odds.report_arbitrage", fake_report)
+    assert main(["--league", "nba"]) == 0
+    out = capsys.readouterr().out
+    assert "8/8 succeeded" in out
+    assert out.index("8/8 succeeded") < out.index("ARB_MARKER")
+
+
+def test_arbitrage_error_does_not_fail_the_scrape(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("src.scrapers.run_all_odds.run_job", lambda job, **_kwargs: 0)
+
+    def boom(*, league, not_before, root=None):
+        raise RuntimeError("disk")
+
+    monkeypatch.setattr("src.scrapers.run_all_odds.report_arbitrage", boom)
+    assert main(["--league", "nba"]) == 0
+    assert "Arbitrage check failed: disk" in capsys.readouterr().out
+
+
 def test_cli_every_schedules_clock_aligned_runs(monkeypatch) -> None:
     seen: dict[str, int] = {}
 

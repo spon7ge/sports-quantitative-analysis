@@ -77,7 +77,8 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             [
                 _player_row(1, "2024-01-01", 10, pts=10, game_id=1),
                 _player_row(1, "2024-01-03", 20, pts=20, game_id=2),
-                _player_row(1, "2024-01-05", 30, pts=30, game_id=3),
+                _player_row(1, "2024-01-05", 30, pts=40, game_id=3),
+                _player_row(1, "2024-01-07", 30, pts=5, game_id=4),
             ]
         )
         featured = add_points_features(frame)
@@ -88,6 +89,10 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         self.assertEqual(third["pts_lag_1"], 20)
         self.assertEqual(third["pts_mean_3"], 15)
         self.assertEqual(third["pts_mean_10"], 15)
+        self.assertEqual(third["pts_median_10"], 15)
+        fourth = featured.loc[featured["game_id"].eq(4)].iloc[0]
+        self.assertEqual(fourth["pts_median_10"], 20)
+        self.assertAlmostEqual(fourth["pts_mean_10"], 70 / 3)
         self.assertEqual(third["min_lag_1"], 20)
 
         mutated = frame.copy()
@@ -106,6 +111,7 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         for column in (
             "pts_lag_1",
             "pts_mean_3",
+            "pts_median_10",
             "pts_per_min_10",
             "min_lag_1",
             "fga_per_min_10",
@@ -120,6 +126,581 @@ class PointsFeatureLeakageTests(unittest.TestCase):
                 third[column],
                 column,
             )
+
+    def test_raw_box_history_uses_only_prior_games(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    20,
+                    pts=10,
+                    game_id=1,
+                    fga=8,
+                    fta=2,
+                    fg3_a=3,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    30,
+                    pts=20,
+                    game_id=2,
+                    fga=12,
+                    fta=4,
+                    fg3_a=6,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-05",
+                    24,
+                    pts=30,
+                    game_id=3,
+                    fga=15,
+                    fta=5,
+                    fg3_a=7,
+                ),
+            ]
+        )
+        makes = {1: (4, 1, 1), 2: (8, 2, 4), 3: (12, 3, 5)}
+        for game_id, (fgm, fg3_m, ftm) in makes.items():
+            loc = frame["game_id"].eq(game_id)
+            frame.loc[loc, "fgm"] = fgm
+            frame.loc[loc, "fg3_m"] = fg3_m
+            frame.loc[loc, "ftm"] = ftm
+
+        frame["poss"] = [10, 20, 30]
+        frame["tchs"] = [4, 8, 12]
+        featured = add_points_features(frame).set_index("game_id")
+        row = featured.loc[3]
+
+        def ewm(values: list[float]) -> float:
+            return float(
+                pd.Series(values)
+                .ewm(halflife=10, adjust=False)
+                .mean()
+                .iloc[-1]
+            )
+
+        self.assertTrue(np.isnan(featured.loc[1, "pts_ewm_hl_10"]))
+        self.assertAlmostEqual(featured.loc[2, "pts_ewm_hl_10"], 10)
+        self.assertAlmostEqual(row["pts_ewm_hl_10"], ewm([10, 20]))
+        self.assertAlmostEqual(row["fga_ewm_hl_10"], ewm([8, 12]))
+        self.assertAlmostEqual(row["fta_ewm_hl_10"], ewm([2, 4]))
+        self.assertAlmostEqual(row["fg3a_ewm_hl_10"], ewm([3, 6]))
+        self.assertAlmostEqual(row["minutes_ewm_10"], ewm([20, 30]))
+        self.assertTrue(np.isnan(featured.loc[1, "poss_ewm_hl_10"]))
+        self.assertTrue(np.isnan(featured.loc[1, "tchs_ewm_hl_10"]))
+        self.assertAlmostEqual(row["poss_ewm_hl_10"], ewm([10, 20]))
+        self.assertAlmostEqual(row["tchs_ewm_hl_10"], ewm([4, 8]))
+        self.assertTrue(np.isnan(featured.loc[1, "fga_lag_1"]))
+        self.assertEqual(featured.loc[2, "fga_lag_1"], 8)
+        self.assertEqual(row["fga_lag_1"], 12)
+
+        fgm_ewm = ewm([4, 8])
+        fg3m_ewm = ewm([1, 2])
+        ftm_ewm = ewm([1, 4])
+        fga_ewm = ewm([8, 12])
+        fg3a_ewm = ewm([3, 6])
+        fta_ewm = ewm([2, 4])
+        pts_ewm = ewm([10, 20])
+        self.assertAlmostEqual(
+            row["fg_pct_ewm_hl_10"],
+            fgm_ewm / fga_ewm,
+        )
+        self.assertAlmostEqual(
+            row["fg3_pct_ewm_hl_10"],
+            fg3m_ewm / fg3a_ewm,
+        )
+        self.assertAlmostEqual(
+            row["ft_pct_ewm_hl_10"],
+            ftm_ewm / fta_ewm,
+        )
+        expected_efg = (fgm_ewm + 0.5 * fg3m_ewm) / fga_ewm
+        expected_ts = pts_ewm / (2 * (fga_ewm + 0.44 * fta_ewm))
+        self.assertAlmostEqual(row["efg_pct_ewm_hl_10"], expected_efg)
+        self.assertAlmostEqual(row["ts_pct_ewm_hl_10"], expected_ts)
+        self.assertAlmostEqual(row["efg_pct_smoothed"], expected_efg)
+        self.assertAlmostEqual(row["ts_pct_smoothed"], expected_ts)
+        self.assertAlmostEqual(
+            row["pts_sd_10"],
+            float(pd.Series([10.0, 20.0]).std()),
+        )
+        self.assertAlmostEqual(
+            row["fga_sd_10"],
+            float(pd.Series([8.0, 12.0]).std()),
+        )
+        self.assertAlmostEqual(
+            row["min_sd_10"],
+            float(pd.Series([20.0, 30.0]).std()),
+        )
+
+        frame["pfd"] = [2, 4, 9]
+        frame["cfga"] = [5, 7, 20]
+        frame["ufga"] = [3, 1, 15]
+        shot_quality = add_points_features(frame).set_index("game_id")
+        shot_row = shot_quality.loc[3]
+        self.assertTrue(np.isnan(shot_quality.loc[1, "pfd_ewm_hl_10"]))
+        self.assertAlmostEqual(shot_quality.loc[2, "pfd_ewm_hl_10"], 2)
+        self.assertAlmostEqual(shot_row["pfd_ewm_hl_10"], ewm([2, 4]))
+        self.assertAlmostEqual(shot_row["cfga_ewm_hl_10"], ewm([5, 7]))
+        self.assertAlmostEqual(shot_row["ufga_ewm_hl_10"], ewm([3, 1]))
+
+        mutated = frame.copy()
+        current = mutated["game_id"].eq(3)
+        for column, value in {
+            "pts": 99,
+            "fga": 99,
+            "fta": 99,
+            "fg3_a": 99,
+            "fgm": 99,
+            "fg3_m": 99,
+            "ftm": 99,
+            "poss": 99,
+            "tchs": 99,
+            "minutes": 99,
+            "min": 99,
+            "min_sec": "99:00",
+            "pfd": 99,
+            "cfga": 99,
+            "ufga": 99,
+        }.items():
+            mutated.loc[current, column] = value
+        mutated_row = (
+            add_points_features(mutated).set_index("game_id").loc[3]
+        )
+        for column in (
+            "pts_ewm_hl_10",
+            "fga_lag_1",
+            "fga_ewm_hl_10",
+            "fta_ewm_hl_10",
+            "fg3a_ewm_hl_10",
+            "poss_ewm_hl_10",
+            "tchs_ewm_hl_10",
+            "minutes_ewm_10",
+            "fg_pct_ewm_hl_10",
+            "fg3_pct_ewm_hl_10",
+            "ft_pct_ewm_hl_10",
+            "efg_pct_ewm_hl_10",
+            "ts_pct_ewm_hl_10",
+            "efg_pct_smoothed",
+            "ts_pct_smoothed",
+            "pts_sd_10",
+            "fga_sd_10",
+            "min_sd_10",
+        ):
+            self.assertAlmostEqual(
+                mutated_row[column],
+                row[column],
+                msg=column,
+            )
+        for column in (
+            "pfd_ewm_hl_10",
+            "cfga_ewm_hl_10",
+            "ufga_ewm_hl_10",
+        ):
+            self.assertAlmostEqual(
+                mutated_row[column],
+                shot_row[column],
+                msg=column,
+            )
+
+    def test_rolling_means_use_only_prior_games(self) -> None:
+        values = {
+            "pts": [5, 10, 15, 20, 99],
+            "fga": [1, 2, 3, 4, 99],
+            "fta": [2, 2, 4, 6, 99],
+            "fg3_a": [0, 1, 1, 4, 99],
+            "poss": [8, 10, 12, 14, 99],
+            "tchs": [20, 30, 40, 50, 99],
+            "pfd": [1, 1, 2, 4, 99],
+            "cfga": [1, 1, 2, 2, 99],
+            "ufga": [0, 1, 1, 2, 99],
+            "usg_pct": [0.18, 0.22, 0.20, 0.30, 0.99],
+        }
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    f"2024-01-{index + 1:02d}",
+                    minutes=10 * (index + 1),
+                    pts=values["pts"][index],
+                    game_id=index + 1,
+                    fga=values["fga"][index],
+                    fta=values["fta"][index],
+                    fg3_a=values["fg3_a"][index],
+                )
+                for index in range(5)
+            ]
+        )
+        for column, series in values.items():
+            frame[column] = series
+        featured = add_points_features(frame).set_index("game_id")
+        names = {
+            "pts": "pts",
+            "fga": "fga",
+            "fta": "fta",
+            "fg3_a": "fg3a",
+            "poss": "poss",
+            "tchs": "tchs",
+            "pfd": "pfd",
+            "cfga": "cfga",
+            "ufga": "ufga",
+        }
+        self.assertTrue(np.isnan(featured.loc[1, "pts_rolling_10"]))
+        self.assertTrue(np.isnan(featured.loc[1, "pts_rolling_3"]))
+        self.assertEqual(featured.loc[2, "pts_rolling_3"], 5)
+        current = featured.loc[5]
+        for source, name in names.items():
+            prior = values[source][:-1]
+            self.assertAlmostEqual(
+                current[f"{name}_rolling_3"],
+                float(np.mean(prior[-3:])),
+                msg=name,
+            )
+            self.assertAlmostEqual(
+                current[f"{name}_rolling_10"],
+                float(np.mean(prior)),
+                msg=name,
+            )
+        self.assertTrue(np.isnan(featured.loc[1, "usg_rolling_10"]))
+        self.assertAlmostEqual(
+            current["usg_rolling_10"],
+            float(np.mean(values["usg_pct"][:-1])),
+        )
+        self.assertAlmostEqual(current["minutes_rolling_3"], 30)
+        self.assertAlmostEqual(current["minutes_rolling_10"], 25)
+
+        mutated = frame.copy()
+        current_game = mutated["game_id"].eq(5)
+        mutated.loc[current_game, "minutes"] = 99
+        mutated.loc[current_game, "min"] = 99
+        mutated.loc[current_game, "min_sec"] = "99:00"
+        for column in values:
+            mutated.loc[current_game, column] = 0
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[5]
+        for name in (*names.values(), "minutes"):
+            for window in (3, 10):
+                column = f"{name}_rolling_{window}"
+                self.assertAlmostEqual(
+                    mutated_row[column],
+                    current[column],
+                    msg=column,
+                )
+        self.assertAlmostEqual(
+            mutated_row["usg_rolling_10"],
+            current["usg_rolling_10"],
+        )
+
+    def test_last_10_min_and_max_ignore_the_current_game(self) -> None:
+        series = {
+            "cfga": [100, 1, 4, 2, 9, 3, 8, 5, 7, 6, 0, 999],
+            "ufga": [50, 2, 3, 1, 8, 4, 7, 5, 6, 3, 2, 999],
+            "fta": [40, 6, 1, 5, 2, 8, 3, 4, 7, 2, 1, 999],
+            "fg3_a": [30, 0, 4, 1, 5, 2, 3, 1, 4, 2, 0, 999],
+            "tchs": [200, 10, 40, 15, 55, 20, 35, 25, 45, 30, 12, 999],
+            "usg_pct": [0.9, 0.18, 0.30, 0.21, 0.33, 0.19, 0.28, 0.22, 0.31, 0.20, 0.17, 0.99],
+        }
+        expected = {
+            "cfga": (0, 9),
+            "ufga": (1, 8),
+            "fta": (1, 8),
+            "fg3a": (0, 5),
+            "tchs": (10, 55),
+            "usg_pct": (0.17, 0.33),
+        }
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    f"2024-01-{index + 1:02d}",
+                    minutes=20,
+                    pts=10,
+                    game_id=index + 1,
+                )
+                for index in range(12)
+            ]
+        )
+        for column, values in series.items():
+            frame[column] = values
+        featured = add_points_features(frame).set_index("game_id")
+        first = featured.loc[1]
+        current = featured.loc[12]
+        for name, (low, high) in expected.items():
+            self.assertTrue(np.isnan(first[f"{name}_min_10"]), msg=name)
+            self.assertTrue(np.isnan(first[f"{name}_max_10"]), msg=name)
+            self.assertAlmostEqual(current[f"{name}_min_10"], low, msg=name)
+            self.assertAlmostEqual(current[f"{name}_max_10"], high, msg=name)
+
+        mutated = frame.copy()
+        current_game = mutated["game_id"].eq(12)
+        for column in series:
+            mutated.loc[current_game, column] = 0
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[12]
+        for name in expected:
+            self.assertAlmostEqual(
+                mutated_row[f"{name}_min_10"],
+                current[f"{name}_min_10"],
+                msg=name,
+            )
+            self.assertAlmostEqual(
+                mutated_row[f"{name}_max_10"],
+                current[f"{name}_max_10"],
+                msg=name,
+            )
+
+    def test_fga_usg_and_ts_ranks_use_prior_team_roster(self) -> None:
+        # A plays every game. B misses game 2 but is still on the roster.
+        # C debuts on game 3, so C has no prior and must stay unranked.
+        rows = []
+        specs = {
+            1: {
+                1: {"fga": 5, "pts": 10, "usg_pct": 0.10, "minutes": 10},
+                2: {"fga": 5, "pts": 10, "usg_pct": 0.10, "minutes": 10},
+                3: {"fga": 100, "pts": 50, "usg_pct": 0.90, "minutes": 10},
+            },
+            2: {
+                1: {"fga": 20, "pts": 8, "usg_pct": 0.40, "minutes": 30},
+                3: {"fga": 0, "pts": 0, "usg_pct": 0.05, "minutes": 30},
+            },
+            3: {
+                3: {"fga": 40, "pts": 40, "usg_pct": 0.80, "minutes": 20},
+            },
+        }
+        dates = {1: "2024-01-01", 2: "2024-01-03", 3: "2024-01-05"}
+        for player_id, games in specs.items():
+            for game_id, stats in games.items():
+                rows.append(
+                    _player_row(
+                        player_id,
+                        dates[game_id],
+                        minutes=stats["minutes"],
+                        pts=stats["pts"],
+                        game_id=game_id,
+                        fga=stats["fga"],
+                        fta=0,
+                        usg_pct=stats["usg_pct"],
+                    )
+                )
+        featured = add_points_features(_rows(rows))
+        game2 = featured.loc[featured["game_id"].eq(2)].set_index("player_id")
+        game3 = featured.loc[featured["game_id"].eq(3)].set_index("player_id")
+
+        self.assertEqual(game2.loc[1, "fga_rank_10"], 2)
+        self.assertEqual(game2.loc[1, "usg_rank_10"], 2)
+        self.assertEqual(game2.loc[1, "ts_rank_10"], 1)
+        self.assertEqual(game2.loc[1, "pts_rank_10"], 1)
+        self.assertEqual(game2.loc[1, "min_rank_10"], 2)
+        self.assertEqual(game3.loc[2, "fga_rank_10"], 1)
+        self.assertEqual(game3.loc[1, "fga_rank_10"], 2)
+        self.assertEqual(game3.loc[2, "usg_rank_10"], 1)
+        self.assertEqual(game3.loc[1, "usg_rank_10"], 2)
+        self.assertEqual(game3.loc[1, "ts_rank_10"], 1)
+        self.assertEqual(game3.loc[2, "ts_rank_10"], 2)
+        self.assertEqual(game3.loc[1, "pts_rank_10"], 1)
+        self.assertEqual(game3.loc[2, "pts_rank_10"], 2)
+        self.assertEqual(game3.loc[2, "min_rank_10"], 1)
+        self.assertEqual(game3.loc[1, "min_rank_10"], 2)
+        self.assertTrue(np.isnan(game3.loc[3, "fga_rank_10"]))
+        self.assertTrue(np.isnan(game3.loc[3, "usg_rank_10"]))
+        self.assertTrue(np.isnan(game3.loc[3, "ts_rank_10"]))
+        self.assertTrue(np.isnan(game3.loc[3, "pts_rank_10"]))
+        self.assertTrue(np.isnan(game3.loc[3, "min_rank_10"]))
+
+        mutated = _rows(rows)
+        current = mutated["game_id"].eq(3)
+        mutated.loc[
+            current & mutated["player_id"].eq(1),
+            ["fga", "pts", "usg_pct", "minutes"],
+        ] = [0, 0, 0.01, 1]
+        mutated.loc[
+            current & mutated["player_id"].eq(2),
+            ["fga", "pts", "usg_pct", "minutes"],
+        ] = [100, 80, 0.90, 48]
+        changed = add_points_features(mutated)
+        changed3 = changed.loc[changed["game_id"].eq(3)].set_index("player_id")
+        for player_id in (1, 2):
+            for column in (
+                "fga_rank_10",
+                "usg_rank_10",
+                "ts_rank_10",
+                "pts_rank_10",
+                "min_rank_10",
+            ):
+                self.assertEqual(
+                    changed3.loc[player_id, column],
+                    game3.loc[player_id, column],
+                    msg=f"{player_id} {column}",
+                )
+
+    def test_box_score_windows_are_prior_5_10_and_20(self) -> None:
+        n_games = 22
+        fga = [float(index + 1) for index in range(n_games - 1)] + [99.0]
+        minutes = [float(10 + index) for index in range(n_games - 1)] + [99.0]
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    f"2024-01-{(index % 28) + 1:02d}",
+                    minutes[index],
+                    pts=10,
+                    game_id=index + 1,
+                    fga=fga[index],
+                )
+                for index in range(n_games)
+            ]
+        )
+        # January dates collide after the 28th. Keep the row order by
+        # game_id; the builder sorts on date then game_id.
+        frame["game_date"] = pd.date_range("2024-01-01", periods=n_games, freq="D")
+        featured = add_points_features(frame).set_index("game_id")
+        prior_fga = fga[:-1]
+        prior_minutes = minutes[:-1]
+        current = featured.loc[n_games]
+        for window in (5, 10, 20):
+            self.assertTrue(np.isnan(featured.loc[1, f"fga_rolling_{window}"]))
+            self.assertAlmostEqual(
+                current[f"fga_rolling_{window}"],
+                float(np.mean(prior_fga[-window:])),
+            )
+            self.assertTrue(np.isnan(featured.loc[1, f"minutes_rolling_{window}"]))
+            self.assertAlmostEqual(
+                current[f"minutes_rolling_{window}"],
+                float(np.mean(prior_minutes[-window:])),
+            )
+        for halflife in (5, 10, 20):
+            expected_fga = float(
+                pd.Series(prior_fga).ewm(halflife=halflife, adjust=False).mean().iloc[-1]
+            )
+            expected_minutes = float(
+                pd.Series(prior_minutes)
+                .ewm(halflife=halflife, adjust=False)
+                .mean()
+                .iloc[-1]
+            )
+            self.assertTrue(np.isnan(featured.loc[1, f"fga_ewm_hl_{halflife}"]))
+            self.assertAlmostEqual(current[f"fga_ewm_hl_{halflife}"], expected_fga)
+            self.assertTrue(np.isnan(featured.loc[1, f"minutes_ewm_{halflife}"]))
+            self.assertAlmostEqual(current[f"minutes_ewm_{halflife}"], expected_minutes)
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(n_games), "fga"] = 0
+        mutated.loc[mutated["game_id"].eq(n_games), ["minutes", "min"]] = 1
+        mutated.loc[mutated["game_id"].eq(n_games), "min_sec"] = "1:00"
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[n_games]
+        for window in (5, 10, 20):
+            self.assertAlmostEqual(
+                mutated_row[f"fga_rolling_{window}"],
+                current[f"fga_rolling_{window}"],
+            )
+            self.assertAlmostEqual(
+                mutated_row[f"minutes_rolling_{window}"],
+                current[f"minutes_rolling_{window}"],
+            )
+        for halflife in (5, 10, 20):
+            self.assertAlmostEqual(
+                mutated_row[f"fga_ewm_hl_{halflife}"],
+                current[f"fga_ewm_hl_{halflife}"],
+            )
+            self.assertAlmostEqual(
+                mutated_row[f"minutes_ewm_{halflife}"],
+                current[f"minutes_ewm_{halflife}"],
+            )
+
+    def test_minutes_rolling_5_is_the_prior_five_game_mean(self) -> None:
+        minutes = [10, 20, 30, 40, 50, 60, 70]
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    f"2024-01-{index + 1:02d}",
+                    minutes[index],
+                    pts=10,
+                    game_id=index + 1,
+                )
+                for index in range(7)
+            ]
+        )
+        featured = add_points_features(frame).set_index("game_id")
+
+        self.assertTrue(np.isnan(featured.loc[1, "minutes_rolling_5"]))
+        self.assertAlmostEqual(featured.loc[4, "minutes_rolling_5"], 20)
+        self.assertAlmostEqual(featured.loc[7, "minutes_rolling_5"], 40)
+        self.assertAlmostEqual(featured.loc[7, "minutes_rolling_10"], 35)
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(7), ["minutes", "min"]] = 1
+        mutated.loc[mutated["game_id"].eq(7), "min_sec"] = "1:00"
+        mutated_row = add_points_features(mutated).set_index("game_id").loc[7]
+        self.assertAlmostEqual(mutated_row["minutes_rolling_5"], 40)
+
+    def test_position_encoding_uses_the_listed_position(self) -> None:
+        frame = _rows(
+            [
+                _player_row(1, "2024-01-01", 20, pts=10, game_id=1),
+                _player_row(1, "2024-01-03", 24, pts=12, game_id=2),
+                _player_row(2, "2024-01-03", 18, pts=8, game_id=3),
+            ]
+        )
+        frame["pos"] = ["SG", "PG", None]
+        featured = add_points_features(frame).set_index("game_id")
+        columns = [
+            "pos_pg",
+            "pos_sg",
+            "pos_sf",
+            "pos_pf",
+            "pos_c",
+        ]
+
+        guard = featured.loc[1, columns]
+        self.assertEqual(guard["pos_sg"], 1.0)
+        self.assertEqual(guard.drop("pos_sg").tolist(), [0.0, 0.0, 0.0, 0.0])
+        point = featured.loc[2, columns]
+        self.assertEqual(point["pos_pg"], 1.0)
+        self.assertEqual(point["pos_sg"], 0.0)
+        self.assertTrue(featured.loc[3, columns].isna().all())
+
+        unlabeled = add_points_features(frame.drop(columns=["pos"]))
+        self.assertTrue(unlabeled[columns].isna().all().all())
+
+    def test_shooting_ewm_is_missing_without_prior_attempts(
+        self,
+    ) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    10,
+                    pts=0,
+                    game_id=1,
+                    fga=0,
+                    fta=0,
+                    fg3_a=0,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    10,
+                    pts=10,
+                    game_id=2,
+                    fga=8,
+                    fta=2,
+                    fg3_a=3,
+                ),
+            ]
+        )
+        row = add_points_features(frame).set_index("game_id").loc[2]
+        for column in (
+            "fg_pct_ewm_hl_10",
+            "fg3_pct_ewm_hl_10",
+            "ft_pct_ewm_hl_10",
+            "efg_pct_ewm_hl_10",
+            "ts_pct_ewm_hl_10",
+            "efg_pct_smoothed",
+            "ts_pct_smoothed",
+        ):
+            self.assertTrue(np.isnan(row[column]), column)
 
     def test_typical_band_and_recent_bounds_ignore_the_current_game(
         self,
@@ -664,6 +1245,72 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         ):
             self.assertAlmostEqual(changed[column], row[column], msg=column)
 
+    def test_usage_times_true_shooting_uses_the_prior_ten(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1,
+                    "2024-01-01",
+                    20,
+                    pts=10,
+                    game_id=1,
+                    fga=10,
+                    fta=5,
+                    usg_pct=20,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-03",
+                    10,
+                    pts=8,
+                    game_id=2,
+                    fga=6,
+                    fta=0,
+                    usg_pct=30,
+                ),
+                _player_row(
+                    1,
+                    "2024-01-05",
+                    30,
+                    pts=40,
+                    game_id=3,
+                    fga=20,
+                    fta=10,
+                    usg_pct=50,
+                ),
+            ]
+        )
+        featured = add_points_features(frame).set_index("game_id")
+        usage = (20 * 20 + 30 * 10) / (20 + 10)
+        true_shooting = 18 / (2 * (16 + 0.44 * 5))
+
+        self.assertTrue(np.isnan(featured.loc[1, "usg_x_ts_pct_10"]))
+        self.assertTrue(np.isnan(featured.loc[1, "ts_x_usg"]))
+        self.assertAlmostEqual(
+            featured.loc[3, "usg_x_ts_pct_10"],
+            usage * true_shooting,
+        )
+        self.assertAlmostEqual(
+            featured.loc[3, "ts_x_usg"],
+            usage * true_shooting,
+        )
+
+        mutated = frame.copy()
+        mutated.loc[
+            mutated["game_id"].eq(3),
+            ["usg_pct", "pts", "fga", "fta", "minutes", "min"],
+        ] = [1, 1, 1, 1, 1, 1]
+        mutated.loc[mutated["game_id"].eq(3), "min_sec"] = "1:00"
+        changed = add_points_features(mutated).set_index("game_id")
+        self.assertAlmostEqual(
+            changed.loc[3, "usg_x_ts_pct_10"],
+            usage * true_shooting,
+        )
+        self.assertAlmostEqual(
+            changed.loc[3, "ts_x_usg"],
+            usage * true_shooting,
+        )
+
     def test_ewm_pts_per_min_is_ratio_of_prior_ewms(self) -> None:
         frame = _rows(
             [
@@ -823,6 +1470,15 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         self.assertEqual(home["team_off_rating_mean_10"], 110)
         self.assertEqual(home["opp_pace_mean_10"], 105)
         self.assertEqual(home["team_pace_mean_10"], 90)
+        opener = featured.loc[
+            featured["player_id"].eq(1) & featured["game_id"].eq(1)
+        ].iloc[0]
+        self.assertTrue(np.isnan(opener["expected_pace"]))
+        self.assertAlmostEqual(home["expected_pace"], (90 + 105) / 2)
+        self.assertAlmostEqual(
+            home["expected_pace"],
+            (home["team_pace_10"] + home["opp_pace_10"]) / 2,
+        )
 
     def test_market_and_schedule_features(self) -> None:
         frame = _rows(
@@ -864,6 +1520,85 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             first["implied_team_total"],
             113.25,
         )
+
+    def test_early_season_context_ignores_the_current_game(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1, "2023-04-01", 20, pts=10, game_id=1,
+                    season_year="2022-23", team_id=100,
+                ),
+                _player_row(
+                    1, "2023-04-03", 20, pts=30, game_id=2,
+                    season_year="2022-23", team_id=100,
+                ),
+                _player_row(
+                    1, "2023-10-25", 20, pts=99, game_id=3,
+                    season_year="2023-24", team_id=200,
+                ),
+                _player_row(
+                    1, "2023-10-27", 20, pts=4, game_id=4,
+                    season_year="2023-24", team_id=200,
+                ),
+                _player_row(
+                    2, "2023-04-01", 20, pts=8, game_id=1,
+                    season_year="2022-23", team_id=300,
+                ),
+                _player_row(
+                    2, "2023-10-25", 20, pts=12, game_id=3,
+                    season_year="2023-24", team_id=300,
+                ),
+                _player_row(
+                    3, "2024-10-22", 20, pts=15, game_id=5,
+                    season_year="2024-25", team_id=100,
+                ),
+            ]
+        )
+        featured = add_points_features(frame)
+        opener = featured.loc[featured["game_id"].eq(3) & featured["player_id"].eq(1)].iloc[0]
+        second = featured.loc[featured["game_id"].eq(4)].iloc[0]
+        stayed = featured.loc[
+            featured["player_id"].eq(2) & featured["season_year"].eq("2023-24")
+        ].iloc[0]
+        rookie = featured.loc[featured["player_id"].eq(3)].iloc[0]
+
+        self.assertEqual(opener["games_played_this_season"], 0)
+        self.assertEqual(second["games_played_this_season"], 1)
+        self.assertEqual(opener["changed_team"], 1)
+        self.assertEqual(second["changed_team"], 1)
+        self.assertEqual(stayed["changed_team"], 0)
+        self.assertTrue(np.isnan(rookie["changed_team"]))
+        self.assertAlmostEqual(opener["prior_season_pts_mean"], 20)
+        self.assertAlmostEqual(second["prior_season_pts_mean"], 20)
+        self.assertTrue(np.isnan(rookie["prior_season_pts_mean"]))
+
+        mutated = frame.copy()
+        mutated.loc[mutated["game_id"].eq(3), "pts"] = 0
+        mutated.loc[mutated["game_id"].eq(3), "minutes"] = 0
+        again = add_points_features(mutated)
+        again_opener = again.loc[
+            again["game_id"].eq(3) & again["player_id"].eq(1)
+        ].iloc[0]
+        self.assertAlmostEqual(again_opener["prior_season_pts_mean"], 20)
+        self.assertEqual(again_opener["games_played_this_season"], 0)
+
+    def test_projected_volume_is_share_times_implied_team_total(self) -> None:
+        frame = _rows(
+            [
+                _player_row(
+                    1, "2024-01-01", 30, pts=10, game_id=1,
+                    fga=10, team_fga=100, game_total=220, player_team_spread=-6.5,
+                ),
+                _player_row(
+                    1, "2024-01-03", 30, pts=12, game_id=2,
+                    fga=20, team_fga=80, game_total=200, player_team_spread=0,
+                ),
+            ]
+        )
+        featured = add_points_features(frame)
+        second = featured.loc[featured["game_id"].eq(2)].iloc[0]
+        self.assertAlmostEqual(second["implied_team_total"], 100)
+        self.assertAlmostEqual(second["fga_share_x_implied_total"], 10)
 
     def test_default_feature_list_is_causal_and_stacked(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -12,15 +13,19 @@ from zoneinfo import ZoneInfo
 from src.odds.load_snapshots import _fanduel_table
 from src.odds.quote_specs import QUOTE_SPECS
 from src.odds.snapshot_rows import fanduel_picks_to_rows
+from src.scrapers.arbitrage import quotes_from_payload
 from src.scrapers.nba.nba_fanduel import (
     _DEFAULT_CONFIG,
     _DEFAULT_OUTPUT_DIR,
     Event,
+    ExportData,
     extract_event_picks,
+    extract_game_lines,
     fetch_events,
     is_game_market,
     match_stat,
     resolve_output_path,
+    save_picks,
     sport_to_league,
 )
 from src.scrapers.nba.paths import repo_root
@@ -46,13 +51,13 @@ def _page_payload() -> dict:
                     "eventId": 34316771,
                     "name": "Denver Nuggets @ Oklahoma City Thunder",
                     "competitionId": 10547864,
-                    "openDate": "2026-10-03T23:30:00.000Z",
+                    "openDate": "2099-10-03T23:30:00.000Z",
                 },
                 "2": {
                     "eventId": 34800001,
                     "name": "Cincinnati Reds @ Atlanta Braves",
                     "competitionId": 11196870,
-                    "openDate": "2026-10-03T23:20:00.000Z",
+                    "openDate": "2099-10-03T23:20:00.000Z",
                 },
             },
             "markets": {},
@@ -180,6 +185,189 @@ def test_extract_event_picks_keeps_points_and_drops_game_total() -> None:
     )
     assert {row["market_type"] for row in rows} == {"player_points"}
     assert {row["league"] for row in rows} == {"nba"}
+
+
+def _priced(name: str, handicap: float, american: int) -> dict:
+    return {
+        "runnerName": name,
+        "handicap": handicap,
+        "runnerStatus": "ACTIVE",
+        "winRunnerOdds": {"americanDisplayOdds": {"americanOddsInt": american}},
+    }
+
+
+def _game() -> Event:
+    return Event(
+        event_id="36244906",
+        name="Minnesota Timberwolves @ Cleveland Cavaliers",
+        start_time="2026-10-26T23:13:00.000Z",
+        competition="NBA",
+    )
+
+
+def test_extract_game_lines_keeps_full_game_moneyline_spread_and_total() -> None:
+    event = _game()
+    markets = [
+        {
+            "marketName": "Moneyline",
+            "marketType": "MONEY_LINE",
+            "marketStatus": "OPEN",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Minnesota Timberwolves", 0, -285),
+                _priced("Cleveland Cavaliers", 0, 230),
+            ],
+        },
+        {
+            "marketName": "Spread",
+            "marketType": "MATCH_HANDICAP_(2-WAY)",
+            "marketStatus": "OPEN",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Minnesota Timberwolves", -6.5, -110),
+                _priced("Cleveland Cavaliers", 6.5, -110),
+            ],
+        },
+        {
+            "marketName": "Spread",
+            "marketType": "MATCH_HANDICAP_(2-WAY)",
+            "marketStatus": "OPEN",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Minnesota Timberwolves", -10.5, -250),
+                _priced("Cleveland Cavaliers", 10.5, 190),
+            ],
+        },
+        {
+            "marketName": "Total Points",
+            "marketType": "TOTAL_POINTS_(OVER/UNDER)",
+            "marketStatus": "OPEN",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Over", 230.5, -118),
+                _priced("Under", 230.5, -112),
+            ],
+        },
+        {
+            "marketName": "1st Half Total Points",
+            "marketType": "TOTAL_POINTS_(OVER/UNDER)",
+            "marketStatus": "OPEN",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Over", 115.5, -110),
+                _priced("Under", 115.5, -110),
+            ],
+        },
+        {
+            "marketName": "Alternate Spread",
+            "marketType": "MATCH_HANDICAP_(2-WAY)",
+            "marketStatus": "OPEN",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Minnesota Timberwolves", -3.5, 140),
+                _priced("Cleveland Cavaliers", 3.5, -170),
+            ],
+        },
+        {
+            "marketName": "26-27 NBA Finals Winner",
+            "marketType": "NBA_FINALS_WINNER",
+            "marketStatus": "OPEN",
+            "eventId": "34409523",
+            "runners": [_priced("Oklahoma City Thunder", 0, 390)],
+        },
+        {
+            "marketName": "Moneyline",
+            "marketType": "MONEY_LINE",
+            "marketStatus": "SUSPENDED",
+            "eventId": event.event_id,
+            "runners": [
+                _priced("Minnesota Timberwolves", 0, 100),
+                _priced("Cleveland Cavaliers", 0, 100),
+            ],
+        },
+    ]
+
+    lines = extract_game_lines(markets, [event])
+    saved = [line.to_dict() for line in lines]
+    assert saved == [
+        {
+            "market": "moneyline",
+            "event_name": event.name,
+            "start_time": event.start_time,
+            "side": "Minnesota Timberwolves",
+            "line": None,
+            "american": -285,
+        },
+        {
+            "market": "moneyline",
+            "event_name": event.name,
+            "start_time": event.start_time,
+            "side": "Cleveland Cavaliers",
+            "line": None,
+            "american": 230,
+        },
+        {
+            "market": "spread",
+            "event_name": event.name,
+            "start_time": event.start_time,
+            "side": "Minnesota Timberwolves",
+            "line": -6.5,
+            "american": -110,
+        },
+        {
+            "market": "spread",
+            "event_name": event.name,
+            "start_time": event.start_time,
+            "side": "Cleveland Cavaliers",
+            "line": 6.5,
+            "american": -110,
+        },
+        {
+            "market": "total",
+            "event_name": event.name,
+            "start_time": event.start_time,
+            "side": "over",
+            "line": 230.5,
+            "american": -118,
+        },
+        {
+            "market": "total",
+            "event_name": event.name,
+            "start_time": event.start_time,
+            "side": "under",
+            "line": 230.5,
+            "american": -112,
+        },
+    ]
+    quotes = quotes_from_payload("fanduel", "nba", {"picks": [], "game_lines": saved})
+    assert {quote.kind for quote in quotes} == {"moneyline", "spread", "total"}
+    assert {quote.line for quote in quotes if quote.kind == "spread"} == {-6.5, 6.5}
+
+
+def test_save_picks_writes_game_lines_beside_props(tmp_path: Path) -> None:
+    path = tmp_path / "fanduel_nba.json"
+    event = _game()
+    lines = extract_game_lines(
+        [
+            {
+                "marketName": "Total Points",
+                "marketType": "TOTAL_POINTS_(OVER/UNDER)",
+                "marketStatus": "OPEN",
+                "eventId": event.event_id,
+                "runners": [
+                    _priced("Over", 220.5, -105),
+                    _priced("Under", 220.5, -115),
+                ],
+            }
+        ],
+        [event],
+    )
+    save_picks([], str(path), game_lines=lines)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["picks"] == []
+    assert payload["count"] == 0
+    assert payload["game_lines"] == [line.to_dict() for line in lines]
+    assert ExportData(picks=[], game_lines=[]).to_dict()["game_lines"] == []
 
 
 def test_resolve_output_path_uses_nba_slug(monkeypatch) -> None:

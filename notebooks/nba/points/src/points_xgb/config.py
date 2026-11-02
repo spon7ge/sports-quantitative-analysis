@@ -40,32 +40,9 @@ XGB_PARAMS = {
     "early_stopping_rounds": 50,
 }
 
+# Game-N outcomes. The notebook owns the feature list; this set only
+# refuses those columns if they are passed into the leak check.
 EXCLUDED_FEATURES = frozenset({"minutes", "pts", "predicted_minutes_oof"})
-
-PTS_FEATURES = [
-    "pts_per_min_ewm_hl_10",
-    "player_fga_share_10",
-    "ppm_trim_mean_20",
-    "current_team_pts_per_min",
-    "usg_wmean_10",
-    "season_pts_per_min",
-    "starting",
-    "fta_per_min_10",
-    "fga_per_min_10",
-    "fg3a_per_min_10",
-    "pts_per_min_mean_vs_opp",
-    "fga_per_min_mean_vs_opp",
-    "fta_per_min_mean_vs_opp",
-    "fg3a_per_min_mean_vs_opp",
-    "ppm_unstable",
-    "opp_def_rating_mean_10",
-    "min_mean_10",
-    "min_sd_10",
-    "minutes_ewm_10",
-    "ts_pct_10",
-    "opp_pace_10",
-    "ppm_sd_10",
-]
 
 ARTIFACT_STEM = "pts_nba_model"
 XGB_NAME = "Quantile XGBoost"

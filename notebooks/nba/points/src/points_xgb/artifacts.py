@@ -12,7 +12,6 @@ import pandas as pd
 from points_xgb.config import (
     ARTIFACT_STEM,
     HOLDOUT_SEASON,
-    PTS_FEATURES,
     QUANTILES,
     ROLE_COL,
     SEED,
@@ -53,17 +52,21 @@ def exploratory_metadata(
     ho_metrics: Mapping,
     wf_results: list[dict],
     *,
-    features: list[str] = PTS_FEATURES,
+    features: list[str] | None = None,
     holdout_season: str = HOLDOUT_SEASON,
+    label: str = TARGET_COL,
+    label_rule: str = "min(pts / minutes, 6.0), minutes > 0",
 ) -> dict:
+    if features is None:
+        raise ValueError("pass features; the notebook owns PTS_FEATURES")
     return {
         "created_at": datetime.now(UTC).isoformat(),
         "status": "exploratory",
         "model_name": "quantile_xgboost",
         "artifact_stem": ARTIFACT_STEM,
         "features": list(features),
-        "label": TARGET_COL,
-        "label_rule": "min(pts / minutes, 6.0), minutes > 0",
+        "label": label,
+        "label_rule": label_rule,
         "quantiles": list(QUANTILES),
         "point_forecast": 0.50,
         "interval": [0.10, 0.90],

@@ -36,6 +36,7 @@ except ImportError:  # python mlb_prophetx.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 _DEFAULT_OUTPUT_DIR = os.path.join(_ROOT, "data", "props", "prophetx", "mlb")
 _OUTPUT_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -485,6 +486,27 @@ def _merge_market_rows(
     ]
 
 
+def pregame_events(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Drop games that are live, finished, or already past start."""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for event in events:
+        if isinstance(event, dict) and game_has_started(
+            event.get("scheduled"), status=event.get("status"), now=now
+        ):
+            dropped += 1
+            continue
+        if isinstance(event, dict):
+            kept.append(event)
+    if dropped:
+        logger.info("Skipping %s ProphetX game(s) that already started", dropped)
+    return kept
+
+
 def run() -> None:
     logging.basicConfig(
         level=getattr(
@@ -495,7 +517,7 @@ def run() -> None:
         format="[%(levelname)-8s] %(name)s: %(message)s",
     )
     session = requests.Session()
-    events = fetch_mlb_events(session)
+    events = pregame_events(fetch_mlb_events(session))
     event_ids = [int(event["id"]) for event in events if event.get("id") is not None]
     team_rows = fetch_markets_for_events(
         session,

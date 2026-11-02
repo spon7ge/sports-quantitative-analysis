@@ -1,7 +1,8 @@
 """
 DraftKings Sportsbook prop odds scraper — NBA edition.
 
-Fetches NBA player prop markets from the DraftKings Sportsbook API and exports clean JSON.
+Fetches NBA player props and full-game team lines (moneyline, spread, total)
+from the DraftKings Sportsbook API and exports clean JSON.
 
 Includes detailed logging at each step to make debugging easy.
 
@@ -35,6 +36,8 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 import requests
+from curl_cffi.requests import Session as CurlSession
+from curl_cffi.requests.exceptions import RequestException as CurlRequestException
 
 try:
     from src.scrapers.stage_report import retry_after_seconds
@@ -61,6 +64,7 @@ except ImportError:  # python nba_draftking.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 
 _BOOK_DIR = os.path.join(_ROOT, "data", "props", "draftkings")
 _DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "nba")
@@ -154,6 +158,19 @@ _GAME_MARKET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"both\s+teams|either\s+team|\brace\s+to\b|\bmargin\b"),
 )
 
+# Full-game names on the Game Lines tab. Alternates and period boards stay out.
+_PERIOD_MARKET = re.compile(
+    r"\bquarter\b|\b1st\s+half\b|\bfirst\s+half\b|"
+    r"\b2nd\s+half\b|\bsecond\s+half\b|\bhalftime\b"
+)
+_TEAM_LINE_NAMES = {
+    "moneyline": "moneyline",
+    "spread": "spread",
+    "point spread": "spread",
+    "total": "total",
+    "total points": "total",
+}
+
 _TEAM_SPLIT = re.compile(r"\s+(?:@|v|vs\.?|at)\s+", re.IGNORECASE)
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 # DraftKings sends American odds as display strings, sometimes with a unicode minus.
@@ -222,6 +239,29 @@ class Subcategory:
     name: str
 
 @dataclass
+class GameLine:
+    """One side of a full-game moneyline, spread, or total."""
+
+    market: str
+    side: str
+    line: float | None
+    american: int
+    event_name: str
+    start_time: str | None
+    sport_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to the flat game_lines shape the arbitrage reader expects."""
+        return {
+            "market": self.market,
+            "event_name": self.event_name,
+            "start_time": self.start_time,
+            "side": self.side,
+            "line": self.line,
+            "american": self.american,
+        }
+
+@dataclass
 class ExportData:
     """Complete export payload."""
 
@@ -229,12 +269,15 @@ class ExportData:
     fetched_at: str = ""
     count: int = 0
     picks: list[dict[str, Any]] | None = None
+    game_lines: list[dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if not self.fetched_at:
             self.fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if self.picks is None:
             self.picks = []
+        if self.game_lines is None:
+            self.game_lines = []
         self.count = len(self.picks) if self.picks else 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -244,6 +287,7 @@ class ExportData:
             "fetched_at": self.fetched_at,
             "count": self.count,
             "picks": self.picks or [],
+            "game_lines": self.game_lines or [],
         }
 
 # ============================================================================
@@ -390,8 +434,14 @@ def decimal_to_american(decimal: float) -> int | None:
 # API Fetching
 # ============================================================================
 
-def build_session(headers: dict[str, str]) -> requests.Session:
-    session = requests.Session()
+# Akamai (AkamaiGHost) 403s the requests/curl TLS fingerprint on the Nash
+# markets API. A Chrome impersonation profile is what returns JSON.
+_REQUEST_ERRORS = (requests.RequestException, CurlRequestException)
+_FETCH_ERRORS = (*_REQUEST_ERRORS, ValueError)
+
+
+def build_session(headers: dict[str, str]) -> CurlSession:
+    session = CurlSession(impersonate="chrome")
     session.headers.update(headers)
     return session
 
@@ -425,7 +475,7 @@ def fetch_json(
             data = response.json()
             logger.debug(f"{label}: status={response.status_code}, keys={list(data.keys())}")
             return data
-        except (requests.RequestException, ValueError) as e:
+        except _FETCH_ERRORS as e:
             last_error = e
             if attempt >= max(1, max_retries):
                 break
@@ -470,7 +520,7 @@ def fetch_text(
                 )
             response.raise_for_status()
             return response.text
-        except requests.RequestException as e:
+        except _REQUEST_ERRORS as e:
             last_error = e
             if attempt >= max(1, max_retries):
                 break
@@ -595,6 +645,43 @@ def subcategories_from_nav(
     return subcategories
 
 
+def game_line_subcategory_from_nav(html: str) -> Subcategory | None:
+    """Return the full-game Game Lines tab. Player-prop discovery leaves it out."""
+    nav = _extract_nav_root(html)
+    found: list[tuple[bool, Subcategory]] = []
+
+    def walk(node: dict[str, Any], category_name: str) -> None:
+        title = str(node.get("title") or "")
+        params = node.get("parameters") if isinstance(node.get("parameters"), dict) else {}
+        next_category = category_name
+        if not params.get("subcategoryId") and title:
+            next_category = title
+        subcategory_id = str(params.get("subcategoryId") or "")
+        category_id = str(params.get("categoryId") or "")
+        tags = {str(tag).lower() for tag in (node.get("tags") or [])}
+        if subcategory_id and category_id and title.strip().lower() == "game lines":
+            found.append(
+                (
+                    "primarymarket" in tags,
+                    Subcategory(
+                        category_id=category_id,
+                        subcategory_id=subcategory_id,
+                        category_name=next_category or title,
+                        name=title,
+                    ),
+                )
+            )
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                walk(child, next_category)
+
+    walk(nav, "")
+    if not found:
+        return None
+    found.sort(key=lambda item: not item[0])
+    return found[0][1]
+
+
 def _selection_player(selection: dict[str, Any]) -> str:
     """Prefer the SEO player name; fall back to the display name."""
     for participant in selection.get("participants") or []:
@@ -668,14 +755,15 @@ def payload_to_offers(
     return offers, events
 
 
-def fetch_event_group(
+def fetch_league(
     session: requests.Session,
     cfg: dict[str, Any],
-) -> tuple[dict[str, Event], list[Subcategory]]:
+) -> tuple[dict[str, Event], list[Subcategory], Subcategory | None]:
     """
-    Discover NBA prop tabs from the league page nav tree.
+    Discover NBA prop tabs and the Game Lines tab from the league page.
 
     Events are filled in later from each subcategory markets payload.
+    The subcategory cap applies only to prop tabs.
     """
     page = str(cfg.get("dk_league_page") or _DEFAULT_CONFIG["dk_league_page"])
     html = fetch_text(
@@ -688,17 +776,62 @@ def fetch_event_group(
     names = [str(c) for c in (cfg.get("dk_subcategory_names") or [])]
     allow = [str(c).lower() for c in (cfg.get("dk_category_allowlist") or [])]
     subcategories = subcategories_from_nav(html, allow, names=names or None)
+    game_lines = game_line_subcategory_from_nav(html)
+    game_label = game_lines.subcategory_id if game_lines else "missing"
 
     logger.info(
-        f"League nav: events=0 (loaded with markets), prop subcategories={len(subcategories)}"
+        "League nav: events=0 (loaded with markets), "
+        f"prop subcategories={len(subcategories)}, game_lines={game_label}"
     )
 
     cap = os.environ.get("DK_MAX_SUBCATEGORIES", "").strip()
     if cap.isdigit() and int(cap) > 0:
-        logger.info(f"DK_MAX_SUBCATEGORIES set — limiting to first {cap} subcategory(ies)")
+        logger.info(
+            f"DK_MAX_SUBCATEGORIES set — limiting to first {cap} subcategory(ies)"
+        )
         subcategories = subcategories[: int(cap)]
 
-    return {}, subcategories
+    return {}, subcategories, game_lines
+
+
+def fetch_event_group(
+    session: requests.Session,
+    cfg: dict[str, Any],
+) -> tuple[dict[str, Event], list[Subcategory]]:
+    """Discover NBA prop tabs from the league page nav tree."""
+    events, subcategories, _game_lines = fetch_league(session, cfg)
+    return events, subcategories
+
+
+def _without_started_offers(
+    offers: list[dict[str, Any]],
+    events: dict[str, Event],
+    raw_events: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Event]]:
+    """Drop offers for games that have already started."""
+    status_by_id: dict[str, object] = {}
+    for rec in raw_events or []:
+        if not isinstance(rec, dict):
+            continue
+        event_id = str(rec.get("id") or rec.get("eventId") or "")
+        if not event_id:
+            continue
+        status_by_id[event_id] = rec.get("eventStatus") or rec.get("status") or rec.get("state")
+    started = {
+        event_id
+        for event_id, event in events.items()
+        if game_has_started(event.start_time, status=status_by_id.get(event_id))
+    }
+    if not started:
+        return offers, events
+    logger.info("Skipping %s DraftKings game(s) that already started", len(started))
+    kept_offers = [
+        offer for offer in offers if str(offer.get("eventId") or "") not in started
+    ]
+    kept_events = {
+        event_id: event for event_id, event in events.items() if event_id not in started
+    }
+    return kept_offers, kept_events
 
 
 def fetch_subcategory_offers(
@@ -735,12 +868,15 @@ def fetch_subcategory_offers(
             max_retries=int(cfg.get("dk_max_retries", 3)),
             label=f"subcategory {sub.category_name}/{sub.name}",
         )
-    except (requests.RequestException, ValueError) as e:
+    except _FETCH_ERRORS as e:
         logger.warning(f"subcategory {sub.name!r} unavailable ({e}); continuing")
         return []
 
     _maybe_dump(payload, f"sub_{sub.category_id}_{sub.subcategory_id}")
     offers, payload_events = payload_to_offers(payload, competition="NBA")
+    offers, payload_events = _without_started_offers(
+        offers, payload_events, payload.get("events")
+    )
     if events is not None:
         events.update(payload_events)
 
@@ -858,6 +994,134 @@ def is_offer_open(offer: dict[str, Any]) -> bool:
         return False
     status = str(offer.get("offerStatus") or offer.get("status") or "").upper()
     return status not in ("SUSPENDED", "CLOSED", "SETTLED", "RESULTED")
+
+def _team_market_kind(market_name: str) -> str | None:
+    """Map a full-game board onto moneyline, spread, or total."""
+    lowered = (market_name or "").strip().lower()
+    if not lowered or "alternate" in lowered or "team total" in lowered:
+        return None
+    if _PERIOD_MARKET.search(lowered):
+        return None
+    return _TEAM_LINE_NAMES.get(lowered)
+
+def _game_line_sides(
+    offer: dict[str, Any],
+    kind: str,
+    event: Event,
+) -> tuple[list[GameLine], float] | None:
+    """Both priced sides of one board, plus how far the prices sit from even."""
+    teams = team_names(event.name)
+    rows: list[GameLine] = []
+    implieds: list[float] = []
+    for outcome in _iter_records(offer.get("outcomes")):
+        american, _decimal, implied = extract_prices(outcome)
+        if american is None or american == 0:
+            continue
+        label = str(outcome.get("label") or "").strip()
+        if kind == "total":
+            choice, value = parse_outcome_selection(label, outcome.get("line"))
+            if choice not in ("over", "under"):
+                continue
+            line = value if value is not None else _to_float(outcome.get("line"))
+            if line is None:
+                continue
+            side = choice
+            number: float | None = abs(line)
+        else:
+            if label.lower() not in teams:
+                continue
+            side = label
+            if kind == "moneyline":
+                number = None
+            else:
+                number = _to_float(outcome.get("line"))
+                if number is None:
+                    number = _first_number(label)
+                if number is None:
+                    continue
+        rows.append(
+            GameLine(
+                market=kind,
+                side=side,
+                line=number,
+                american=american,
+                event_name=event.name,
+                start_time=event.start_time,
+                sport_id=(event.competition or "NBA").upper(),
+            )
+        )
+        implieds.append(implied if implied is not None else 1.0)
+
+    kept: list[GameLine] = []
+    kept_implied: list[float] = []
+    seen: set[str] = set()
+    for row, implied in zip(rows, implieds, strict=True):
+        token = row.side.lower()
+        if token in seen:
+            continue
+        seen.add(token)
+        kept.append(row)
+        kept_implied.append(implied)
+    if kind == "total":
+        complete = seen == {"over", "under"}
+    else:
+        complete = len(kept) == 2
+    if not complete:
+        return None
+    score = sum(abs(price - 0.5) for price in kept_implied)
+    return kept, score
+
+def game_lines_from_offers(
+    offers: list[dict[str, Any]],
+    events: dict[str, Event],
+    sport_allowlist: frozenset[str] | None = None,
+) -> list[GameLine]:
+    """
+    Pull each event's main full-game moneyline, spread, and total.
+
+    When more than one full-game board is present, keep the prices closest
+    to even, which is the number the other books post as the main line.
+    """
+    chosen: dict[str, dict[str, tuple[float, int, list[GameLine]]]] = {}
+    for offer in offers:
+        if not is_offer_open(offer):
+            continue
+        kind = _team_market_kind(str(offer.get("label") or ""))
+        event = events.get(str(offer.get("eventId") or ""))
+        if kind is None or event is None:
+            continue
+        sport_id = (event.competition or "NBA").upper()
+        if sport_allowlist is not None and sport_id not in sport_allowlist:
+            continue
+        built = _game_line_sides(offer, kind, event)
+        if built is None:
+            continue
+        rows, score = built
+        name = str(offer.get("label") or "").strip().lower()
+        name_rank = 0 if name in _TEAM_LINE_NAMES else 1
+        current = chosen.setdefault(event.event_id, {}).get(kind)
+        if current is None or (score, name_rank) < (current[0], current[1]):
+            chosen[event.event_id][kind] = (score, name_rank, rows)
+
+    out: list[GameLine] = []
+    for event in events.values():
+        boards = chosen.get(event.event_id) or {}
+        for kind in ("moneyline", "spread", "total"):
+            board = boards.get(kind)
+            if board is not None:
+                out.extend(board[2])
+    logger.info(
+        f"Extracted {len(out)} full-game team line(s) from {len(events)} event(s)"
+    )
+    return out
+
+def extract_game_lines(
+    payload: dict[str, Any],
+    sport_allowlist: frozenset[str] | None = None,
+) -> list[GameLine]:
+    """Flatten a Nash Game Lines payload into full-game team lines."""
+    offers, events = payload_to_offers(payload, competition="NBA")
+    return game_lines_from_offers(offers, events, sport_allowlist)
 
 def extract_offer_picks(
     offers: list[dict[str, Any]],
@@ -1099,21 +1363,35 @@ def group_picks_by_sport(picks: list[Pick]) -> dict[str, list[Pick]]:
         grouped.setdefault(key, []).append(pick)
     return grouped
 
+def group_game_lines_by_sport(lines: list[GameLine]) -> dict[str, list[GameLine]]:
+    """Group team lines by sport_id (empty → unknown)."""
+    grouped: dict[str, list[GameLine]] = {}
+    for line in lines:
+        key = line.sport_id or "unknown"
+        grouped.setdefault(key, []).append(line)
+    return grouped
+
 def sport_to_league(sport: str) -> str | None:
     """Map DraftKings event group name to odds league slug (nba only)."""
     if sport.strip().upper() == "NBA":
         return "nba"
     return None
 
-def save_picks(picks: list[Pick], path: str) -> None:
+def save_picks(
+    picks: list[Pick],
+    path: str,
+    game_lines: list[GameLine] | None = None,
+) -> None:
     """
-    Save picks to JSON file.
+    Save picks and full-game team lines to one JSON file.
 
     Args:
         picks: List of Pick objects
         path: Output file path
+        game_lines: Moneyline, spread, and total sides for the same games
     """
-    logger.info(f"Saving {len(picks)} picks to {path}...")
+    lines = game_lines or []
+    logger.info(f"Saving {len(picks)} picks and {len(lines)} game lines to {path}...")
 
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
@@ -1121,7 +1399,10 @@ def save_picks(picks: list[Pick], path: str) -> None:
         logger.debug(f"Ensured directory exists: {parent}")
 
     pick_dicts = [p.to_dict() for p in picks]
-    export = ExportData(picks=pick_dicts)
+    export = ExportData(
+        picks=pick_dicts,
+        game_lines=[line.to_dict() for line in lines],
+    )
 
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -1143,6 +1424,7 @@ class DraftKingsScraper:
         self.config = load_config()
         self.output_paths: list[str] = []
         self.picks: list[Pick] = []
+        self.game_lines: list[GameLine] = []
         self.scraped_at: datetime | None = None
         self._db_failed = False
         self._db_rows = 0
@@ -1185,27 +1467,41 @@ class DraftKingsScraper:
             logger.info("\n[Step 1/3] Discovering events and prop subcategories...")
             session = build_session(self.config.get("headers", {}))
             sport_allowlist = get_sport_allowlist(self.config)
-            if report and stage_timer:
-                with stage_timer(report, "download"):
-                    events, subcategories = fetch_event_group(session, self.config)
-                    logger.info("\n[Step 2/3] Extracting picks...")
-                    self.picks = extract_picks(
-                        session, self.config, events, subcategories, sport_allowlist
-                    )
-            else:
-                events, subcategories = fetch_event_group(session, self.config)
+
+            def _download() -> None:
+                events, subcategories, game_sub = fetch_league(
+                    session, self.config
+                )
                 logger.info("\n[Step 2/3] Extracting picks...")
                 self.picks = extract_picks(
                     session, self.config, events, subcategories, sport_allowlist
                 )
+                if game_sub is None:
+                    logger.warning("NBA nav has no Game Lines tab; team lines skipped")
+                    self.game_lines = []
+                    return
+                offers = fetch_subcategory_offers(
+                    session, self.config, game_sub, events
+                )
+                self.game_lines = game_lines_from_offers(
+                    offers, events, sport_allowlist
+                )
+
+            if report and stage_timer:
+                with stage_timer(report, "download"):
+                    _download()
+            else:
+                _download()
 
             logger.info("\n[Step 3/3] Saving to file...")
             self.scraped_at = datetime.now(timezone.utc)
             grouped = group_picks_by_sport(self.picks)
+            lines_grouped = group_game_lines_by_sport(self.game_lines)
             self.output_paths = []
 
             def _save_and_load() -> None:
-                if not grouped:
+                sports = sorted(set(grouped) | set(lines_grouped))
+                if not sports:
                     fallback = "NBA"
                     if sport_allowlist:
                         fallback = sorted(sport_allowlist)[0]
@@ -1214,10 +1510,16 @@ class DraftKingsScraper:
                     self._load_sport_to_supabase(fallback, [])
                     self.output_paths.append(path)
                 else:
-                    for sport, sport_picks in sorted(grouped.items()):
+                    for sport in sports:
                         path = resolve_output_path(sport)
-                        save_picks(sport_picks, path)
-                        self._load_sport_to_supabase(sport, sport_picks)
+                        save_picks(
+                            grouped.get(sport, []),
+                            path,
+                            game_lines=lines_grouped.get(sport, []),
+                        )
+                        self._load_sport_to_supabase(
+                            sport, grouped.get(sport, [])
+                        )
                         self.output_paths.append(path)
 
             if report and stage_timer:
@@ -1227,18 +1529,22 @@ class DraftKingsScraper:
                 _save_and_load()
 
             if report:
-                report.mark_json(ok=True, rows=len(self.picks))
+                report.mark_json(
+                    ok=True, rows=len(self.picks) + len(self.game_lines)
+                )
                 report.mark_db(ok=not self._db_failed, rows=self._db_rows)
                 report.set_stage("total", sum(report.stages_s.values()))
 
             logger.info("=" * 70)
             if self._db_failed:
                 logger.error(
-                    f"JSON saved ({len(self.picks)} picks) but Supabase load failed"
+                    f"JSON saved ({len(self.picks)} picks, "
+                    f"{len(self.game_lines)} game lines) but Supabase load failed"
                 )
             else:
                 logger.info(
-                    f"✓ SUCCESS: {len(self.picks)} picks saved across "
+                    f"✓ SUCCESS: {len(self.picks)} picks and "
+                    f"{len(self.game_lines)} game lines saved across "
                     f"{len(self.output_paths)} file(s)"
                 )
             logger.info("=" * 70)

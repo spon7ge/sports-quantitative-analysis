@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 import numpy as np
 import pandas as pd
 
-from points_xgb.config import RATE_TIERS, N_BOOT, SEED, TARGET_COL, XGB_NAME
+from points_xgb.config import N_BOOT, RATE_TIERS, SEED, TARGET_COL, XGB_NAME
 from points_xgb.paths import ensure_repo_on_path
 from points_xgb.scoring import WIS_INTERVALS, interval_stats, wis_values
 
@@ -110,6 +110,14 @@ def _subgroup_rows(
     ]
 
 
+_RATE_BASELINES = {
+    "Last-game rate": "pts_per_min_lag_1",
+    "Season-to-date rate": "season_pts_per_min_mean",
+    "EWMA rate": "pts_per_min_ewm_hl_10",
+}
+_FOLD_KEYS = ("last_game", "season_average", "ewma")
+
+
 def compare_to_baselines(
     y_ho,
     preds_ho: Mapping[str, np.ndarray],
@@ -119,23 +127,29 @@ def compare_to_baselines(
     *,
     target_col: str = TARGET_COL,
     tiers: Mapping[str, Callable] = RATE_TIERS,
+    baseline_cols: Mapping[str, str] | None = None,
+    error_cutoffs: tuple[float, ...] = (0.15, 0.25, 0.40),
+    error_unit: str = "pts/min",
     n_boot: int = N_BOOT,
     seed: int = SEED,
 ) -> dict:
     """Point, distribution, calibration, subgroup, and tail tables.
 
-    Baselines are last-game rate, season-to-date mean, and a 10-game
-    EWMA. The MAE interval resamples game dates. Rows missing any
-    baseline are dropped from the paired point comparison only.
+    Baselines are the previous game, the season-to-date mean, and a
+    10-game EWMA, in that order. The default columns are rates. The
+    MAE interval resamples game dates. Rows missing any baseline are
+    dropped from the paired point comparison only.
     """
     y_all = np.asarray(y_ho, dtype=float)
     qmap = {key: np.asarray(pred, dtype=float) for key, pred in preds_ho.items()}
     if len(next(iter(qmap.values()))) != len(y_all):
         raise ValueError(f"{XGB_NAME} predictions do not match the holdout length")
+    chosen = dict(_RATE_BASELINES if baseline_cols is None else baseline_cols)
+    if len(chosen) != len(_FOLD_KEYS):
+        raise ValueError("baseline_cols needs last game, season, and EWMA")
     baselines = {
-        "Last-game rate": ppm_holdout["pts_per_min_lag_1"].to_numpy(dtype=float),
-        "Season-to-date rate": ppm_holdout["season_pts_per_min_mean"].to_numpy(dtype=float),
-        "EWMA rate": ppm_holdout["pts_per_min_ewm_hl_10"].to_numpy(dtype=float),
+        name: ppm_holdout[column].to_numpy(dtype=float)
+        for name, column in chosen.items()
     }
     paired = np.isfinite(y_all) & np.isfinite(qmap["q_0.50"])
     for pred in baselines.values():
@@ -150,12 +164,7 @@ def compare_to_baselines(
         y_paired, paired_preds, dates_paired, n_boot, seed
     )
 
-    point_order = [
-        "Last-game rate",
-        "Season-to-date rate",
-        "EWMA rate",
-        xgb_q50_name,
-    ]
+    point_order = [*chosen, xgb_q50_name]
     point_table = pd.DataFrame(
         [point_row(name, y_paired, paired_preds[name]) for name in point_order]
     )
@@ -189,17 +198,15 @@ def compare_to_baselines(
             "n": int(len(part)),
             "model_mae": 2.0 * float(fold["pinball"]),
         }
-        for name, column in (
-            ("last_game", "pts_per_min_lag_1"),
-            ("season_average", "season_pts_per_min_mean"),
-            ("ewma", "pts_per_min_ewm_hl_10"),
-        ):
+        fold_keys = _FOLD_KEYS if baseline_cols is None else tuple(
+            label.lower().replace("-", " ").replace(" ", "_")
+            for label in chosen
+        )
+        for name, column in zip(fold_keys, chosen.values(), strict=True):
             pred = part[column].to_numpy(dtype=float)
             ok = np.isfinite(y_fold) & np.isfinite(pred)
             fold_row[name] = float(np.mean(np.abs(y_fold[ok] - pred[ok])))
-        fold_row["best_baseline"] = min(
-            fold_row["last_game"], fold_row["season_average"], fold_row["ewma"]
-        )
+        fold_row["best_baseline"] = min(fold_row[name] for name in fold_keys)
         fold_row["model_minus_best"] = (
             float(fold_row["model_mae"]) - float(fold_row["best_baseline"])
         )
@@ -243,11 +250,11 @@ def compare_to_baselines(
         [
             {
                 "model": XGB_NAME,
-                "threshold": f">{cutoff:g} pts/min",
+                "threshold": f">{cutoff:g} {error_unit}",
                 "rate": float(np.mean(absolute_error > cutoff)),
                 "n": int(np.sum(absolute_error > cutoff)),
             }
-            for cutoff in (0.15, 0.25, 0.40)
+            for cutoff in error_cutoffs
         ]
     )
 

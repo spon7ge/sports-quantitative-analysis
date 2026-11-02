@@ -81,13 +81,20 @@ def score_quantile_fold(
     }
 
     pinball_bits: list[str] = []
+    quantile_losses: list[float] = []
     for key, pred in preds.items():
         alpha = _alpha_from_key(key)
         if alpha is None:
             continue
         loss = pinball_loss(actual, pred, alpha)
         metrics[f"pinball_{key}"] = loss
+        quantile_losses.append(loss)
         pinball_bits.append(f"q{alpha:.2f}={loss:.3f}")
+    # q50 pinball is MAE/2. The selection metric is the mean over the grid,
+    # which is the CRPS approximation and weights the middle, where lines sit.
+    metrics["mean_pinball"] = (
+        float(np.mean(quantile_losses)) if quantile_losses else float("nan")
+    )
     metrics["pinball"] = metrics.get(f"pinball_{median_key}", float("nan"))
 
     coverage_bits: list[str] = []
@@ -116,6 +123,7 @@ def score_quantile_fold(
         print(f"  n={len(actual):5d}")
         if pinball_bits:
             print(f"  pinball  | {'  '.join(pinball_bits)}")
+            print(f"  mean pinball | {metrics['mean_pinball']:.3f}")
         if coverage_bits:
             print(f"  coverage | {'  '.join(coverage_bits)}")
 

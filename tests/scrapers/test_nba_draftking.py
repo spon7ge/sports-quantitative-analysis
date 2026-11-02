@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -12,16 +13,24 @@ from zoneinfo import ZoneInfo
 from src.odds.load_snapshots import _draftkings_table
 from src.odds.quote_specs import QUOTE_SPECS
 from src.odds.snapshot_rows import draftkings_picks_to_rows
+from src.scrapers.arbitrage import quotes_from_payload
+from curl_cffi.requests.exceptions import HTTPError as CurlHTTPError
+
 from src.scrapers.nba.nba_draftking import (
     _DEFAULT_CONFIG,
     _DEFAULT_OUTPUT_DIR,
     Subcategory,
+    build_session,
+    extract_game_lines,
     extract_offer_picks,
     fetch_event_group,
+    fetch_json,
+    game_line_subcategory_from_nav,
     is_game_market,
     match_stat,
     payload_to_offers,
     resolve_output_path,
+    save_picks,
     sport_to_league,
     subcategories_from_nav,
 )
@@ -100,6 +109,40 @@ def _counters() -> dict[str, int]:
     }
 
 
+def test_build_session_impersonates_chrome_for_akamai() -> None:
+    """Akamai 403s the requests TLS fingerprint on the Nash markets API."""
+    session = build_session({"Accept": "application/json", "User-Agent": "custom"})
+    assert session.impersonate == "chrome"
+    assert session.headers.get("Accept") == "application/json"
+    worker = build_session(dict(session.headers))
+    assert worker.impersonate == "chrome"
+
+
+def test_fetch_json_retries_curl_cffi_http_errors(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    class _Session:
+        def get(self, url, params=None, timeout=None):
+            calls["n"] += 1
+            raise CurlHTTPError("403 Client Error")
+
+    monkeypatch.setattr("src.scrapers.nba.nba_draftking.time.sleep", lambda _seconds: None)
+    try:
+        fetch_json(
+            _Session(),
+            "https://example.test/markets",
+            {},
+            timeout=1,
+            max_retries=3,
+            label="subcategory Player Props/Assists",
+        )
+    except CurlHTTPError:
+        pass
+    else:
+        raise AssertionError("fetch_json swallowed the browser-client HTTP error")
+    assert calls["n"] == 3
+
+
 def test_nba_draftking_defaults() -> None:
     root = repo_root()
     assert _DEFAULT_CONFIG["sport_allowlist"] == ["NBA"]
@@ -172,6 +215,138 @@ def test_match_stat_maps_nba_props_not_baseball() -> None:
     assert match_stat("Strikeouts") is None
     assert is_game_market("Total Points")
     assert not is_game_market("Points")
+
+
+def _sel(market_id: str, label: str, american: str, points: float | None) -> dict:
+    return {
+        "marketId": market_id,
+        "label": label,
+        "points": points,
+        "displayOdds": {"american": american},
+    }
+
+
+def test_game_line_tab_is_separate_from_player_props() -> None:
+    sub = game_line_subcategory_from_nav(_NAV_HTML)
+    assert sub is not None
+    assert (sub.category_id, sub.subcategory_id, sub.name) == ("487", "4511", "Game Lines")
+
+
+def test_extract_game_lines_keeps_main_moneyline_spread_and_total() -> None:
+    event_name = "MIN Timberwolves @ CLE Cavaliers"
+    start = "2026-10-26T23:13:00.0000000Z"
+    payload = {
+        "events": [
+            {
+                "id": "34901567",
+                "name": event_name,
+                "startEventDate": start,
+            }
+        ],
+        "markets": [
+            {"id": "ml", "eventId": "34901567", "name": "Moneyline"},
+            {"id": "sp-wide", "eventId": "34901567", "name": "Spread"},
+            {"id": "sp", "eventId": "34901567", "name": "Spread"},
+            {"id": "tot", "eventId": "34901567", "name": "Total"},
+            {"id": "alt", "eventId": "34901567", "name": "Alternate Spread"},
+            {"id": "half", "eventId": "34901567", "name": "1st Half Total"},
+            {"id": "one", "eventId": "34901567", "name": "Moneyline"},
+        ],
+        "selections": [
+            _sel("ml", "MIN Timberwolves", "−380", None),
+            _sel("ml", "CLE Cavaliers", "+275", None),
+            _sel("sp-wide", "MIN Timberwolves", "−250", -12.5),
+            _sel("sp-wide", "CLE Cavaliers", "+190", 12.5),
+            _sel("sp", "MIN Timberwolves", "−110", -7.5),
+            _sel("sp", "CLE Cavaliers", "−110", 7.5),
+            _sel("tot", "Over", "−120", 224.5),
+            _sel("tot", "Under", "−110", 224.5),
+            _sel("alt", "MIN Timberwolves", "+140", -3.5),
+            _sel("alt", "CLE Cavaliers", "−170", 3.5),
+            _sel("half", "Over", "−110", 112.5),
+            _sel("half", "Under", "−110", 112.5),
+            _sel("one", "MIN Timberwolves", "−200", None),
+        ],
+    }
+    saved = [line.to_dict() for line in extract_game_lines(payload)]
+    assert saved == [
+        {
+            "market": "moneyline",
+            "event_name": event_name,
+            "start_time": start,
+            "side": "MIN Timberwolves",
+            "line": None,
+            "american": -380,
+        },
+        {
+            "market": "moneyline",
+            "event_name": event_name,
+            "start_time": start,
+            "side": "CLE Cavaliers",
+            "line": None,
+            "american": 275,
+        },
+        {
+            "market": "spread",
+            "event_name": event_name,
+            "start_time": start,
+            "side": "MIN Timberwolves",
+            "line": -7.5,
+            "american": -110,
+        },
+        {
+            "market": "spread",
+            "event_name": event_name,
+            "start_time": start,
+            "side": "CLE Cavaliers",
+            "line": 7.5,
+            "american": -110,
+        },
+        {
+            "market": "total",
+            "event_name": event_name,
+            "start_time": start,
+            "side": "over",
+            "line": 224.5,
+            "american": -120,
+        },
+        {
+            "market": "total",
+            "event_name": event_name,
+            "start_time": start,
+            "side": "under",
+            "line": 224.5,
+            "american": -110,
+        },
+    ]
+    quotes = quotes_from_payload("draftkings", "nba", {"picks": [], "game_lines": saved})
+    assert {quote.kind for quote in quotes} == {"moneyline", "spread", "total"}
+    assert {quote.line for quote in quotes if quote.kind == "spread"} == {-7.5, 7.5}
+
+
+def test_save_picks_writes_game_lines_beside_props(tmp_path: Path) -> None:
+    path = tmp_path / "draftkings_nba.json"
+    lines = extract_game_lines(
+        {
+            "events": [
+                {
+                    "id": "1",
+                    "name": "PHO Suns @ OKC Thunder",
+                    "startEventDate": "2026-10-27T02:10:00.0000000Z",
+                }
+            ],
+            "markets": [{"id": "tot", "eventId": "1", "name": "Total"}],
+            "selections": [
+                _sel("tot", "Over", "+120", 220.5),
+                _sel("tot", "Under", "−150", 220.5),
+            ],
+        }
+    )
+    save_picks([], str(path), game_lines=lines)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["picks"] == []
+    assert payload["count"] == 0
+    assert payload["game_lines"] == [line.to_dict() for line in lines]
 
 
 def test_resolve_output_path_uses_nba_slug(monkeypatch) -> None:

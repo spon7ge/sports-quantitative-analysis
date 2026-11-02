@@ -5,13 +5,26 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-
+from models.shared.conformal_report import ConformalSpec
 from points_xgb.calibration import (
     calibrated_tail_frame,
     fold_base_knots,
     oof_leakage_table,
     oof_player_games,
     require_preholdout,
+)
+
+POINTS_SPEC = ConformalSpec(
+    target_col="pts",
+    lag_col="pts_lag_1",
+    tiers=(
+        ("<8", None, 8.0),
+        ("8-15", 8.0, 15.0),
+        ("15-25", 15.0, 25.0),
+        ("25+", 25.0, None),
+    ),
+    clip_low=0.0,
+    clip_high=100.0,
 )
 
 
@@ -26,9 +39,7 @@ def test_require_preholdout_rejects_opening_night():
 def test_fold_base_knots_fill_a_cold_start_from_that_folds_rates():
     ppm = pd.DataFrame(
         {
-            "game_date": pd.to_datetime(
-                ["2024-01-01", "2024-01-02", "2024-01-03"]
-            ),
+            "game_date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
             "starting": [1, 1, 1],
             "pts_per_min": [0.2, 0.6, 0.1],
             "pts_per_min_lag_1": [0.1, 0.2, np.nan],
@@ -51,6 +62,28 @@ def test_fold_base_knots_fill_a_cold_start_from_that_folds_rates():
     oof["game_date"] = pd.Timestamp("2026-10-20")
     with pytest.raises(ValueError, match="holdout"):
         fold_base_knots(oof, ppm, [mask])
+
+
+def test_fold_base_knots_reads_points_when_the_rate_column_is_absent():
+    ppm = pd.DataFrame(
+        {
+            "game_date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
+            "starting": [1, 1, 1],
+            "pts": [10.0, 30.0, 4.0],
+            "pts_lag_1": [8.0, 10.0, np.nan],
+        }
+    )
+    oof = ppm.iloc[[2]].copy()
+    oof["fold_id"] = 1
+    oof["q_0.10"] = 99.0
+    oof["q_0.50"] = 99.0
+    oof["q_0.90"] = 99.0
+    mask = pd.Series([True, True, False], index=ppm.index)
+
+    base, group = fold_base_knots(oof, ppm, [mask], spec=POINTS_SPEC)
+
+    assert list(group) == ["cold_start"]
+    assert base.loc[oof.index[0], "q_0.50"] == pytest.approx(20.0)
 
 
 def test_duplicate_oof_player_games_raise():

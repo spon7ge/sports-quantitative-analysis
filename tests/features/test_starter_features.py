@@ -83,3 +83,20 @@ def test_shared_starter_features_match_notebook_block():
     expected = _notebook_block(frame)
     actual = add_starter_features(frame)
     pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_add_starter_features_accepts_mixed_game_date_formats():
+    """Live slate rows use YYYY-MM-DD while history may be ISO timestamps."""
+    frame = _synthetic_gamelogs().copy()
+    frame["game_date"] = frame["game_date"].dt.strftime("%Y-%m-%dT%H:%M:%S")
+    slate = frame.iloc[[0]].copy()
+    slate["game_id"] = "slate-1"
+    slate["game_date"] = "2026-10-22"
+    slate["minutes"] = np.nan
+    slate["starting"] = 1
+    mixed = pd.concat([frame, slate], ignore_index=True)
+
+    featured = add_starter_features(mixed)
+    assert len(featured) == len(mixed)
+    assert "starter_rank" in featured.columns
+    assert featured["starter_rank"].notna().any()

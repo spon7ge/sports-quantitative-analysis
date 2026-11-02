@@ -1,0 +1,3 @@
+variant,elpd,elpd_minus_shared,recommendation,sd
+shared,-9720.850482701253,0.0,baseline,
+usg_stars_out,-9706.877615035286,13.972867665966987,share,fga2_usg_stars_out_sd median=0.0220 q05=0.0026 frac<0.01=0.24 (near zero); fga3_usg_stars_out_sd median=0.0240 q05=0.0015 frac<0.01=0.20 (near zero); fta_usg_stars_out_sd median=0.0342 q05=0.0050 frac<0.01=0.14 (near zero)

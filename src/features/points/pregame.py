@@ -44,6 +44,9 @@ OUTCOME_COLUMNS = (
     "team_fga",
     "team_pts",
     "opp_pts",
+    "pfd",
+    "cfga",
+    "ufga",
 )
 
 

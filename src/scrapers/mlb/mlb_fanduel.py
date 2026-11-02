@@ -43,6 +43,7 @@ except ImportError:  # python mlb_fanduel.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 
 _BOOK_DIR = os.path.join(_ROOT, "data", "props", "fanduel")
 _DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "mlb")
@@ -420,6 +421,7 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
     allow = {str(c).upper() for c in (cfg.get("fd_competition_names") or [])}
     events: list[Event] = []
     skipped_competition = 0
+    skipped_started = 0
 
     for rec in records:
         event_id = rec.get("eventId") or rec.get("id")
@@ -429,17 +431,27 @@ def fetch_events(session: requests.Session, cfg: dict[str, Any]) -> list[Event]:
         if allow and competition.upper() not in allow:
             skipped_competition += 1
             continue
+        start_time = rec.get("openDate") or rec.get("startTime") or rec.get("eventTime")
+        in_play = rec.get("inPlay") is True or rec.get("inplay") is True
+        status = "live" if in_play else (rec.get("status") or rec.get("eventStatus"))
+        if game_has_started(start_time, status=status):
+            skipped_started += 1
+            continue
         events.append(
             Event(
                 event_id=str(event_id),
                 name=str(rec.get("name") or ""),
-                start_time=rec.get("openDate") or rec.get("startTime") or rec.get("eventTime"),
+                start_time=start_time,
                 competition=competition or "MLB",
             )
         )
 
     events.sort(key=lambda e: (e.start_time or "", e.name))
-    logger.info(f"Discovered {len(events)} events (skipped_competition={skipped_competition})")
+    logger.info(
+        f"Discovered {len(events)} events "
+        f"(skipped_competition={skipped_competition}, "
+        f"skipped_started={skipped_started})"
+    )
 
     cap = os.environ.get("FANDUEL_MAX_EVENTS", "").strip()
     if cap.isdigit() and int(cap) > 0:

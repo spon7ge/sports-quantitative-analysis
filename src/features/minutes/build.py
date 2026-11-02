@@ -38,9 +38,14 @@ def add_minutes_features(
     unless a documented DNP universe is supplied later.
     """
     result = frame.copy()
-    result["game_date"] = pd.to_datetime(
-        result["game_date"],
-        errors="coerce",
+    result["game_date"] = (
+        pd.to_datetime(
+            result["game_date"],
+            format="mixed",
+            utc=True,
+            errors="coerce",
+        )
+        .dt.tz_convert(None)
     )
     result["target_minutes"] = reconcile_target_minutes(
         result

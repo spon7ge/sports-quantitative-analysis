@@ -33,6 +33,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal
 
+from src.scrapers.arbitrage import report_arbitrage
+
 League = Literal["mlb", "nba"]
 LEAGUES: tuple[League, ...] = ("mlb", "nba")
 Pool = Literal["http", "pinnacle", "prizepick_browser"]
@@ -235,6 +237,7 @@ def run_all(
     if not jobs:
         print("No scrapers selected.", flush=True)
         return 1
+    started = time.time()
 
     cancel_event = threading.Event()
     proc_registry: list[subprocess.Popen] = []
@@ -332,6 +335,10 @@ def run_all(
     succeeded = sum(1 for n in summary_names if results.get(n) == 0)
     total = sum(1 for n in summary_names if n in results)
     print(f"{succeeded}/{total} succeeded", flush=True)
+    try:
+        report_arbitrage(league=league, not_before=started)
+    except Exception as exc:
+        print(f"Arbitrage check failed: {exc}", flush=True)
     return 0 if failed == 0 else 1
 
 

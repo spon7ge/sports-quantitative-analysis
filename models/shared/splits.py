@@ -64,7 +64,10 @@ def date_walk_forward_folds(
     if not df[date_col].is_monotonic_increasing:
         raise ValueError(f"{date_col} must be sorted ascending before walk-forward")
 
-    unique_dates = df[date_col].unique()
+    # Appearance order is not chronological when the frame is unsorted.
+    # The monotonic check above rejects that case; sorting still keeps a
+    # date's position stable if that guard is ever loosened.
+    unique_dates = np.sort(pd.to_datetime(df[date_col]).unique())
     n_dates = len(unique_dates)
     train_window = round(n_dates * train_frac)
     step_size = round(n_dates * step_frac)
@@ -93,6 +96,131 @@ def date_walk_forward_folds(
                 f"{pd.Timestamp(val_dates[-1]).date()})"
             ),
         }
+
+
+_REGULAR_SEASON = "Regular Season"
+_POSTSEASON = frozenset({"Playoffs", "Play-In", "PlayIn"})
+
+
+def regular_season_mask(season_type) -> np.ndarray:
+    """True for regular-season rows. Any other label is an error."""
+    labels = pd.Series(np.asarray(season_type), dtype="string").str.strip()
+    if bool(labels.isna().any()):
+        raise ValueError("season_type has missing values")
+    known = labels.eq(_REGULAR_SEASON) | labels.isin(list(_POSTSEASON))
+    if not bool(known.all()):
+        unknown = sorted(set(labels.loc[~known].astype(str)))
+        raise ValueError(f"unknown season_type: {unknown}")
+    return labels.eq(_REGULAR_SEASON).to_numpy()
+
+
+def season_walk_forward_folds(
+    df: pd.DataFrame,
+    *,
+    season_col: str = "season_year",
+    date_col: str = "game_date",
+    val_seasons: Sequence[str] = ("2022-23", "2023-24", "2024-25", "2025-26"),
+    max_train_seasons: int | None = None,
+    season_type_col: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield expanding season folds: train on seasons before S, validate on S.
+
+    ``max_train_seasons`` keeps only the latest training seasons. Postseason
+    rows stay in training when they belong to an earlier season, and are
+    left out of every validation window. A season at least as new as the
+    first validation season must itself be a validation season, so the
+    latest year cannot fall outside the out-of-fold set.
+    """
+    if season_col not in df.columns or date_col not in df.columns:
+        raise KeyError(f"folds need {season_col!r} and {date_col!r}")
+    requested = [str(season) for season in val_seasons]
+    if not requested:
+        raise ValueError("val_seasons")
+    if requested != sorted(requested):
+        raise ValueError("val_seasons must be chronological")
+    if max_train_seasons is not None and int(max_train_seasons) < 1:
+        raise ValueError("max_train_seasons")
+    seasons = sorted(str(season) for season in df[season_col].astype(str).unique())
+    missing = [season for season in requested if season not in seasons]
+    if missing:
+        raise ValueError(f"validation season not in the frame: {missing}")
+    first = requested[0]
+    requested_set = set(requested)
+    left_out = [
+        season for season in seasons if season >= first and season not in requested_set
+    ]
+    if left_out:
+        raise ValueError(f"seasons not in a validation fold: {left_out}")
+    regular = (
+        np.ones(len(df), dtype=bool)
+        if season_type_col is None
+        else regular_season_mask(df[season_type_col])
+    )
+    labels = df[season_col].astype(str)
+    for fold_id, season in enumerate(requested, start=1):
+        prior = [item for item in seasons if item < season]
+        if not prior:
+            raise ValueError(f"no seasons before {season}")
+        if max_train_seasons is not None:
+            prior = prior[-int(max_train_seasons) :]
+        train_mask = labels.isin(prior).to_numpy()
+        in_season = labels.eq(season).to_numpy()
+        val_mask = in_season & regular
+        if not bool(train_mask.any()) or not bool(val_mask.any()):
+            raise ValueError(f"empty train or validation window for {season}")
+        n_val_postseason = int((in_season & ~regular).sum())
+        train_dates = np.sort(pd.to_datetime(df.loc[train_mask, date_col]).unique())
+        val_dates = np.sort(pd.to_datetime(df.loc[val_mask, date_col]).unique())
+        yield {
+            "fold": fold_id,
+            "train_mask": train_mask,
+            "val_mask": val_mask,
+            "train_dates": train_dates,
+            "val_dates": val_dates,
+            "n_val_postseason": n_val_postseason,
+            "label": f"{prior[0]}..{prior[-1]} -> {season}",
+        }
+
+
+def early_season_mask(
+    df: pd.DataFrame,
+    *,
+    n_games: int = 10,
+    season_col: str = "season_year",
+    team_col: str = "team_id",
+    date_col: str = "game_date",
+    game_col: str = "game_id",
+) -> pd.Series:
+    """True on each team's first ``n_games`` in a season.
+
+    The count is team games, not player rows, so two players in the same
+    game share the flag. Numbering restarts each season.
+    """
+    if int(n_games) < 1:
+        raise ValueError("n_games")
+    needed = (season_col, team_col, date_col, game_col)
+    missing = [column for column in needed if column not in df.columns]
+    if missing:
+        raise KeyError(f"early-season slice needs {missing}")
+    games = (
+        df.loc[:, list(needed)]
+        .drop_duplicates([season_col, team_col, game_col])
+        .sort_values([season_col, team_col, date_col, game_col], kind="mergesort")
+    )
+    games = games.copy()
+    order = games.groupby([season_col, team_col], sort=False).cumcount() + 1
+    games["_team_game"] = order
+    early_games = games.loc[
+        games["_team_game"] <= int(n_games),
+        [season_col, team_col, game_col],
+    ]
+    matched = df.loc[:, [season_col, team_col, game_col]].merge(
+        early_games.assign(_early=True),
+        on=[season_col, team_col, game_col],
+        how="left",
+    )
+    flags = matched["_early"].eq(True).to_numpy()
+    return pd.Series(flags, index=df.index, name="early_season")
 
 
 def prepare_splits(

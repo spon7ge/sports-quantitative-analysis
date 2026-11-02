@@ -38,7 +38,7 @@ def _page_payload() -> dict:
                     "eventId": 34800001,
                     "name": "Cincinnati Reds @ Atlanta Braves",
                     "competitionId": 11196870,
-                    "openDate": "2026-09-22T23:20:00.000Z",
+                    "openDate": "2099-09-22T23:20:00.000Z",
                 },
                 "2": {
                     "eventId": 28197722,
@@ -90,7 +90,7 @@ def test_fetch_events_keeps_legacy_competition_name_on_event() -> None:
                     "eventId": 1,
                     "name": "Yankees @ Red Sox",
                     "competitionName": "MLB",
-                    "openDate": "2026-09-22T23:00:00.000Z",
+                    "openDate": "2099-09-22T23:00:00.000Z",
                 }
             },
             "markets": {},

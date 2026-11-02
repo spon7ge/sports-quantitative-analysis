@@ -64,7 +64,7 @@ def add_player_role_features(
         minutes,
         PLAYER_KEY,
     )
-    for window in (3, 10, 20):
+    for window in (3, 5, 10, 20):
         result[f"min_mean_{window}"] = prior_roll(
             result,
             minutes,
@@ -91,11 +91,23 @@ def add_player_role_features(
         PLAYER_KEY,
         halflife=3,
     )
+    result["min_ewm_hl_5"] = prior_ewm(
+        result,
+        minutes,
+        PLAYER_KEY,
+        halflife=5,
+    )
     result["min_ewm_hl_10"] = prior_ewm(
         result,
         minutes,
         PLAYER_KEY,
         halflife=10,
+    )
+    result["min_ewm_hl_20"] = prior_ewm(
+        result,
+        minutes,
+        PLAYER_KEY,
+        halflife=20,
     )
     result["min_ge_30_rate_10"] = prior_roll(
         result,

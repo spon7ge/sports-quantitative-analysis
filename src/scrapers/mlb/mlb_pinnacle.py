@@ -67,6 +67,7 @@ except ImportError:  # python mlb_pinnacle.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 
 try:
     from selenium.webdriver.common.by import By  # type: ignore[import-untyped]
@@ -340,12 +341,19 @@ def game_urls_from_league_matchups(
     """
     league = expected_league.strip().lower()
     cand: set[str] = set()
+    skipped_started = 0
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         if row.get("type") != "matchup":
             continue
         if row.get("parentId") is not None:
+            continue
+        if game_has_started(
+            row.get("startTime") or row.get("start_time"),
+            status=row.get("status"),
+        ):
+            skipped_started += 1
             continue
         mid = row.get("id")
         if mid is None:
@@ -359,6 +367,10 @@ def game_urls_from_league_matchups(
         )
         if canon:
             cand.add(canon)
+    if skipped_started:
+        logger.info(
+            "Skipping %s Pinnacle game(s) that already started", skipped_started
+        )
     return sorted(cand)
 
 
@@ -1212,6 +1224,18 @@ class PinnacleScraper:
                 f"max {self.parallel_workers} configured)…",
             )
             games_out = self._scrape_games_parallel(urls)
+
+        n_before = len(games_out)
+        games_out = [
+            game
+            for game in games_out
+            if not game_has_started(game.get("start_time"))
+        ]
+        if len(games_out) != n_before:
+            logger.info(
+                "Skipping %s Pinnacle game(s) that already started",
+                n_before - len(games_out),
+            )
 
         payload_base: dict[str, Any] = {
             "fetched_at": dt.datetime.now(_PINNACLE_OUTPUT_TZ).isoformat(timespec="seconds"),

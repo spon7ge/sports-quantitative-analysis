@@ -33,6 +33,8 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 import requests
+from curl_cffi.requests import Session as CurlSession
+from curl_cffi.requests.exceptions import RequestException as CurlRequestException
 
 # ============================================================================
 # Configuration
@@ -44,6 +46,7 @@ except ImportError:  # python mlb_draftking.py from this directory
     from paths import ensure_repo_on_path
 
 _ROOT = str(ensure_repo_on_path(__file__))
+from src.scrapers.game_clock import game_has_started  # noqa: E402
 
 _BOOK_DIR = os.path.join(_ROOT, "data", "props", "draftkings")
 _DEFAULT_OUTPUT_DIR = os.path.join(_BOOK_DIR, "mlb")
@@ -350,8 +353,14 @@ def decimal_to_american(decimal: float) -> int | None:
 # API Fetching
 # ============================================================================
 
-def build_session(headers: dict[str, str]) -> requests.Session:
-    session = requests.Session()
+# Akamai (AkamaiGHost) 403s the requests/curl TLS fingerprint on the Nash
+# markets API. A Chrome impersonation profile is what returns JSON.
+_REQUEST_ERRORS = (requests.RequestException, CurlRequestException)
+_FETCH_ERRORS = (*_REQUEST_ERRORS, ValueError)
+
+
+def build_session(headers: dict[str, str]) -> CurlSession:
+    session = CurlSession(impersonate="chrome")
     session.headers.update(headers)
     return session
 
@@ -385,7 +394,7 @@ def fetch_json(
             data = response.json()
             logger.debug(f"{label}: status={response.status_code}, keys={list(data.keys())}")
             return data
-        except (requests.RequestException, ValueError) as e:
+        except _FETCH_ERRORS as e:
             last_error = e
             if attempt >= max(1, max_retries):
                 break
@@ -421,7 +430,7 @@ def fetch_text(
                 )
             response.raise_for_status()
             return response.text
-        except requests.RequestException as e:
+        except _REQUEST_ERRORS as e:
             last_error = e
             if attempt >= max(1, max_retries):
                 break
@@ -615,6 +624,37 @@ def fetch_event_group(
     return {}, subcategories
 
 
+def _without_started_offers(
+    offers: list[dict[str, Any]],
+    events: dict[str, Event],
+    raw_events: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Event]]:
+    """Drop offers for games that have already started."""
+    status_by_id: dict[str, object] = {}
+    for rec in raw_events or []:
+        if not isinstance(rec, dict):
+            continue
+        event_id = str(rec.get("id") or rec.get("eventId") or "")
+        if not event_id:
+            continue
+        status_by_id[event_id] = rec.get("eventStatus") or rec.get("status") or rec.get("state")
+    started = {
+        event_id
+        for event_id, event in events.items()
+        if game_has_started(event.start_time, status=status_by_id.get(event_id))
+    }
+    if not started:
+        return offers, events
+    logger.info("Skipping %s DraftKings game(s) that already started", len(started))
+    kept_offers = [
+        offer for offer in offers if str(offer.get("eventId") or "") not in started
+    ]
+    kept_events = {
+        event_id: event for event_id, event in events.items() if event_id not in started
+    }
+    return kept_offers, kept_events
+
+
 def fetch_subcategory_offers(
     session: requests.Session,
     cfg: dict[str, Any],
@@ -649,12 +689,15 @@ def fetch_subcategory_offers(
             max_retries=int(cfg.get("dk_max_retries", 3)),
             label=f"subcategory {sub.category_name}/{sub.name}",
         )
-    except (requests.RequestException, ValueError) as e:
+    except _FETCH_ERRORS as e:
         logger.warning(f"subcategory {sub.name!r} unavailable ({e}); continuing")
         return []
 
     _maybe_dump(payload, f"sub_{sub.category_id}_{sub.subcategory_id}")
     offers, payload_events = payload_to_offers(payload, competition="MLB")
+    offers, payload_events = _without_started_offers(
+        offers, payload_events, payload.get("events")
+    )
     if events is not None:
         events.update(payload_events)
 

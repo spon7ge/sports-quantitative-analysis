@@ -4,41 +4,80 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-
-from points_xgb.config import PTS_FEATURES, RATE_TIERS
-from points_xgb.features import apply_train_tukey, assert_no_leak, assign_rate_target
 from models.shared.metrics import RATE_Q50_TIERS
 from models.shared.splits import tukey_fences
+from points_xgb.config import RATE_TIERS
+from points_xgb.features import (
+    apply_train_tukey,
+    assert_no_leak,
+    assign_rate_target,
+    build_model_frame,
+)
 
 
-def test_feature_list_matches_the_model_and_rejects_leakage():
-    assert PTS_FEATURES == [
-        "pts_per_min_ewm_hl_10",
-        "player_fga_share_10",
-        "ppm_trim_mean_20",
-        "current_team_pts_per_min",
-        "usg_wmean_10",
-        "season_pts_per_min",
-        "starting",
-        "fta_per_min_10",
-        "fga_per_min_10",
-        "fg3a_per_min_10",
-        "pts_per_min_mean_vs_opp",
-        "fga_per_min_mean_vs_opp",
-        "fta_per_min_mean_vs_opp",
-        "fg3a_per_min_mean_vs_opp",
-        "ppm_unstable",
-        "opp_def_rating_mean_10",
-        "min_mean_10",
-        "min_sd_10",
-        "minutes_ewm_10",
-        "ts_pct_10",
-        "opp_pace_10",
-        "ppm_sd_10",
-    ]
-    assert_no_leak(PTS_FEATURES)
+def test_leak_guard_rejects_game_outcomes():
+    assert_no_leak(["pts_rolling_10", "starting"])
     with pytest.raises(AssertionError):
-        assert_no_leak([*PTS_FEATURES, "minutes"])
+        assert_no_leak(["pts_rolling_10", "minutes"])
+
+
+def test_model_frame_adds_minutes_availability_features():
+    frame = pd.DataFrame(
+        {
+            "player_id": [1, 2, 3, 1, 2, 3],
+            "team_id": [10, 10, 10, 10, 10, 10],
+            "opp_team_id": [20, 20, 20, 20, 20, 20],
+            "game_id": [1, 1, 1, 2, 2, 2],
+            "game_date": pd.to_datetime(
+                ["2024-01-01", "2024-01-01", "2024-01-01", "2024-01-03", "2024-01-03", "2024-01-03"]
+            ),
+            "season_year": ["2023-24"] * 6,
+            "season_type": ["Regular Season"] * 6,
+            "matchup": ["BOS vs. NYK"] * 6,
+            "minutes": [30.0, 20.0, 10.0, 28.0, 12.0, 0.0],
+            "start_position": ["G", "F", "C", "G", "F", ""],
+            "pts": [20.0, 8.0, 4.0, 18.0, 6.0, 0.0],
+            "fga": [15.0, 6.0, 3.0, 14.0, 5.0, 0.0],
+            "player_team_spread": [-4.5, -4.5, -4.5, -3.0, -3.0, -3.0],
+            "game_total": [226.0, 226.0, 226.0, 218.0, 218.0, 218.0],
+        }
+    )
+    featured = build_model_frame(frame)
+    game2 = featured.loc[featured["game_id"].eq(2)].set_index("player_id")
+    assert game2["total_stars_active"].tolist() == [2, 2, 2]
+    assert game2.loc[1, "starter_min_missing_teammates"] == pytest.approx(10.0)
+    assert game2.loc[2, "starter_min_missing_teammates"] == pytest.approx(10.0)
+    assert game2.loc[3, "starter_min_missing_teammates"] == pytest.approx(0.0)
+
+
+def test_model_frame_carries_minutes_role_and_market_columns():
+    frame = pd.DataFrame(
+        {
+            "player_id": [1, 2, 1, 2],
+            "team_id": [10, 10, 10, 10],
+            "opp_team_id": [20, 20, 20, 20],
+            "game_id": [1, 1, 2, 2],
+            "game_date": pd.to_datetime(
+                ["2024-01-01", "2024-01-01", "2024-01-03", "2024-01-03"]
+            ),
+            "season_year": ["2023-24"] * 4,
+            "season_type": ["Regular Season"] * 4,
+            "matchup": ["BOS vs. NYK"] * 4,
+            "minutes": [30.0, 12.0, 28.0, 10.0],
+            "start_position": ["G", "", "G", ""],
+            "pts": [20.0, 4.0, 18.0, 6.0],
+            "fga": [15.0, 4.0, 14.0, 5.0],
+            "player_team_spread": [-4.5, -4.5, -3.0, -3.0],
+            "game_total": [226.0, 226.0, 218.0, 218.0],
+        }
+    )
+    featured = build_model_frame(frame)
+    second = featured.loc[featured["game_id"].eq(2)].set_index("player_id")
+    assert second.loc[1, "starter_rank"] == 1
+    assert second.loc[2, "starter_rank"] == 2
+    assert second.loc[1, "start_rate_10"] == pytest.approx(1.0)
+    assert second.loc[1, "player_team_spread"] == pytest.approx(-3.0)
+    assert second.loc[1, "game_total"] == pytest.approx(218.0)
 
 
 def test_rate_tier_names_match_the_shared_cuts():

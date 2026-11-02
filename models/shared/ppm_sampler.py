@@ -93,7 +93,7 @@ def _rate_knots(prepared_row, lower_group, upper_group, tables):
         cut = int(np.searchsorted(u, 0.05, side="left"))
         u = np.concatenate([u_low, u[cut:]])
         q = np.concatenate([q_low, q[cut:]])
-    return _clip_breakpoints(u, q, RATE_FLOOR, RATE_CAP)
+    return _clip_breakpoints(u, q, float(tables.floor), float(tables.cap))
 
 
 def _validate_uniforms(u, n_rows: int) -> np.ndarray:
@@ -178,12 +178,19 @@ def probability_below_line(grids, lower_groups, upper_groups, tables, line) -> n
 
 
 def build_tail_tables(
-    oof, *, folds, fold_ranges, grouping=None, holdout_start=None
+    oof,
+    *,
+    folds,
+    fold_ranges,
+    grouping=None,
+    holdout_start=None,
+    cap: float = RATE_CAP,
 ) -> RateTailTables:
-    """Build pinned lower/upper tables from pre-holdout out-of-fold rates.
+    """Build pinned lower/upper tables from pre-holdout out-of-fold outcomes.
 
     Scoreless games (``rate == 0``) are kept. They enter the lower table
-    as exact zeros. Holdout rows are rejected.
+    as exact zeros. Holdout rows are rejected. ``cap`` is 2 for a
+    points-per-minute label and the points clip when the column is points.
     """
     rules = dict(_DEFAULT_GROUPING) if grouping is None else dict(grouping)
     if rules != _DEFAULT_GROUPING:
@@ -203,7 +210,7 @@ def build_tail_tables(
         raise ValueError("starting")
 
     rate = oof["rate"].to_numpy(dtype=float)
-    if not np.isfinite(rate).all() or np.any(rate < 0) or np.any(rate > RATE_CAP):
+    if not np.isfinite(rate).all() or np.any(rate < 0) or np.any(rate > cap):
         raise ValueError("rate")
 
     start = HOLDOUT_START if holdout_start is None else np.datetime64(holdout_start)
@@ -253,7 +260,7 @@ def build_tail_tables(
     return RateTailTables(
         arrays=arrays,
         floor=RATE_FLOOR,
-        cap=RATE_CAP,
+        cap=float(cap),
         quantile_levels=QUANTILE_LEVELS,
         holdout_start=start_label,
         grouping=rules,
