@@ -1,0 +1,298 @@
+{
+  "join": {
+    "minutes_oof": 75710,
+    "rate_oof": 74614,
+    "joint": 74614,
+    "minutes_only": 1096,
+    "rate_only": 0
+  },
+  "dependence": {
+    "all": {
+      "estimate": 0.22369130713625685,
+      "ci_low": 0.216222483809668,
+      "ci_high": 0.2307503543559697,
+      "n": 74614,
+      "n_dates": 470
+    },
+    "bench": {
+      "estimate": 0.31895709227348784,
+      "ci_low": 0.30918196268113585,
+      "ci_high": 0.32828367781165685,
+      "n": 39376,
+      "n_dates": 470
+    },
+    "starters": {
+      "estimate": 0.1187428347269769,
+      "ci_low": 0.10830466000697371,
+      "ci_high": 0.1288501208094762,
+      "n": 35238,
+      "n_dates": 470
+    }
+  },
+  "coverage": [
+    {
+      "starting": "all",
+      "octile": 1,
+      "minutes": "0.0\u20138.1",
+      "coverage": 0.7261330761812922,
+      "ci_low": 0.7164624273859345,
+      "ci_high": 0.7353424203188841,
+      "n": 9333,
+      "n_dates": 468,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 2,
+      "minutes": "8.1\u201315.0",
+      "coverage": 0.7992728050475885,
+      "ci_low": 0.7910828410905267,
+      "ci_high": 0.8071252310360412,
+      "n": 9351,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 3,
+      "minutes": "15.0\u201319.6",
+      "coverage": 0.8320807386729654,
+      "ci_low": 0.824325673845644,
+      "ci_high": 0.8395453138344217,
+      "n": 9314,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 4,
+      "minutes": "19.6\u201323.9",
+      "coverage": 0.8238136139145372,
+      "ci_low": 0.8169288181393118,
+      "ci_high": 0.8311401669142177,
+      "n": 9314,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 5,
+      "minutes": "23.9\u201327.9",
+      "coverage": 0.8202523524379812,
+      "ci_low": 0.8124453745121613,
+      "ci_high": 0.8280660997690343,
+      "n": 9352,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 6,
+      "minutes": "27.9\u201331.6",
+      "coverage": 0.818875631516715,
+      "ci_low": 0.8109252168423364,
+      "ci_high": 0.8268077349456858,
+      "n": 9303,
+      "n_dates": 468,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 7,
+      "minutes": "31.6\u201335.5",
+      "coverage": 0.822843074288161,
+      "ci_low": 0.8152837786308522,
+      "ci_high": 0.8304247805435095,
+      "n": 9342,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "all",
+      "octile": 8,
+      "minutes": "35.5\u201355.1",
+      "coverage": 0.8326706072004298,
+      "ci_low": 0.824420196665538,
+      "ci_high": 0.8405059005396858,
+      "n": 9305,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 1,
+      "minutes": "0.0\u20138.1",
+      "coverage": 0.7328692625625408,
+      "ci_low": 0.7234088956682936,
+      "ci_high": 0.7420920255998306,
+      "n": 9194,
+      "n_dates": 468,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 2,
+      "minutes": "8.1\u201315.0",
+      "coverage": 0.8105600733020273,
+      "ci_low": 0.8020590966502498,
+      "ci_high": 0.8184727913760897,
+      "n": 8731,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 3,
+      "minutes": "15.0\u201319.6",
+      "coverage": 0.8538315389487017,
+      "ci_low": 0.8461536050156739,
+      "ci_high": 0.8616506645208429,
+      "n": 7895,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 4,
+      "minutes": "19.6\u201323.9",
+      "coverage": 0.855832662912309,
+      "ci_low": 0.8470645353945194,
+      "ci_high": 0.8644614156970776,
+      "n": 6215,
+      "n_dates": 469,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 5,
+      "minutes": "23.9\u201327.9",
+      "coverage": 0.8618357487922705,
+      "ci_low": 0.8518670431981447,
+      "ci_high": 0.8717627579896712,
+      "n": 4140,
+      "n_dates": 465,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 6,
+      "minutes": "27.9\u201331.6",
+      "coverage": 0.8635724331926864,
+      "ci_low": 0.8484848484848485,
+      "ci_high": 0.8781663831106912,
+      "n": 2133,
+      "n_dates": 457,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 7,
+      "minutes": "31.6\u201335.5",
+      "coverage": 0.8651162790697674,
+      "ci_low": 0.8436434782145124,
+      "ci_high": 0.886450066137566,
+      "n": 860,
+      "n_dates": 374,
+      "crossed": 0
+    },
+    {
+      "starting": "bench",
+      "octile": 8,
+      "minutes": "35.5\u201355.1",
+      "coverage": 0.8461538461538461,
+      "ci_low": 0.7894736842105263,
+      "ci_high": 0.8972082156053032,
+      "n": 208,
+      "n_dates": 158,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 1,
+      "minutes": "0.0\u20138.1",
+      "coverage": 0.2805755395683453,
+      "ci_low": 0.20471993557623477,
+      "ci_high": 0.3586206896551724,
+      "n": 139,
+      "n_dates": 113,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 2,
+      "minutes": "8.1\u201315.0",
+      "coverage": 0.6403225806451613,
+      "ci_low": 0.598421463480858,
+      "ci_high": 0.678218212199769,
+      "n": 620,
+      "n_dates": 322,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 3,
+      "minutes": "15.0\u201319.6",
+      "coverage": 0.7110641296687809,
+      "ci_low": 0.6871032471167324,
+      "ci_high": 0.7341957293053835,
+      "n": 1419,
+      "n_dates": 435,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 4,
+      "minutes": "19.6\u201323.9",
+      "coverage": 0.7595998709261051,
+      "ci_low": 0.7456240087475474,
+      "ci_high": 0.7749031252984178,
+      "n": 3099,
+      "n_dates": 460,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 5,
+      "minutes": "23.9\u201327.9",
+      "coverage": 0.7872217958557176,
+      "ci_low": 0.7769238283135042,
+      "ci_high": 0.7972331179923322,
+      "n": 5212,
+      "n_dates": 467,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 6,
+      "minutes": "27.9\u201331.6",
+      "coverage": 0.80557880055788,
+      "ci_low": 0.7962584855700128,
+      "ci_high": 0.814788678420872,
+      "n": 7170,
+      "n_dates": 468,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 7,
+      "minutes": "31.6\u201335.5",
+      "coverage": 0.8185569441169536,
+      "ci_low": 0.8101611227109548,
+      "ci_high": 0.8265631231846535,
+      "n": 8482,
+      "n_dates": 470,
+      "crossed": 0
+    },
+    {
+      "starting": "starters",
+      "octile": 8,
+      "minutes": "35.5\u201355.1",
+      "coverage": 0.8323623172474442,
+      "ci_low": 0.8240174672489083,
+      "ci_high": 0.8403244695096306,
+      "n": 9097,
+      "n_dates": 470,
+      "crossed": 0
+    }
+  ]
+}

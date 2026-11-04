@@ -5,8 +5,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from xgboost import XGBRegressor
-
 from models.shared.artifacts import (
     load_model_bundle,
     predict_calibrated_quantiles,
@@ -14,15 +12,27 @@ from models.shared.artifacts import (
 )
 from models.shared.points_calibration import (
     calibrated_quantile_grid,
+    deterministic_quantile_pit,
     fit_pit_recalibrator,
     fit_randomized_pit_map,
     pit_walk_forward,
     probability_over,
     randomized_quantile_pit,
 )
-
+from models.shared.quantile_offsets import calibration_table, line_band_gap
+from xgboost import XGBRegressor
 
 TAUS = np.array([0.2, 0.5, 0.8])
+
+
+def test_deterministic_pit_is_the_midpoint_of_the_atom():
+    knots = np.array([[10.0, 20.0, 30.0]])
+    y = np.array([20.0])
+
+    mid = deterministic_quantile_pit(y, knots, TAUS)
+
+    # F(19) = 0.47 and F(20) = 0.5, so the midpoint is 0.485.
+    np.testing.assert_allclose(mid, [0.485])
 
 
 def test_randomized_pit_spreads_the_integer_atom():
@@ -121,6 +131,67 @@ def test_walk_forward_fits_the_map_on_earlier_folds_only():
     np.testing.assert_allclose(scored["mean_pinball"], [1.0])
 
 
+def test_walk_forward_map_ignores_the_rng_seed():
+    # y=10 sits on a flat upper knot, so a random U moves the PIT on
+    # [0.47, 0.80]. Pinball does not use the coverage jitter, so two
+    # seeds must still fit the same map.
+    taus = np.array([0.2, 0.5, 0.8])
+    knots = np.tile(np.array([[0.0, 10.0, 10.0]]), (8, 1))
+    y = np.array([0.0, 10.0, 0.0, 10.0, 0.0, 10.0, 5.0, 10.0])
+    folds = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+
+    first = pit_walk_forward(y, knots, taus, folds, np.random.default_rng(0))
+    second = pit_walk_forward(y, knots, taus, folds, np.random.default_rng(1))
+
+    np.testing.assert_allclose(first["mean_pinball"], second["mean_pinball"])
+
+
+def test_eval_mask_reuses_the_same_row_jitter():
+    # Dropping rows from fold 1 must not move fold 2. A draw sized to
+    # the scored rows consumes the generator, so the next fold's map
+    # and its coverage jitter both change.
+    taus = np.array([0.2, 0.5, 0.8])
+    knots = np.tile(np.array([[0.0, 10.0, 10.0]]), (12, 1))
+    y = np.array([0, 0, 10, 10, 0, 10, 0, 10, 0, 10, 5, 10], dtype=float)
+    folds = np.array([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    mask = np.ones(12, dtype=bool)
+    mask[[4, 5]] = False
+
+    full = pit_walk_forward(y, knots, taus, folds, np.random.default_rng(0))
+    sliced = pit_walk_forward(
+        y, knots, taus, folds, np.random.default_rng(0), eval_mask=mask
+    )
+
+    full_fold2 = full.loc[full["fold"] == 2].iloc[0]
+    sliced_fold2 = sliced.loc[sliced["fold"] == 2].iloc[0]
+    assert int(sliced_fold2["n"]) == 4
+    np.testing.assert_allclose(sliced_fold2["mean_pinball"], full_fold2["mean_pinball"])
+    np.testing.assert_allclose(sliced_fold2["max_abs_gap"], full_fold2["max_abs_gap"])
+
+
+def test_scored_subset_uses_the_full_sample_jitter():
+    taus = np.array([0.2, 0.5, 0.8])
+    knots = np.tile(np.array([[0.0, 10.0, 10.0]]), (8, 1))
+    y = np.array([0.0, 10.0, 0.0, 10.0, 0.0, 10.0, 5.0, 10.0])
+    folds = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    early = np.array([False, False, False, False, True, False, True, False])
+
+    scored = pit_walk_forward(
+        y, knots, taus, folds, np.random.default_rng(0), eval_mask=early
+    )
+    jitter = np.random.default_rng(0).uniform(-0.5, 0.5, y.shape[0])
+    calibrator = fit_pit_recalibrator(
+        deterministic_quantile_pit(y[folds == 0], knots[folds == 0], taus)
+    )
+    adjusted = calibrated_quantile_grid(knots[early], taus, calibrator)
+    hits = (y[early] + jitter[early])[:, None] <= adjusted
+    table = calibration_table(y[early], adjusted, taus, None, hits=hits)
+
+    np.testing.assert_allclose(scored["n"], [2])
+    np.testing.assert_allclose(scored["mean_pinball"], [table["pinball"].mean()])
+    np.testing.assert_allclose(scored["max_abs_gap"], [line_band_gap(table)])
+
+
 class _Column:
     def __init__(self, values):
         self.values = np.asarray(values, dtype=float)
@@ -148,9 +219,7 @@ def test_saved_pit_map_sorts_then_recalibrates_and_clips():
         },
     }
 
-    out = predict_calibrated_quantiles(
-        bundle, pd.DataFrame({"starting": [1.0]})
-    )
+    out = predict_calibrated_quantiles(bundle, pd.DataFrame({"starting": [1.0]}))
 
     np.testing.assert_allclose(out.to_numpy(), [[15.0, 15.0, 15.0]])
 

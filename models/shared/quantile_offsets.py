@@ -54,18 +54,46 @@ def mean_pinball(y, Q, taus) -> float:
     return float(row_mean_pinball(y, Q, taus).mean())
 
 
-def calibration_table(y, Q, taus, rng) -> pd.DataFrame:
+def jittered_hits(y, Q, taus, rng) -> np.ndarray:
+    """Boolean coverage of the jittered outcome at each quantile.
+
+    Same draw ``calibration_table`` uses. Shape is ``(n, len(taus))``.
+    """
+    outcome, grid, _levels = _as_grid(y, Q, taus)
+    jitter = np.asarray(rng.uniform(-0.5, 0.5, outcome.shape[0]), dtype=float)
+    if jitter.shape != outcome.shape or not np.isfinite(jitter).all():
+        raise ValueError("jitter")
+    return (outcome + jitter)[:, None] <= grid
+
+
+def _as_hits(hits, n_levels: int) -> np.ndarray:
+    covered = np.asarray(hits)
+    if covered.ndim != 2 or covered.shape[1] != n_levels or covered.shape[0] == 0:
+        raise ValueError("hits")
+    if covered.dtype == bool:
+        return covered
+    values = np.asarray(covered, dtype=float)
+    if not np.isfinite(values).all() or np.any((values != 0.0) & (values != 1.0)):
+        raise ValueError("hits")
+    return values.astype(bool)
+
+
+def calibration_table(y, Q, taus, rng, *, hits=None) -> pd.DataFrame:
     """Per-tau coverage on jittered outcomes, plus pinball on the raw outcomes.
 
     Integer points make ``y <= q`` true whenever q lands on that integer.
     Jittering by less than half a point is the continuous target an x.5
     line is actually pricing. Pinball stays on the recorded total.
+    ``hits`` reuses a ``jittered_hits`` draw so a bootstrap of those hits
+    describes the same coverage table.
     """
     outcome, grid, levels = _as_grid(y, Q, taus)
-    jitter = np.asarray(rng.uniform(-0.5, 0.5, outcome.shape[0]), dtype=float)
-    if jitter.shape != outcome.shape or not np.isfinite(jitter).all():
-        raise ValueError("jitter")
-    covered = (outcome + jitter)[:, None] <= grid
+    if hits is None:
+        covered = jittered_hits(outcome, grid, levels, rng)
+    else:
+        covered = _as_hits(hits, levels.shape[0])
+        if covered.shape[0] != outcome.shape[0]:
+            raise ValueError("hits")
     residual = outcome[:, None] - grid
     pinball = np.maximum(levels * residual, (levels - 1.0) * residual).mean(axis=0)
     coverage = covered.mean(axis=0)
@@ -116,6 +144,74 @@ def line_band_gap(table: pd.DataFrame, *, low: float = 0.3, high: float = 0.7) -
     if band.empty:
         raise ValueError("no taus in the line band")
     return float(band.abs().max())
+
+
+def cluster_gap_band(
+    covered,
+    taus,
+    clusters,
+    rng,
+    *,
+    low: float = 0.3,
+    high: float = 0.7,
+    n_boot: int = 2000,
+) -> dict[str, float | int | bool]:
+    """Sampling noise of the line-band coverage gap, resampling whole clusters.
+
+    Teammates share a game's pace and blowout, so an independent-row
+    binomial interval treats dependent rows as extra samples. Each draw
+    resamples cluster ids with replacement and keeps every row of a drawn
+    cluster, weighted by that cluster's row count. Pass a game id, or a
+    date when the game id is not on the row. The half-width is the 95th
+    percentile, over taus in ``[low, high]``, of the bootstrap max
+    ``|coverage - observed coverage|``. ``inside`` is true when the
+    observed ``max |coverage - tau|`` is no larger than that half-width.
+    Games from one player on different clusters are not held together.
+    """
+    levels = np.asarray(taus, dtype=float).reshape(-1)
+    if levels.size == 0 or not np.all((levels > 0.0) & (levels < 1.0)):
+        raise ValueError("taus must be in (0, 1)")
+    draws = int(n_boot)
+    if draws <= 0:
+        raise ValueError("n_boot")
+    chosen = (levels >= low) & (levels <= high)
+    if not bool(np.any(chosen)):
+        raise ValueError("no taus in the line band")
+    hits = _as_hits(covered, levels.shape[0]).astype(float)[:, chosen]
+    labels = np.asarray(clusters)
+    if labels.shape != (hits.shape[0],) or bool(pd.isna(labels).any()):
+        raise ValueError("clusters")
+    codes, _uniques = pd.factorize(labels, sort=False)
+    n_clusters = int(codes.max()) + 1
+    if n_clusters < 2:
+        raise ValueError("clusters")
+    cluster_n = np.bincount(codes, minlength=n_clusters).astype(float)
+    cluster_sum = np.column_stack(
+        [
+            np.bincount(codes, weights=hits[:, column], minlength=n_clusters)
+            for column in range(hits.shape[1])
+        ]
+    )
+    point = cluster_sum.sum(axis=0) / float(cluster_n.sum())
+    max_abs_gap = float(np.max(np.abs(point - levels[chosen])))
+    picked = np.asarray(rng.integers(0, n_clusters, size=(draws, n_clusters)))
+    weights = np.zeros((draws, n_clusters), dtype=np.int32)
+    np.add.at(
+        weights,
+        (np.repeat(np.arange(draws), n_clusters), picked.ravel()),
+        1,
+    )
+    denom = weights @ cluster_n
+    boot = (weights @ cluster_sum) / denom[:, None]
+    deviate = np.max(np.abs(boot - point), axis=1)
+    half_width = float(np.quantile(deviate, 0.95))
+    return {
+        "max_abs_gap": max_abs_gap,
+        "half_width": half_width,
+        "n": int(hits.shape[0]),
+        "n_clusters": n_clusters,
+        "inside": bool(max_abs_gap <= half_width),
+    }
 
 
 def fit_offsets(y, Q, taus, rng) -> np.ndarray:

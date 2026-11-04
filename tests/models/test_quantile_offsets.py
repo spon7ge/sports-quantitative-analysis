@@ -7,7 +7,9 @@ from models.shared.metrics import score_quantile_fold
 from models.shared.quantile_offsets import (
     apply_offsets,
     calibration_table,
+    cluster_gap_band,
     fit_offsets,
+    jittered_hits,
     line_band_gap,
     mean_pinball,
     offset_walk_forward,
@@ -154,3 +156,79 @@ def test_mean_pinball_is_the_grid_average():
         np.array([0.25, 0.75]),
     )
     assert value == 0.375
+
+
+def test_calibration_table_reuses_the_supplied_hits():
+    y = np.array([1.0, 0.0])
+    grid = np.array([[0.0, 1.0, 3.0], [0.0, 1.0, 3.0]])
+    taus = np.array([0.25, 0.50, 0.75])
+    hits = jittered_hits(y, grid, taus, _Jitter([0.25, -0.25]))
+    reused = calibration_table(y, grid, taus, None, hits=hits)
+    fresh = calibration_table(y, grid, taus, _Jitter([0.25, -0.25]))
+    assert reused.equals(fresh)
+
+
+def test_cluster_bootstrap_keeps_rows_from_one_game_together():
+    # Each game is one hit and one miss, so every game-level resample
+    # has coverage 0.5. A row resample could draw four hits.
+    covered = np.array([[1.0], [0.0], [1.0], [0.0]])
+    band = cluster_gap_band(
+        covered,
+        np.array([0.5]),
+        np.array(["g1", "g1", "g2", "g2"]),
+        np.random.default_rng(0),
+        n_boot=30,
+    )
+    assert band["n"] == 4
+    assert band["n_clusters"] == 2
+    assert band["max_abs_gap"] == 0.0
+    assert band["half_width"] == 0.0
+    assert band["inside"] is True
+
+
+def test_cluster_bootstrap_weights_a_game_by_its_row_count():
+    # Game a contributes three hits, game b one miss. Point coverage is
+    # 0.75. Draws are (a, a), (b, b), or one of each, so coverage is
+    # 1, 0, or 0.75. The 95th percentile of |coverage - 0.75| is 0.75.
+    covered = np.array([[1.0], [1.0], [1.0], [0.0]])
+    band = cluster_gap_band(
+        covered,
+        np.array([0.5]),
+        np.array(["a", "a", "a", "b"]),
+        np.random.default_rng(0),
+        n_boot=2000,
+    )
+    assert band["max_abs_gap"] == 0.25
+    assert band["half_width"] == 0.75
+    assert band["inside"] is True
+
+
+def test_a_gap_with_no_cluster_noise_is_outside_the_band():
+    covered = np.ones((12, 1))
+    band = cluster_gap_band(
+        covered,
+        np.array([0.5]),
+        np.arange(12),
+        np.random.default_rng(0),
+        n_boot=40,
+    )
+    assert band["max_abs_gap"] == 0.5
+    assert band["half_width"] == 0.0
+    assert band["inside"] is False
+
+
+def test_cluster_gap_band_rejects_a_single_cluster_or_a_bad_shape():
+    covered = np.array([[1.0], [0.0]])
+    rng = np.random.default_rng(0)
+    try:
+        cluster_gap_band(covered, np.array([0.5]), np.array(["only", "only"]), rng)
+    except ValueError as exc:
+        assert str(exc) == "clusters"
+    else:
+        raise AssertionError("expected a single cluster to fail")
+    try:
+        cluster_gap_band(covered, np.array([0.5]), np.array(["a"]), rng)
+    except ValueError as exc:
+        assert str(exc) == "clusters"
+    else:
+        raise AssertionError("expected a short cluster id to fail")

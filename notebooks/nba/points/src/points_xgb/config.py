@@ -21,20 +21,16 @@ RATE_CAP = RATE_CAP
 
 QUANTILES = [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
 
-#Best params: {'n_estimators': 1828, 'max_depth': 3, 'learning_rate': 0.08724457596180102, 
-# 'subsample': 0.6342688186052617, 'colsample_bytree': 0.8968128251007528, 
-# 'reg_alpha': 2.7388114185469976, 'reg_lambda': 0.3192032055207369, 'min_child_weight': 10}
-
 XGB_PARAMS = {
     "objective": "reg:quantileerror",
-    "n_estimators": 1828,
-    "max_depth": 3,
-    "learning_rate": 0.08724457596180102,
-    "subsample": 0.5916232263322159,
-    "colsample_bytree": 0.8968128251007528,
-    "reg_alpha": 2.7388114185469976,
-    "reg_lambda": 0.3192032055207369,
-    "min_child_weight": 10,
+    "n_estimators": 1651,
+    "max_depth": 5,
+    "learning_rate": 0.05146292410167199,
+    "subsample": 0.7518573938647881,
+    "colsample_bytree": 0.5016248416388132,
+    "reg_alpha": 4.492023730550085,
+    "reg_lambda": 0.5561894287530206,
+    "min_child_weight": 6,
     "n_jobs": -1,
     "random_state": 42,
     "early_stopping_rounds": 50,

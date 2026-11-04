@@ -1,0 +1,429 @@
+{
+  "headline": {
+    "lines": 364,
+    "settled": 358,
+    "pending": 6,
+    "pushes": 6,
+    "integer_lines": 78,
+    "plus_ev": 288,
+    "plus_ev_settled": 284,
+    "favored_hit_rate": 0.48295454545454547,
+    "plus_ev_hit_rate": 0.49280575539568344,
+    "plus_ev_roi": -0.09110545626701383,
+    "all_over_roi": -0.016806722689075602,
+    "mean_favored_probability": 0.6041177848858639,
+    "breakeven": 0.54337899543379,
+    "alpha": 0.3327,
+    "american": -119
+  },
+  "confidence_buckets": [
+    {
+      "bucket": "50\u201354%",
+      "n": 80,
+      "decided": 80,
+      "wins": 35,
+      "hit_rate": 0.4375,
+      "mean_probability": 0.5222304155585629,
+      "roi": -0.1948529411764706
+    },
+    {
+      "bucket": "54\u201358%",
+      "n": 59,
+      "decided": 59,
+      "wins": 32,
+      "hit_rate": 0.5423728813559322,
+      "mean_probability": 0.5633030119698317,
+      "roi": -0.0018515880928642653
+    },
+    {
+      "bucket": "58\u201362%",
+      "n": 69,
+      "decided": 69,
+      "wins": 33,
+      "hit_rate": 0.4782608695652174,
+      "mean_probability": 0.5976319353400825,
+      "roi": -0.11983924004384355
+    },
+    {
+      "bucket": "62\u201366%",
+      "n": 59,
+      "decided": 59,
+      "wins": 28,
+      "hit_rate": 0.4745762711864407,
+      "mean_probability": 0.6365365138994206,
+      "roi": -0.1266201395812562
+    },
+    {
+      "bucket": "66\u201370%",
+      "n": 38,
+      "decided": 38,
+      "wins": 19,
+      "hit_rate": 0.5,
+      "mean_probability": 0.678610838614827,
+      "roi": -0.07983193277310921
+    },
+    {
+      "bucket": "70%+",
+      "n": 41,
+      "decided": 41,
+      "wins": 19,
+      "hit_rate": 0.4634146341463415,
+      "mean_probability": 0.7351396523980953,
+      "roi": -0.14716130354580856
+    }
+  ],
+  "over_buckets": [
+    {
+      "bucket": "under 35%",
+      "n": 68,
+      "decided": 66,
+      "wins": 27,
+      "hit_rate": 0.4090909090909091,
+      "mean_probability": 0.2981008054707533,
+      "roi": -0.2398665348492338
+    },
+    {
+      "bucket": "35\u201345%",
+      "n": 112,
+      "decided": 110,
+      "wins": 56,
+      "hit_rate": 0.509090909090909,
+      "mean_probability": 0.4020293638964284,
+      "roi": -0.0619747899159664
+    },
+    {
+      "bucket": "45\u201350%",
+      "n": 41,
+      "decided": 41,
+      "wins": 18,
+      "hit_rate": 0.43902439024390244,
+      "mean_probability": 0.4755083990157868,
+      "roi": -0.1920475507276081
+    },
+    {
+      "bucket": "50\u201355%",
+      "n": 40,
+      "decided": 40,
+      "wins": 18,
+      "hit_rate": 0.45,
+      "mean_probability": 0.5234433923214167,
+      "roi": -0.17184873949579832
+    },
+    {
+      "bucket": "55\u201365%",
+      "n": 62,
+      "decided": 60,
+      "wins": 31,
+      "hit_rate": 0.5166666666666667,
+      "mean_probability": 0.5923458231606611,
+      "roi": -0.047573868256980165
+    },
+    {
+      "bucket": "65%+",
+      "n": 35,
+      "decided": 35,
+      "wins": 20,
+      "hit_rate": 0.5714285714285714,
+      "mean_probability": 0.7022229327959947,
+      "roi": 0.05162064825930374
+    }
+  ],
+  "plus_ev_buckets": [
+    {
+      "bucket": "50\u201354%",
+      "n": 12,
+      "decided": 12,
+      "wins": 6,
+      "hit_rate": 0.5,
+      "mean_probability": 0.5317610974773473,
+      "roi": -0.07983193277310924
+    },
+    {
+      "bucket": "54\u201358%",
+      "n": 62,
+      "decided": 59,
+      "wins": 32,
+      "hit_rate": 0.5423728813559322,
+      "mean_probability": 0.5634405016522082,
+      "roi": -0.0017619951206288762
+    },
+    {
+      "bucket": "58\u201362%",
+      "n": 70,
+      "decided": 69,
+      "wins": 33,
+      "hit_rate": 0.4782608695652174,
+      "mean_probability": 0.5974763040896469,
+      "roi": -0.11812725090036008
+    },
+    {
+      "bucket": "62\u201366%",
+      "n": 60,
+      "decided": 59,
+      "wins": 28,
+      "hit_rate": 0.4745762711864407,
+      "mean_probability": 0.6369115936172561,
+      "roi": -0.1245098039215686
+    },
+    {
+      "bucket": "66\u201370%",
+      "n": 38,
+      "decided": 38,
+      "wins": 19,
+      "hit_rate": 0.5,
+      "mean_probability": 0.678610838614827,
+      "roi": -0.07983193277310921
+    },
+    {
+      "bucket": "70%+",
+      "n": 42,
+      "decided": 41,
+      "wins": 19,
+      "hit_rate": 0.4634146341463415,
+      "mean_probability": 0.7351419554660109,
+      "roi": -0.14365746298519408
+    }
+  ],
+  "top": [
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Cade Cunningham",
+      "side": "under",
+      "line": 24.5,
+      "mu": 16.14,
+      "p_side": 0.8184,
+      "ev": 0.5061,
+      "pts_played": 16.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-26",
+      "player_name": "Derrick White",
+      "side": "under",
+      "line": 16.5,
+      "mu": 10.87,
+      "p_side": 0.8125,
+      "ev": 0.4952,
+      "pts_played": 5.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-25",
+      "player_name": "Isaiah Collier",
+      "side": "over",
+      "line": 6.5,
+      "mu": 14.12,
+      "p_side": 0.8014,
+      "ev": 0.4749,
+      "pts_played": 6.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Darryn Peterson",
+      "side": "under",
+      "line": 13.5,
+      "mu": 9.12,
+      "p_side": 0.7969,
+      "ev": 0.4665,
+      "pts_played": 15.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-22",
+      "player_name": "Kentavious Caldwell-Pope",
+      "side": "over",
+      "line": 5.5,
+      "mu": 11.51,
+      "p_side": 0.7823,
+      "ev": 0.4396,
+      "pts_played": 3.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-25",
+      "player_name": "Immanuel Quickley",
+      "side": "under",
+      "line": 16.5,
+      "mu": 11.57,
+      "p_side": 0.7821,
+      "ev": 0.4394,
+      "pts_played": 19.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-26",
+      "player_name": "Ajay Mitchell",
+      "side": "under",
+      "line": 16.5,
+      "mu": 11.84,
+      "p_side": 0.77,
+      "ev": 0.4171,
+      "pts_played": 30.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Matisse Thybulle",
+      "side": "over",
+      "line": 5.0,
+      "mu": 10.08,
+      "p_side": 0.7295,
+      "ev": 0.4113,
+      "pts_played": 13.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-26",
+      "player_name": "Isaiah Collier",
+      "side": "over",
+      "line": 6.5,
+      "mu": 12.75,
+      "p_side": 0.7632,
+      "ev": 0.4046,
+      "pts_played": 7.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-25",
+      "player_name": "Franz Wagner",
+      "side": "under",
+      "line": 22.5,
+      "mu": 16.49,
+      "p_side": 0.763,
+      "ev": 0.4042,
+      "pts_played": 23.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-25",
+      "player_name": "Jaxson Hayes",
+      "side": "over",
+      "line": 6.5,
+      "mu": 12.69,
+      "p_side": 0.7613,
+      "ev": 0.4011,
+      "pts_played": 9.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Rui Hachimura",
+      "side": "under",
+      "line": 17.5,
+      "mu": 12.84,
+      "p_side": 0.7594,
+      "ev": 0.3976,
+      "pts_played": 16.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-25",
+      "player_name": "Andre Drummond",
+      "side": "over",
+      "line": 4.5,
+      "mu": 9.06,
+      "p_side": 0.7593,
+      "ev": 0.3974,
+      "pts_played": 4.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Derik Queen",
+      "side": "over",
+      "line": 7.5,
+      "mu": 14.17,
+      "p_side": 0.7527,
+      "ev": 0.3853,
+      "pts_played": 12.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-26",
+      "player_name": "Tyler Herro",
+      "side": "under",
+      "line": 23.0,
+      "mu": 17.34,
+      "p_side": 0.7352,
+      "ev": 0.3776,
+      "pts_played": 23.0,
+      "result": "push",
+      "profit": 0.0
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Stephen Curry",
+      "side": "under",
+      "line": 25.5,
+      "mu": 19.62,
+      "p_side": 0.7372,
+      "ev": 0.3567,
+      "pts_played": 24.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Luka Don\u010di\u0107",
+      "side": "under",
+      "line": 32.5,
+      "mu": 25.09,
+      "p_side": 0.7371,
+      "ev": 0.3566,
+      "pts_played": 23.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-26",
+      "player_name": "Isaiah Stewart",
+      "side": "over",
+      "line": 6.0,
+      "mu": 11.04,
+      "p_side": 0.7018,
+      "ev": 0.3561,
+      "pts_played": 4.0,
+      "result": "loss",
+      "profit": -1.0
+    },
+    {
+      "slate_date": "2026-10-25",
+      "player_name": "Scottie Barnes",
+      "side": "under",
+      "line": 20.5,
+      "mu": 15.83,
+      "p_side": 0.7334,
+      "ev": 0.3497,
+      "pts_played": 0.0,
+      "result": "win",
+      "profit": 0.8403
+    },
+    {
+      "slate_date": "2026-10-23",
+      "player_name": "Precious Achiuwa",
+      "side": "over",
+      "line": 8.5,
+      "mu": 15.21,
+      "p_side": 0.7332,
+      "ev": 0.3493,
+      "pts_played": 14.0,
+      "result": "win",
+      "profit": 0.8403
+    }
+  ]
+}

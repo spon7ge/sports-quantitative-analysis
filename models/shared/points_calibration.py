@@ -158,6 +158,40 @@ def quantile_cdf(points, knots, taus) -> np.ndarray:
     return out
 
 
+def quantile_line_probabilities(line, knots, taus) -> tuple[np.ndarray, np.ndarray]:
+    """P(points > line) and P(points == line) from the raw quantile CDF.
+
+    Over is ``1 - F(floor(line))``. A half-point line has no push. An
+    integer line pushes, and that atom is ``F(k) - F(k - 1)``, so it is
+    not counted in the over. Outside the knot grid, F stays at the end
+    taus, the same rule as ``quantile_cdf``.
+    """
+    level = np.asarray(line, dtype=float).reshape(-1)
+    grid = np.asarray(knots, dtype=float)
+    if grid.ndim == 1:
+        grid = grid.reshape(1, -1)
+    if grid.ndim != 2:
+        raise ValueError("knots")
+    if level.size == 1 and grid.shape[0] != 1:
+        level = np.repeat(level, grid.shape[0])
+    elif grid.shape[0] == 1 and level.size != 1:
+        grid = np.repeat(grid, level.size, axis=0)
+    if level.shape[0] != grid.shape[0]:
+        raise ValueError("line")
+    if level.size == 0:
+        return level.copy(), level.copy()
+    if not np.isfinite(level).all():
+        raise ValueError("line")
+    nearest = np.rint(level)
+    integer = np.abs(level - nearest) <= 1e-6
+    settled = np.where(integer, nearest, np.floor(level))
+    at = quantile_cdf(settled, grid, taus)
+    left = quantile_cdf(settled - 1.0, grid, taus)
+    over = 1.0 - at
+    push = np.where(integer, np.clip(at - left, 0.0, None), 0.0)
+    return over, push
+
+
 def _integer_points(y) -> np.ndarray:
     raw = np.asarray(y, dtype=float).reshape(-1)
     if raw.size == 0 or not np.isfinite(raw).all():
@@ -166,6 +200,17 @@ def _integer_points(y) -> np.ndarray:
     if float(np.max(np.abs(raw - nearest))) > 1e-6:
         raise ValueError("points must be integers")
     return nearest
+
+
+def deterministic_quantile_pit(y, knots, taus) -> np.ndarray:
+    """Midpoint of the integer atom, ``(F(y - 1) + F(y)) / 2``.
+
+    This is the randomized PIT at ``U = 1/2``. A fresh uniform would give
+    the same row a different value whenever a later call scored a subset.
+    """
+    outcome = _integer_points(y)
+    midpoint = np.full(outcome.shape[0], 0.5)
+    return randomized_quantile_pit(outcome, knots, taus, midpoint)
 
 
 def randomized_quantile_pit(y, knots, taus, uniform) -> np.ndarray:
@@ -318,7 +363,11 @@ def pit_walk_forward(
 ) -> pd.DataFrame:
     """Fit ``R`` on earlier folds and score pinball on the next.
 
-    ``eval_mask`` restricts the scored rows and does not change the fit.
+    ``R`` is the isotonic map of the midpoint PIT, so the fit does not
+    draw a uniform. ``eval_mask`` restricts the scored rows and does not
+    change the fit. Coverage jitter is one ``U(-1/2, 1/2)`` per row from
+    ``rng``, then masked with the scored rows. Subsetting first and
+    drawing again would give those rows a different jitter.
     """
     from models.shared.quantile_offsets import (  # noqa: PLC0415
         calibration_table,
@@ -341,18 +390,21 @@ def pit_walk_forward(
         mask = np.asarray(eval_mask, dtype=bool)
         if mask.shape[0] != outcome.shape[0]:
             raise ValueError("eval_mask")
+    jitter = np.asarray(rng.uniform(-0.5, 0.5, outcome.shape[0]), dtype=float)
+    if jitter.shape != outcome.shape or not np.isfinite(jitter).all():
+        raise ValueError("jitter")
     rows: list[dict[str, float | int]] = []
     for fold_id in np.unique(folds)[1:]:
         past = folds < fold_id
         current = (folds == fold_id) & mask
         if not bool(past.any()) or not bool(current.any()):
             continue
-        draw = np.asarray(rng.random(int(past.sum())), dtype=float)
         calibrator = fit_pit_recalibrator(
-            randomized_quantile_pit(outcome[past], grid[past], levels, draw)
+            deterministic_quantile_pit(outcome[past], grid[past], levels)
         )
         adjusted = calibrated_quantile_grid(grid[current], levels, calibrator)
-        table = calibration_table(outcome[current], adjusted, levels, rng)
+        hits = (outcome[current] + jitter[current])[:, None] <= adjusted
+        table = calibration_table(outcome[current], adjusted, levels, rng, hits=hits)
         rows.append(
             {
                 "fold": int(fold_id),
