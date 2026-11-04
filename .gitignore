@@ -6,6 +6,9 @@ data/props/
 data/raw/
 data/backtest/singleBets.csv
 data/odds/*.json
+data/historical/nba_historical_odds.parquet
+data/historical/nba_props.parquet
+notebooks/nba/line_movement_analysis/reports/2026-10-24/quotes_normalized.csv
 data/.odds_db_locks/
 src/data/
 artifacts/mlb/
