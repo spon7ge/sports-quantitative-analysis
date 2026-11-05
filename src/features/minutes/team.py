@@ -62,6 +62,13 @@ def add_team_history_features(
         10,
         "mean",
     )
+    result["team_pace_median_10"] = prior_roll(
+        result,
+        "team_pace",
+        TEAM_KEY,
+        10,
+        "median",
+    )
     result["team_net_rating_mean_10"] = prior_roll(
         result,
         "team_net_rating",
@@ -86,6 +93,7 @@ def merge_team_and_opponent(
         "game_id",
         "team_id",
         "team_pace_mean_10",
+        "team_pace_median_10",
         "team_net_rating_mean_10",
         "team_net_rating_season",
         "team_days_since_prev_game",
@@ -108,6 +116,7 @@ def merge_team_and_opponent(
     opp_rename = {
         "team_id": "opp_team_id",
         "team_pace_mean_10": "opp_pace_mean_10",
+        "team_pace_median_10": "opp_pace_median_10",
         "team_net_rating_mean_10": "opp_net_rating_mean_10",
     }
     opp_columns = [
@@ -116,6 +125,7 @@ def merge_team_and_opponent(
             "game_id",
             "team_id",
             "team_pace_mean_10",
+            "team_pace_median_10",
             "team_net_rating_mean_10",
         )
         if column in teams.columns

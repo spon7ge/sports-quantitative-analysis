@@ -48,6 +48,10 @@ def add_points_features(
     result["expected_pace"] = (
         result["team_pace_10"] + result["opp_pace_10"]
     ) / 2
+    result["expected_pace_median"] = (
+        result["team_pace_median_10"]
+        + result["opp_pace_median_10"]
+    ) / 2
     result = add_position_encoding(result)
 
     for column in TIER1_POINTS_FEATURES:

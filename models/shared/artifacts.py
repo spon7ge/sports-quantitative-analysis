@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
@@ -31,7 +32,11 @@ def save_model_bundle(
     calibration: Mapping[str, Any] | None = None,
     save_dir: str | Path | None = None,
 ) -> Path:
-    """Persist quantile models + metrics under ``models/saved_models/``."""
+    """Persist quantile models + metrics under ``models/saved_models/``.
+
+    The file is ``{stem}_01.joblib``, then ``_02``, and so on. A dated
+    file already in the folder does not count toward that sequence.
+    """
     out_dir = Path(save_dir) if save_dir is not None else DEFAULT_SAVE_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,11 +73,21 @@ def save_model_bundle(
         payload["fingerprint"] = booster_fingerprint(models_ho, features)
         bundle["calibration"] = payload
 
-    stamp = holdout_df["game_date"].max().date()
-    save_path = out_dir / f"{artifact_stem}_{stamp}.joblib"
+    save_path = _next_numbered_path(out_dir, artifact_stem)
     joblib.dump(bundle, save_path)
     print(f"Saved to {save_path}")
     return save_path
+
+
+def _next_numbered_path(out_dir: Path, artifact_stem: str) -> Path:
+    """Next ``{stem}_01.joblib`` that is not already in ``out_dir``."""
+    pattern = re.compile(rf"{re.escape(artifact_stem)}_(\d+)$")
+    highest = 0
+    for path in out_dir.glob(f"{artifact_stem}_*.joblib"):
+        match = pattern.fullmatch(path.stem)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return out_dir / f"{artifact_stem}_{highest + 1:02d}.joblib"
 
 
 def load_model_bundle(path: str | Path) -> dict[str, Any]:

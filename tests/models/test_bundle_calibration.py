@@ -60,6 +60,23 @@ def _calibration() -> dict:
     }
 
 
+def test_saves_increment_past_numbered_files_and_ignore_dates(tmp_path):
+    train, holdout = _frames()
+    (tmp_path / "pts_nba_model_2026-11-02.joblib").write_bytes(b"dated")
+    (tmp_path / "pts_nba_model_01.joblib").write_bytes(b"first")
+    path = save_model_bundle(
+        {"q_0.50": _tiny_model(0.0)},
+        train_df=train,
+        holdout_df=holdout,
+        wf_results=[{"pinball": 1.0}],
+        ho_metrics={"pinball": 1.0},
+        features=["starting"],
+        artifact_stem="pts_nba_model",
+        save_dir=tmp_path,
+    )
+    assert path.name == "pts_nba_model_02.joblib"
+
+
 def test_load_rejects_a_booster_that_does_not_match_the_fingerprint(tmp_path):
     train, holdout = _frames()
     model = _tiny_model(0.0)

@@ -93,6 +93,12 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         fourth = featured.loc[featured["game_id"].eq(4)].iloc[0]
         self.assertEqual(fourth["pts_median_10"], 20)
         self.assertAlmostEqual(fourth["pts_mean_10"], 70 / 3)
+        self.assertEqual(fourth["min_median_10"], 20)
+        self.assertEqual(fourth["min_median_3_minus_10"], 0)
+        self.assertEqual(fourth["two_pa_median_10"], 8)
+        self.assertEqual(fourth["fg3a_median_10"], 4)
+        self.assertEqual(fourth["fta_median_10"], 3)
+        self.assertEqual(fourth["usg_median_10"], 25)
         self.assertEqual(third["min_lag_1"], 20)
 
         mutated = frame.copy()
@@ -1467,6 +1473,7 @@ class PointsFeatureLeakageTests(unittest.TestCase):
         ].iloc[0]
 
         self.assertEqual(home["opp_def_rating_mean_10"], 115)
+        self.assertEqual(home["opp_def_rating_median_10"], 115)
         self.assertEqual(home["team_off_rating_mean_10"], 110)
         self.assertEqual(home["opp_pace_mean_10"], 105)
         self.assertEqual(home["team_pace_mean_10"], 90)
@@ -1474,7 +1481,9 @@ class PointsFeatureLeakageTests(unittest.TestCase):
             featured["player_id"].eq(1) & featured["game_id"].eq(1)
         ].iloc[0]
         self.assertTrue(np.isnan(opener["expected_pace"]))
+        self.assertTrue(np.isnan(opener["expected_pace_median"]))
         self.assertAlmostEqual(home["expected_pace"], (90 + 105) / 2)
+        self.assertAlmostEqual(home["expected_pace_median"], (90 + 105) / 2)
         self.assertAlmostEqual(
             home["expected_pace"],
             (home["team_pace_10"] + home["opp_pace_10"]) / 2,

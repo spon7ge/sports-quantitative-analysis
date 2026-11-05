@@ -39,6 +39,9 @@ def add_environment_features(
     result["min_mean_3_minus_10"] = (
         result["min_mean_3"] - result["min_mean_10"]
     )
+    result["min_median_3_minus_10"] = (
+        result["min_median_3"] - result["min_median_10"]
+    )
     result["min_mean_10_minus_season"] = (
         result["min_mean_10"] - result["season_min_mean"]
     )

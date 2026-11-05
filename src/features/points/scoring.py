@@ -191,6 +191,25 @@ def add_raw_box_history(frame: pd.DataFrame) -> pd.DataFrame:
         10,
         "mean",
     )
+    result["usg_median_10"] = prior_roll(
+        result,
+        "usg_pct",
+        PLAYER_KEY,
+        10,
+        "median",
+    )
+    for source, name in (
+        ("two_pa", "two_pa"),
+        ("fg3_a", "fg3a"),
+        ("fta", "fta"),
+    ):
+        result[f"{name}_median_10"] = prior_roll(
+            result,
+            source,
+            PLAYER_KEY,
+            10,
+            "median",
+        )
     # Extremes of the prior ten games. The current game is excluded
     # by prior_roll, same as the rolling means above.
     for source, name in (

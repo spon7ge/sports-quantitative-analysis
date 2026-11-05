@@ -39,6 +39,13 @@ def add_team_scoring_context(
         10,
         "mean",
     )
+    teams["team_def_rating_median_10"] = prior_roll(
+        teams,
+        "team_def_rating",
+        TEAM_KEY,
+        10,
+        "median",
+    )
     return _merge_offense_and_defense(frame, teams)
 
 
@@ -90,12 +97,16 @@ def _merge_offense_and_defense(
             "game_id",
             "team_id",
             "team_def_rating_mean_10",
+            "team_def_rating_median_10",
         ]
     ].rename(
         columns={
             "team_id": "opp_team_id",
             "team_def_rating_mean_10": (
                 "opp_def_rating_mean_10"
+            ),
+            "team_def_rating_median_10": (
+                "opp_def_rating_median_10"
             ),
         }
     )

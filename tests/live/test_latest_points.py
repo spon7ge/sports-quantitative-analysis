@@ -10,7 +10,7 @@ from src.live.latest_points import event_context, latest_points_markets
 
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_latest_snapshot_sets_the_pacific_slate_and_ignores_older_files(
@@ -88,6 +88,26 @@ def test_latest_snapshot_sets_the_pacific_slate_and_ignores_older_files(
     assert audit["source_files"]["prizepicks"].endswith("2026-10-29_144500.json")
     assert "team" not in audit["source_files"]["pinnacle"]
     assert events.iloc[0]["event_name"] == "Cleveland Cavaliers @ Atlanta Hawks"
+
+
+def test_latest_snapshot_reads_utf8_names(tmp_path: Path) -> None:
+    props = tmp_path / "props"
+    _write(
+        props / "prizepicks/nba/prizepicks_nba_2026-10-29_144500.json",
+        {
+            "fetched_at": "2026-10-29T21:45:00Z",
+            "projections": [
+                {
+                    "player": "Luka Dončić",
+                    "stat_type": "Points",
+                    "line_score": 28.5,
+                    "odds_type": "standard",
+                }
+            ],
+        },
+    )
+    markets, _, _ = latest_points_markets(props)
+    assert markets.iloc[0]["player_name"] == "Luka Dončić"
 
 
 def test_event_context_reads_away_at_home() -> None:

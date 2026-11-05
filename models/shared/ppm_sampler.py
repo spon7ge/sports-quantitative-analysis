@@ -401,7 +401,7 @@ def fit_preholdout_tails(oos, starting, *, folds=(1, 2, 3, 4)) -> RateTailTables
 
 
 def tails_path_for_bundle(bundle_path) -> Path:
-    """``pts_nba_model_<date>.joblib`` -> ``pts_nba_tails_<date>.joblib``."""
+    """``pts_nba_model_01.joblib`` -> ``pts_nba_tails_01.joblib``."""
     path = Path(bundle_path)
     if "_model_" not in path.name:
         raise ValueError("bundle")

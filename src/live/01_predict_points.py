@@ -17,31 +17,31 @@ from src.scrapers.arbitrage import canonical_team
 # Same list as PTS_FEATURES in notebooks/nba/points/01_points_xgboost.ipynb.
 FEATURES = [
     # point context
-    "pts_mean_10",
+    "pts_median_10",
     "pts_std_10",
     "pts_lag_1",
     "pts_trend",
     "pts_rank_10",
 
     # how they score
-    "two_pa_rolling_10",
+    "two_pa_median_10",
     "two_pct_smoothed",
 
-    "fg3a_rolling_10",
+    "fg3a_median_10",
     "three_pct_smoothed",
 
-    "fta_rolling_10",
+    "fta_median_10",
     "ft_pct_smoothed",
 
     # minutes context
-    "min_mean_10",
-    "min_mean_3_minus_10",
+    "min_median_10",
+    "min_median_3_minus_10",
     "min_rank_10",
     "min_sd_10",
 
     # efficiency context
     "ts_x_usg",
-    "usg_rolling_10",
+    "usg_median_10",
     "usg_trend",
     "usg_rank_10",
 
@@ -50,8 +50,8 @@ FEATURES = [
     "starter_rank",
     "start_rate_10",
 
-    "opp_def_rating_mean_10",
-    "expected_pace",
+    "opp_def_rating_median_10",
+    "expected_pace_median",
     "implied_team_total",
     "player_team_spread",
 ]

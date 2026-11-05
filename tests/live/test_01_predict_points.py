@@ -64,12 +64,12 @@ def test_slate_row_uses_every_played_game_without_dropping_the_last():
     assert not live[live_points.FEATURES].isna().any().any()
     scoot = live.loc["Scoot Henderson"]
     assert scoot["pts_lag_1"] == 30
-    assert scoot["pts_mean_10"] == (10 + 20 + 30) / 3
+    assert scoot["pts_median_10"] == 20
     assert scoot["pts_std_10"] == pd.Series([10, 20, 30]).std()
-    assert scoot["min_mean_10"] == (20 + 24 + 18) / 3
-    assert scoot["two_pa_rolling_10"] == (5 + 9 + 7) / 3
-    assert scoot["fg3a_rolling_10"] == 3
-    assert scoot["fta_rolling_10"] == 2
+    assert scoot["min_median_10"] == 20
+    assert scoot["two_pa_median_10"] == 7
+    assert scoot["fg3a_median_10"] == 3
+    assert scoot["fta_median_10"] == 2
     assert scoot["two_pct_smoothed"] == pytest.approx(0.5)
     assert scoot["three_pct_smoothed"] == pytest.approx(1 / 3)
     assert scoot["ft_pct_smoothed"] == pytest.approx(0.5)
@@ -101,5 +101,5 @@ def test_games_on_the_slate_date_stay_out():
     )
 
     assert list(row.index) == live_points.FEATURES
-    assert row["pts_mean_10"] == 20
-    assert row["min_mean_10"] == (20 + 24 + 18) / 3
+    assert row["pts_median_10"] == 20
+    assert row["min_median_10"] == 20

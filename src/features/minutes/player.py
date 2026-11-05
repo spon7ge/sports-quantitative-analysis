@@ -72,6 +72,14 @@ def add_player_role_features(
             window,
             "mean",
         )
+    for window in (3, 10):
+        result[f"min_median_{window}"] = prior_roll(
+            result,
+            minutes,
+            PLAYER_KEY,
+            window,
+            "median",
+        )
 
     result["min_std_10"] = prior_roll(
         result,

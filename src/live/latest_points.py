@@ -49,7 +49,7 @@ def latest_points_markets(
             missing.append(book)
             continue
         files[book] = path.name
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
         fetched = payload.get("fetched_at")
         for row in _points_rows(payload, kind):
             slate = _pacific_date(row.get("start_time") or fetched)

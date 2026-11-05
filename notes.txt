@@ -25,15 +25,11 @@ Use chronological holdouts, log loss, Brier score, calibration, and realistic od
 Step 5 — Write up the result
 Document the hypothesis, methodology, baselines, uncertainty, failed experiments, and whether the evidence supports your original idea.
 
-How to fetch data:
+How to fetch data (run from the repo root on macOS or Windows):
 python -m src.pipeline.clean --league nba --season 2026-27 --fetch
 
 BR positions and rotowire game closing lines:
 python -m src.scrapers.basketball_reference_nba_positions --years 2027
-python -m src.scrapers.rotowire_nba_odds --seasons 2026
-
-python -m src.pipeline.clean --league nba --season 2026-27 --fetch && \
-python -m src.scrapers.basketball_reference_nba_positions --years 2027 && \
 python -m src.scrapers.rotowire_nba_odds --seasons 2026
 
 XGBoost (point estimate: projected points)
