@@ -1,0 +1,914 @@
+# Building a Game-Level NBA Monte Carlo Simulation Engine
+
+This is probably one of the most valuable components you can build for an advanced NBA prop model.
+
+I would approach this as building a generative model of an entire NBA game, where player statistics are outputs of the simulation rather than independent predictions.
+
+The distinction is fundamental.
+
+A traditional player prop model might independently predict:
+
+- Jayson Tatum: 28.2 points.
+- Jaylen Brown: 23.5 points.
+- Derrick White: 16.4 points.
+- Kristaps Porziņģis: 19.1 points.
+
+But those predictions don't necessarily describe a coherent basketball game.
+
+What happens if Tatum plays 42 minutes? What happens if Brown gets into foul trouble? What happens if Boston loses its starting point guard? What happens if the game becomes a blowout?
+
+All of these events affect multiple players simultaneously.
+
+A game-level simulator should capture these dependencies and generate realistic box scores.
+
+The ultimate objective:
+
+\\[ P(X_1,X_2,\ldots,X_n \mid G) \\]
+
+Where:
+
+- \\(X_i\\) is a player's statistical outcome.
+- \\(G\\) represents game conditions.
+- \\(n\\) is the number of players.
+
+This joint distribution lets you price individual props, combinations, same-game parlays, and portfolio exposures using the same underlying simulation.
+
+# 1. Understand the architecture before writing code
+
+I would break the simulator into six interconnected layers.
+
+## Game-level simulation architecture
+
+Layer 1 — Game environment
+
+Pace · Possessions · Team strength · Home court · Game total · Opponent strength
+
+Layer 2 — Game state
+
+Score differential · Time remaining · Blowout probability · Overtime · Foul situation
+
+Layer 3 — Rotation and minutes
+
+Starting lineup · Rotation patterns · Substitutions · Injuries · Foul trouble
+
+Layer 4 — Possession allocation
+
+Usage · Shot attempts · Rebounds · Assists · Turnovers · Free throws
+
+Layer 5 — Player statistical outcomes
+
+Points · Rebounds · Assists · 3PM · Steals · Blocks
+
+Layer 6 — Box score and market pricing
+
+Joint distributions · Prop probabilities · Correlations · Expected value · Portfolio risk
+
+The important thing is that each layer feeds into the next.
+
+For example:
+
+An injured starting point guard changes the rotation. The rotation changes minutes. Minutes and lineup composition change possession allocation. Possession allocation changes usage and assist opportunities. Those changes ultimately affect the entire box score.
+
+You don't want to manually adjust every player's projection independently.
+
+You want the simulation to produce those adjustments naturally.
+
+# 2. Layer 1: Simulate the game environment
+
+Start with the game itself, not individual players.
+
+Every game has a certain number of possessions, and possessions are the common resource that drives most player statistics.
+
+For example:
+
+| Game variable                | Example     |
+| ---------------------------- | ----------- |
+| Team A possessions           | 101         |
+| Team B possessions           | 99          |
+| Expected game total          | 226         |
+| Expected spread              | Team A -4.5 |
+| Home court                   | Team A      |
+| Expected regulation duration | 48 minutes  |
+
+### Modeling possessions
+
+A simple starting point:
+
+\\[ Possessions\_{game} \sim \mathcal{N}(\mu_p,\sigma_p) \\]
+
+Where:
+
+\\[ \mu_p = \frac{Pace_A+Pace_B}{2} \\]
+
+You can improve this by including:
+
+- Team pace.
+- Opponent pace allowed.
+- Home/away effects.
+- Rest and back-to-back situations.
+- Matchup-specific tendencies.
+- Expected lineup composition.
+
+A more sophisticated model:
+
+\\[ \mu_p = \beta_0+ \beta_1 Pace_A+ \beta_2 Pace_B+ \beta_3 Rest+ \beta_4 Lineup+ \beta_5 Matchup \\]
+
+I would train this using historical game-level data.
+
+Important: Generate one shared game pace per simulation, not an independently generated pace for every player.
+
+That shared variable is what creates natural correlation between player opportunities.
+
+# 3. Layer 2: Simulate game state and scoring environment
+
+This layer introduces an important concept: the game is dynamic.
+
+A player does not have the same expected production regardless of the score.
+
+Consider two scenarios:
+
+- Scenario A: Boston leads by 3 points with 5 minutes remaining.
+- Scenario B: Boston leads by 25 points with 5 minutes remaining.
+
+In Scenario A, starters are likely to remain on the floor.
+
+In Scenario B, starters may be removed, reducing their minutes and statistical opportunities.
+
+Your simulator needs to understand this.
+
+### Model game state
+
+At a minimum, track:
+
+| Variable              | Description                       |
+| --------------------- | --------------------------------- |
+| Score differential    | Current score margin              |
+| Time remaining        | Game clock                        |
+| Possessions remaining | Estimated remaining opportunities |
+| Player fouls          | Individual foul counts            |
+| Team fouls            | Bonus and free-throw implications |
+| Lineup                | Five players currently on court   |
+| Timeout state         | Coaching and substitution context |
+
+### Blowout modeling
+
+I would build a model that predicts the probability of a particular game state developing.
+
+For example:
+
+\\[ P(\text{Blowout}) = f(\text{Spread},\text{Team Strength},\text{Lineup}) \\]
+
+Then:
+
+\\[ Minutes_i = f(\text{Player Rotation},\text{Game State},\text{Fouls}) \\]
+
+You can initially use a gradient boosting model to estimate minutes conditional on game conditions.
+
+Later, replace or supplement that with a substitution model.
+
+Why this matters for props:
+
+A player projected for 36 minutes might have a 20% probability of playing fewer than 32 minutes because of blowout risk.
+
+A conventional model might project 36 minutes and miss that downside distribution entirely.
+
+# 4. Layer 3: Build the rotation and minutes simulator
+
+This is where I would spend a significant amount of your initial development time.
+
+Minutes are the foundation of player prop modeling.
+
+A player who gets 40 minutes has substantially more opportunities than one who gets 28.
+
+But minutes are not independent.
+
+If one player receives more minutes, another player generally receives fewer.
+
+For each team:
+
+\\[ \sum\_{i=1}^{N} Minutes_i = 240 \\]
+
+During regulation, because five players are on the court for 48 minutes.
+
+For each overtime period:
+
+\\[ \sum\_{i=1}^{N} Minutes_i = 25 \\]
+
+### Build a player rotation model
+
+You need historical information on:
+
+- Starting lineup.
+- Bench rotation.
+- Minutes per game.
+- Minutes by lineup combination.
+- Substitution patterns.
+- Foul trouble.
+- Injury replacements.
+- Coach-specific rotation behavior.
+
+I would create a player-level dataset similar to this:
+
+| Player        | Starter | Expected minutes | Minutes SD |
+| ------------- | ------- | ---------------- | ---------- |
+| Player A      | Yes     | 36               | 3.0        |
+| Player B      | Yes     | 34               | 3.5        |
+| Player C      | Yes     | 32               | 4.0        |
+| Player D      | Yes     | 30               | 4.0        |
+| Player E      | Yes     | 29               | 4.5        |
+| Bench players | No      | Remaining        | Variable   |
+
+These are illustrative values.
+
+### The first minutes simulator
+
+Don't start with a complicated neural network.
+
+Start with a model that generates minutes while enforcing the team constraint.
+
+One approach is to generate player minutes from conditional distributions and then normalize them.
+
+However, simple normalization can distort individual player distributions.
+
+A better approach is to use a constrained allocation model, such as a Dirichlet allocation over available player-minute shares, or a lineup/shift model.
+
+Here is a simple starting implementation:
+
+```
+import numpy as npdef simulate_minutes(    expected_minutes,    minutes_std,    n_sims=10000):    expected = np.asarray(expected_minutes)    std = np.asarray(minutes_std)    raw = np.random.normal(        loc=expected,        scale=std,        size=(n_sims, len(expected))    )    raw = np.clip(raw, 0, None)    # Rescale each simulated rotation to 240 minutes    minutes = (        raw / raw.sum(axis=1, keepdims=True)    ) * 240    return minutes
+```
+
+This is a useful prototype, but not the final model.
+
+It assumes minutes are distributed proportionally and ignores lineup feasibility, starter/bench substitutions, foul trouble, and blowouts.
+
+### The next improvement: lineup-based simulation
+
+Instead of simulating player minutes directly, simulate five-player lineups.
+
+For example:
+
+[Nylon Calculus: Visualizing lineup rotations for the Golden State Warriors](https://images.openai.com/static-rsc-4/I_0tEGDvtIaBuqcYZmpD94sZbHU_GUDa6DHShWu0HxmEbkCrKhgKpIETHJ0BXr9e2yS4RyZ7UahFAuU3z7R-yOBIn5dHIpkw4WzFt5ixRzolw0MWpB4JWoN3tAbs6spACbv_iu3n0u3lVAL23nSY0hnEzRLWHF__83einxQrY90?purpose=inline)
+
+[fansided.com](https://fansided.com/2016/12/19/nylon-calculus-visualizing-lineup-rotations-golden-state-warriors/?utm_source=chatgpt.com)
+
+A rotation could look like:
+
+| Game time | Lineup             |
+| --------- | ------------------ |
+| 0–6 min   | Starting lineup    |
+| 6–8 min   | First substitution |
+| 8–12 min  | Bench combination  |
+| 12–18 min | Mixed lineup       |
+| 18–24 min | Closing first half |
+
+In a more advanced version, substitutions become probabilistic transitions:
+
+\\[ P(L\_{t+1}\mid L_t,\text{score},\text{fouls},\text{time}) \\]
+
+Where \\(L_t\\) represents the current five-player lineup.
+
+This is a Markov-style rotation model.
+
+It ensures that:
+
+- Only five players are on the court.
+- Player minutes are internally consistent.
+- Teammate minutes are correlated.
+- Starting lineup changes affect bench opportunities.
+- Closing lineup tendencies are captured.
+
+My recommendation: Start with the constrained minutes model, then move to lineup transitions once your baseline model is validated.
+
+# 5. Layer 4: Simulate possession allocation
+
+Now we get to the most interesting part.
+
+Imagine Boston has 101 possessions.
+
+Those possessions need to be distributed among its players.
+
+Not every player has the same likelihood of:
+
+- Taking a shot.
+- Creating an assist.
+- Committing a turnover.
+- Drawing a foul.
+- Getting an offensive rebound.
+
+This is where usage rate, offensive role, and lineup composition come into play.
+
+### A. Model offensive usage
+
+Suppose Boston has the following expected offensive opportunity shares:
+
+| Player        | Usage share |
+| ------------- | ----------- |
+| Tatum         | 31%         |
+| Brown         | 27%         |
+| White         | 19%         |
+| Porziņģis     | 15%         |
+| Other players | 8%          |
+
+These are illustrative allocation weights, not official usage rates.
+
+The shares should change based on:
+
+- Which teammates are active.
+- Which teammates are on the court.
+- Player minutes.
+- Matchup.
+- Game situation.
+
+For example, if Tatum is unavailable, the remaining players absorb some of the offensive opportunities.
+
+You could model this using a softmax function:
+
+\\[ P(i\text{ receives opportunity}) = \frac{e^{z_i}}{\sum_j e^{z_j}} \\]
+
+Where:
+
+\\[ z_i = \beta_0+ \beta_1 Usage_i+ \beta_2 Minutes_i+ \beta_3 Role_i+ \beta_4 Lineup_i \\]
+
+The softmax ensures all player opportunity probabilities sum to one.
+
+### B. Model field goal attempts
+
+For a simplified first version:
+
+\\[ FGA_i \sim \text{Binomial}(N\_{team},p_i) \\]
+
+But there is an important improvement.
+
+Don't generate each player's attempts independently.
+
+Instead, allocate the team's total shot attempts among players using a multinomial distribution:
+
+\\[ (FGA_1,\ldots,FGA_n) \sim \text{Multinomial}(FGA\_{team},p_1,\ldots,p_n) \\]
+
+This ensures the total attempts are consistent with the team total.
+
+You can then separately model:
+
+- Three-point attempts.
+- Two-point attempts.
+- Free-throw attempts.
+- Turnovers.
+
+### C. Model shooting outcomes
+
+For each player:
+
+\\[ FGM_i \sim \text{Binomial}(FGA_i,p\_{FG,i}) \\]
+
+And:
+
+\\[ 3PM_i \sim \text{Binomial}(3PA_i,p\_{3P,i}) \\]
+
+Points become:
+
+\\[ Points_i = 2(2PM_i)+3(3PM_i)+FTM_i \\]
+
+Where:
+
+\\[ 2PM_i=FGM_i-3PM_i \\]
+
+This gives you a discrete points distribution rather than a continuous normal approximation.
+
+For a more advanced system, model two-point and three-point attempts separately, and account for shooting efficiency differences by shot type and player role.
+
+# 6. Layer 5: Simulate assists, rebounds, and defensive statistics
+
+This is where the game-level approach becomes substantially more powerful.
+
+You want player statistics to arise from common game events.
+
+## Rebounds
+
+Rebounds depend on:
+
+- Number of missed shots.
+- Offensive rebound opportunities.
+- Defensive rebound opportunities.
+- Player positioning.
+- Player minutes.
+- Opponent lineup.
+- Team rebounding strategy.
+
+Suppose a game produces 80 missed field goals.
+
+Those rebounds need to be distributed between the two teams, then among the eligible players.
+
+A simplified model:
+
+\\[ TeamRebounds \sim \text{Binomial}(MissedShots,p\_{rebound}) \\]
+
+Then:
+
+\\[ (Reb_1,\ldots,Reb_n) \sim \text{Multinomial}(TeamRebounds,q_1,\ldots,q_n) \\]
+
+The allocation weights \\(q_i\\) should depend on:
+
+- Player rebounding rate.
+- Minutes played.
+- Position and role.
+- Opponent shot profile.
+- Lineup composition.
+
+The important thing is that you don't independently generate 10 rebounds for every player without considering how many rebounds actually occurred.
+
+## Assists
+
+Assists should be tied to made field goals.
+
+For example:
+
+\\[ Assists_i \sim \text{Binomial}(FGM\_{team},p\_{assist,i}) \\]
+
+But the probability that a player receives an assist depends on:
+
+- Who handles the ball.
+- Who creates the shot.
+- Who is on the court.
+- Who finishes the shot.
+- Teammate shooting efficiency.
+
+A more sophisticated approach is to model the assister and scorer as a joint pair.
+
+For example:
+
+\\[ P(\text{Assist by }i,\text{Score by }j) \\]
+
+This is particularly useful for capturing relationships between point guards and high-efficiency teammates.
+
+### Example: starting point guard injury
+
+Hypothetical injury scenario
+
+[De'Aaron Fox is loving life at Sacramento Kings amid purple patch: "I get whatever shot I want, honestly"](https://images.openai.com/static-rsc-4/v7ZMkYhzHpE8VcpvW5q0E7CjNkW9t7Z_mfNIOa45jxL9SQGCWAzi4IVDGQVGyignmfrC2zB1U4bXT5R6FqzuJg1XabNrt61aywYXzBq8ZjwaUC479wD57y6KUfvBjRR38edKYE8AuQd8ph7vHw5JN8orOa8y4WvlzbQCUgPZ0Ww?purpose=inline)
+
+Starting point guard unavailable
+
+Baseline versus injury-adjusted simulation
+
+| Player      | Baseline minutes | Injury scenario |
+| ----------- | ---------------- | --------------- |
+| Backup PG   | 22               | 32              |
+| Starting SG | 35               | 37              |
+| Center      | 31               | 33              |
+| Bench guard | 17               | 11              |
+
+Potential downstream effects
+
+- Backup PG: More touches and assist opportunities.
+- Starting SG: More offensive creation.
+- Center: Different finishing and rebounding opportunities.
+- Bench guard: Reduced rotation minutes.
+
+  Illustrative scenario. Actual effects must be estimated from historical lineup and player-role data.
+
+Notice that the injury doesn't just increase the backup point guard's projection.
+
+It changes the entire team's statistical allocation.
+
+# 7. Layer 6: Generate a complete box score
+
+At this point, you have simulated:
+
+- Game pace.
+- Score environment.
+- Player minutes.
+- Offensive opportunities.
+- Shot attempts.
+- Shooting outcomes.
+- Rebounds.
+- Assists.
+
+You can now construct a complete box score for both teams.
+
+For example:
+
+| Player   | MIN | PTS | REB | AST | 3PM |
+| -------- | --- | --- | --- | --- | --- |
+| Player A | 36  | 29  | 7   | 8   | 3   |
+| Player B | 35  | 24  | 5   | 4   | 2   |
+| Player C | 32  | 16  | 11  | 2   | 0   |
+| Player D | 30  | 14  | 4   | 6   | 2   |
+| Player E | 27  | 12  | 8   | 1   | 1   |
+
+This is one simulated outcome, not the final projection.
+
+You repeat the process 50,000–100,000 times.
+
+Now you have a distribution of complete game outcomes.
+
+### The real payoff: joint probabilities
+
+Suppose your simulations produce:
+
+| Event                                             | Estimated probability |
+| ------------------------------------------------- | --------------------- |
+| Player A over 27.5 points                         | 54%                   |
+| Player B over 22.5 points                         | 57%                   |
+| Player C over 9.5 rebounds                        | 62%                   |
+| Player A over 27.5 AND Player B over 22.5         | 35%                   |
+| Player A over 27.5 AND Player C over 9.5 rebounds | 33%                   |
+
+The joint probabilities are important.
+
+You cannot reliably calculate them by multiplying independent probabilities.
+
+For example:
+
+\\[ P(A \cap B) \neq P(A)P(B) \\]
+
+Unless the two events are independent.
+
+Your simulator captures the shared game environment, lineup effects, and player interactions.
+
+This is useful for:
+
+- Individual props.
+- Same-game combinations.
+- Portfolio optimization.
+- Correlation-adjusted risk.
+- Alternative lines.
+- Scenario analysis.
+
+# 8. How I would actually build version one
+
+Here is where I would challenge the tendency to overengineer.
+
+Do not start by attempting to recreate the NBA possession-by-possession engine.
+
+That is a very large research project.
+
+Start with a hierarchical Monte Carlo model that generates coherent player statistics from shared game-level variables.
+
+Then gradually increase the simulation resolution.
+
+## Three development generations
+
+Generation 1 — Statistical game simulator
+
+Start here
+
+Shared game pace, minutes distributions, player production rates, correlated outcomes.
+
+- Generate shared game environment.
+- Simulate constrained minutes.
+- Generate player stat distributions.
+- Estimate prop probabilities.
+
+Generation 2 — Rotation and opportunity simulator
+
+Lineup transitions, player usage allocation, shot attempts, assists and rebounds.
+
+- Model five-player rotations.
+- Model possessions and shot allocation.
+- Introduce teammate interactions.
+- Generate coherent team box scores.
+
+Generation 3 — Possession-level game simulator
+
+Dynamic game state, substitutions, fouls, play outcomes, overtime and live projections.
+
+- Simulate individual possessions.
+- Model substitutions and game clock.
+- Incorporate score-dependent decisions.
+- Generate complete game trajectories.
+
+My recommendation is to make Generation 1 your first milestone and Generation 2 your first serious research achievement.
+
+## 9. Your first implementation: a working research prototype
+
+Let's make the initial project concrete.
+
+I would use Python, NumPy, Pandas, and SciPy.
+
+Start with this project structure:
+
+```
+nba_game_simulator/
+│
+├── data/
+│   ├── games.parquet
+│   ├── player_game_logs.parquet
+│   ├── player_advanced.parquet
+│   ├── lineups.parquet
+│   └── injuries.parquet
+│
+├── src/
+│   ├── game_environment.py
+│   ├── minutes_model.py
+│   ├── usage_model.py
+│   ├── player_production.py
+│   ├── game_simulator.py
+│   └── prop_pricing.py
+│
+├── notebooks/
+│   ├── 01_data_exploration.ipynb
+│   ├── 02_minutes_model.ipynb
+│   ├── 03_player_projections.ipynb
+│   └── 04_simulation_validation.ipynb
+│
+├── tests/
+│   ├── test_minutes.py
+│   ├── test_game_totals.py
+│   └── test_simulation.py
+│
+└── main.py
+```
+
+### Step A: Create your game input
+
+Your first input should look something like this:
+
+```
+game = {    "game_id": "001",    "home_team": "BOS",    "away_team": "NYK",    "expected_possessions": 100,    "possession_std": 4.5,    "home_spread": -4.5,    "game_total": 224.5}
+```
+
+And your player input:
+
+```
+players = [    {        "player": "Player A",        "team": "BOS",        "expected_minutes": 36,        "minutes_std": 3.0,        "points_per_minute": 0.78,        "ppm_std": 0.12,        "usage_share": 0.30    },    {        "player": "Player B",        "team": "BOS",        "expected_minutes": 34,        "minutes_std": 3.5,        "points_per_minute": 0.68,        "ppm_std": 0.11,        "usage_share": 0.27    }]
+```
+
+In practice, each team needs its full active rotation, and the parameters must be learned from historical data rather than manually specified.
+
+### Step B: Generate shared game conditions
+
+```
+import numpy as npdef simulate_game_environment(    expected_possessions,    possession_std,    n_sims=100_000):    possessions = np.random.normal(        expected_possessions,        possession_std,        n_sims    )    return np.maximum(        1,        np.round(possessions)    ).astype(int)
+```
+
+Generate this once per simulated game and share it across all players.
+
+### Step C: Generate correlated player minutes
+
+For your first prototype, you can generate minutes with a shared game-level factor.
+
+```
+def simulate_correlated_minutes(    expected_minutes,    minutes_std,    n_sims=100_000,    shared_game_std=1.0):    expected = np.asarray(expected_minutes)    std = np.asarray(minutes_std)    shared_factor = np.random.normal(        0,        shared_game_std,        (n_sims, 1)    )    individual_noise = np.random.normal(        0,        1,        (n_sims, len(expected))    )    raw = (        expected        + shared_factor        + individual_noise * std    )    raw = np.clip(raw, 0, None)    return (        raw / raw.sum(axis=1, keepdims=True)    ) * 240
+```
+
+This illustrates how a shared latent variable can create correlated player minutes. However, a single shared factor cannot represent all substitution relationships. Eventually, you should replace this with a lineup-based constrained model.
+
+### Step D: Simulate player points
+
+For the first prototype, you can use minutes and player-specific production rates.
+
+```
+def simulate_player_points(    minutes,    expected_ppm,    ppm_std):    n_sims = len(minutes)    ppm = np.random.normal(        expected_ppm,        ppm_std,        n_sims    )    ppm = np.clip(ppm, 0, None)    points = minutes * ppm    return np.random.poisson(        np.clip(points, 0, None)    )
+```
+
+Again, this is a placeholder production model. It does not yet model actual shooting events, and the Poisson sampling is not a substitute for a properly estimated player scoring distribution.
+
+### Step E: Calculate prop probabilities
+
+```
+def calculate_prop_probability(    simulated_results,    line):    over_prob = np.mean(        simulated_results > line    )    under_prob = np.mean(        simulated_results < line    )    push_prob = np.mean(        simulated_results == line    )    return {        "over": over_prob,        "under": under_prob,        "push": push_prob    }
+```
+
+For integer stat lines, pushes need to be treated separately. For half-point lines, they are impossible.
+
+These five steps give you the beginnings of a research framework. The next step is to replace the placeholder distributions with empirically trained models and enforce game-level consistency.
+
+# 10. Where to get the data
+
+You need historical data at three levels.
+
+| Data                      | Why you need it                                |
+| ------------------------- | ---------------------------------------------- |
+| Game logs                 | Historical player outcomes                     |
+| Play-by-play              | Possessions, scoring events, assists, rebounds |
+| Lineups and substitutions | Rotation and minutes modeling                  |
+| Advanced player stats     | Usage, pace, efficiency, rebounding rates      |
+| Injury reports            | Availability and replacement effects           |
+| Team statistics           | Offensive and defensive strength               |
+| Historical odds           | Market comparison and pricing                  |
+
+Some resources to investigate:
+
+- NBA Stats — [NBA statistics](https://www.nba.com/stats?utm_source=chatgpt.com).
+- Basketball Reference — [Historical basketball data](https://www.basketball-reference.com/?utm_source=chatgpt.com).
+- pbpstats — [Lineup and possession analytics](https://www.pbpstats.com/?utm_source=chatgpt.com).
+- nba_api — [Python package](https://github.com/swar/nba_api?utm_source=chatgpt.com).
+- Kaggle — [Historical NBA datasets](https://www.kaggle.com/datasets?utm_source=chatgpt.com).
+
+I would prioritize play-by-play and lineup data over adding dozens of traditional box-score features.
+
+One critical data requirement: preserve the date and time when information became available. Historical injury status, lineup announcements, and market prices must be reconstructed as they were known at prediction time.
+
+# 11. How to validate the simulator
+
+This is where you should think like a quantitative researcher rather than just an ML engineer.
+
+You need to validate the underlying game simulation, not just whether individual player predictions are accurate.
+
+I would create five validation categories.
+
+| Validation         | What you measure                        |
+| ------------------ | --------------------------------------- |
+| Game environment   | Pace and total points distributions     |
+| Rotation           | Player minutes distributions            |
+| Player production  | Points, rebounds, assists distributions |
+| Dependencies       | Player-player correlations              |
+| Market performance | Probability calibration and CLV         |
+
+### A particularly important test: injury propagation
+
+Take historical games where a starting player was unavailable.
+
+For each game:
+
+1. Reconstruct the lineup without that player.
+2. Run your simulation.
+3. Compare the simulated minutes of the remaining players against actual minutes.
+4. Compare simulated usage and statistical production against actual outcomes.
+5. Evaluate whether the simulator captures changes in teammates' production distributions.
+
+Don't just measure the average projection.
+
+Compare the entire distribution.
+
+For example:
+
+Illustrative injury-scenario validation
+
+Actual versus simulated average minutes for replacement players.
+
+Actual minutes
+
+Simulated minutes
+
+010203040Backup PGStarting SGCenterBench guard
+
+This is the kind of validation that can demonstrate whether your simulator understands team dynamics.
+
+Also test whether the model reproduces:
+
+- Player-minute covariance.
+- Points and assists covariance.
+- Points and rebounds covariance.
+- Team-level shot attempts.
+- Team-level rebound totals.
+- Assist-to-field-goal relationships.
+- Tail outcomes and blowout scenarios.
+
+A simulator that gets player averages right but produces unrealistic correlations is not a good game simulator.
+
+# 12. My recommended development roadmap
+
+Here is how I would organize the first six weeks.
+
+## Six-week NBA simulation research plan
+
+1. Week 1: Data infrastructure
+   - Collect historical player game logs.
+   - Collect team game statistics.
+   - Collect play-by-play data.
+   - Build player/team/game identifiers.
+   - Create reproducible historical datasets.
+   Deliverable: Historical data pipeline
+2. Week 2: Minutes modeling
+   - Train player minutes projections.
+   - Model starter versus bench behavior.
+   - Build constrained minute allocation.
+   - Validate player-minute distributions.
+   Deliverable: Minutes simulation
+3. Week 3: Game environment
+   - Predict possessions.
+   - Model game totals and scoring environments.
+   - Introduce shared game-level variables.
+   - Add blowout sensitivity.
+   Deliverable: Game environment simulator
+4. Week 4: Player production
+   - Model points.
+   - Model rebounds.
+   - Model assists.
+   - Introduce shared latent factors.
+   - Generate joint player outcomes.
+   Deliverable: First complete game simulations
+5. Week 5: Injury and lineup effects
+   - Build injury replacement logic.
+   - Model teammate usage redistribution.
+   - Introduce lineup-specific production rates.
+   - Validate historical injury scenarios.
+   Deliverable: Injury-aware simulator
+6. Week 6: Prop pricing and validation
+   - Run 50,000+ simulations per game.
+   - Calculate prop probabilities.
+   - Calculate joint probabilities.
+   - Compare against historical market prices.
+   - Build calibration and performance reports.
+   Deliverable: NBA prop probability engine
+
+# 13. Three research decisions I would make before starting
+
+I would like to emphasize three things because they will determine how successful this project becomes.
+
+1\. Don't confuse correlation with causation.
+
+If two players historically score more when a teammate is injured, that doesn't automatically mean the injury causes the increase.
+
+Their shared minutes, opponent quality, game pace, and lineup combinations might explain the relationship.
+
+You want conditional effects, not just historical correlations.
+
+2\. Don't force the simulator to produce unrealistic basketball.
+
+For example:
+
+- Team minutes must equal 240 in regulation.
+- Five players must be on the court.
+- Assists must correspond to made field goals.
+- Rebounds must correspond to rebound opportunities.
+- Player scoring must reconcile with team scoring.
+- Team possessions and shot attempts must be consistent.
+
+These constraints become increasingly important as you move toward Generation 2 and 3.
+
+3\. Build around distributions, not projections.
+
+Your final product shouldn't just tell you:
+
+> Player A projects for 28.4 points.
+
+It should tell you:
+
+> Player A has a 54.2% probability of scoring more than 27.5 points, a 31.6% probability of scoring more than 30.5 points, and a particular conditional relationship with his teammates' production.
+
+That is much more useful for quantitative trading.
+
+# 14. Where I would start with you
+
+I would actually build this together in a research-first sequence rather than jumping straight into the complete simulator.
+
+# NBA Game Simulator — Project Blueprint
+
+Recommended starting point
+
+First objective: Build a working Boston Celtics game simulator.
+
+Start with one team, its full rotation, and one opponent. Use historical games to estimate the parameters.
+
+[Celtics’ bench turns the tide on Kings as third-quarter run leads to blowout win - The Boston Globe](https://images.openai.com/static-rsc-4/UjRAoYaS1S5rSDa6kGCEcCQd2KSYBMS2OXoK-VN9nhiPeSjV3riNmBg3-z0CrWNoIn1YSC0_KRdDYT_z5LyJZgWw2VtGZUs8ffzv_lk21si2JZSw9xC289l-tvc8no7wk4OIi1K6UWRJJNMVYqmYCq1ZgJE5btplq05kzTLlPlQ?purpose=inline)
+
+[bostonglobe.com](https://www.bostonglobe.com/2022/11/25/sports/celtics-bench-turns-tides-kings-third-quarter-run-leads-blowout-win/?utm_source=chatgpt.com)
+
+Initial research modules
+
+Game environment
+
+Module 1
+
+Minutes and rotation
+
+Module 2
+
+Usage and player production
+
+Module 3
+
+Joint Monte Carlo simulation
+
+Module 4
+
+Injury propagation
+
+Module 5
+
+Prop pricing and validation
+
+Module 6
+
+One decision before we start building:
+
+Which modeling approach do you want to use?
+
+Hybrid statistical + ML (recommended)
+
+Bayesian models, LightGBM, shared latent variables and Monte Carlo.
+
+Bayesian generative model
+
+Hierarchical distributions, conditional dependencies and probabilistic inference.
+
+Possession-level simulation
+
+Build the basketball event simulator first, including possessions, lineups and substitutions.
+
+Which initial prop scope?
+
+Points, rebounds and assists
+
+Points only (simplest starting baseline)
+
+Full box score (including 3PM, steals and blocks)
+
+Start building the simulator&#x20;
+
+My preference is the hybrid approach with points, rebounds, and assists. It gives you a strong research foundation without prematurely committing to a full possession-level engine.
+
+The end goal is one simulation generating an entire NBA game, with every player's statistics jointly generated from the same underlying basketball environment. That is the architecture I would invest in.

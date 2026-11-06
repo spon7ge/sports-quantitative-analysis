@@ -10,6 +10,7 @@ from src.live.predict_points import (
     lineups_on,
     pinnacle_games_on,
     points_pipeline,
+    unavailable_on,
 )
 
 _POINTS_NOTEBOOK = (
@@ -514,3 +515,46 @@ def test_lineups_on_reads_latest_rotowire_file(tmp_path: Path):
     assert lineups["MEM"] == ["Ja Morant"]
     assert lineups["CHI"] == ["Coby White"]
     assert lineups_on("2026-10-22", directory=tmp_path) == {}
+
+
+def test_unavailable_on_keeps_out_players_from_the_newest_file(tmp_path: Path):
+    early = {
+        "games": [
+            {
+                "home": {
+                    "team": "POR",
+                    "lineup": [{"name": "Scoot Henderson"}],
+                    "may_not_play": [
+                        {"name": "Kristaps Porzingis", "badge": "Out"},
+                        {"name": "Jerami Grant", "badge": "Ques"},
+                    ],
+                },
+                "away": {
+                    "team": "CHI",
+                    "lineup": [{"name": "Coby White"}],
+                    "may_not_play": [{"name": "Lonzo Ball", "badge": "OFS"}],
+                },
+            }
+        ]
+    }
+    late = {
+        "games": [
+            {
+                "home": {
+                    "team": "POR",
+                    "lineup": [{"name": "Scoot Henderson"}],
+                    "may_not_play": [{"name": "Jerami Grant", "badge": "Doubt"}],
+                },
+                "away": {"team": "MEM", "lineup": [{"name": "Ja Morant"}]},
+            }
+        ]
+    }
+    (tmp_path / "rotowire_nba_2026-10-27_120000.json").write_text(json.dumps(early))
+    (tmp_path / "rotowire_nba_2026-10-27_190000.json").write_text(json.dumps(late))
+
+    unavailable = unavailable_on("2026-10-27", directory=tmp_path)
+
+    assert unavailable["POR"] == []
+    assert unavailable["CHI"] == ["Lonzo Ball"]
+    assert unavailable["MEM"] == []
+    assert unavailable_on("2026-10-22", directory=tmp_path) == {}

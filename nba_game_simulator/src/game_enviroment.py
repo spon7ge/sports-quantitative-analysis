@@ -4,9 +4,10 @@ game_enviorment.py  --  Layer 1: simulate the game environment
 ===============================================================
 
 Fits a game-level possession model on historical player game logs and draws
-ONE shared game environment per simulation (possessions, margin, OT) that every
-player in that simulation should reuse.  That shared draw is what creates the
-natural correlation between player opportunities.
+ONE shared game environment per simulation. The draw is oriented to one
+player's team: his possessions, the opponent's possessions, pace, both
+point totals, the game total, and the margin. Every player on that team
+reuses the same row.
 
 Pipeline
 --------
@@ -24,9 +25,11 @@ Pipeline
      * ols            : OLS on the features
      * ridge_team     : OLS + shrunken team effects (ridge == random-intercept BLUP)
 5. Calibrate a Student-t residual, a margin model, a pace<->game-script link,
-   an OT model, and the home-away possession split.
-6. Refit the chosen model on all data, save everything to JSON, and expose
-   `simulate_game(...)` to draw the shared environment for an upcoming game.
+   and an OT model.
+6. Fit the player-team context on the same games: each side's possessions,
+   points per possession, and overtime given the final margin.
+7. Refit on all data, save JSON, and expose `simulate_game(...)`.
+   Live slates come from `load_live_slate` (Pinnacle team lines, Rotowire fives).
 
 Usage
 -----
@@ -47,9 +50,11 @@ detects (the slope of margin on spread: negative slope => negative = favorite).
 
 Known simplifications
 ---------------------
-* OT is drawn independently of the regulation margin (real OT games are close
-  games by construction).  Fine for possessions; refine if you need exact
-  margin/OT consistency.
+* Overtime follows the drawn margin. A saved model from before this version
+  still uses the spread-bucket overtime table.
+* When a total and spread are posted, each side's points are shrunk toward
+  the implied team total (market weight 0.5 on a newly fit model). The
+  margin and game total are the two point draws added and subtracted.
 * Lineup features are the starters in that game (start_position G/F/C). Their
   pace, offensive rating, and defensive rating come from earlier games only.
 * Possessions come from the `team_poss` / `opp_poss` columns of your logs.
@@ -60,8 +65,10 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -94,6 +101,18 @@ FEATURES = ["pace_h", "pace_a", "b2b_h", "b2b_a", "rested_h", "rested_a",
             *LINEUP_GAME_FEATURES]
 
 SPREAD_EDGES = [0.0, 3.0, 6.0, 9.0, 1e9]
+MARGIN_OT_EDGES = [0.0, 3.0, 6.0, 10.0, 1e9]
+PLAYER_SIDE_FEATURES = [
+    "own_pace", "opp_pace", "is_home",
+    "own_b2b", "own_rested", "opp_b2b", "opp_rested",
+    "total_dev", "abs_spread", "total_missing", "spread_missing",
+    "own_lineup_pace", "opp_lineup_pace",
+    "own_off", "opp_off", "own_def", "opp_def",
+]
+ENVIRONMENT_COLUMNS = [
+    "team_poss", "opp_poss", "pace", "team_pts", "opp_pts",
+    "game_total", "is_home", "n_ot", "game_minutes", "team_margin",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -402,6 +421,142 @@ def fit_split(df: pd.DataFrame) -> dict:
     return {"values": [int(v) for v in vc.index], "probs": [float(p) for p in vc.values]}
 
 
+def _col(df: pd.DataFrame, name: str, default: float = 0.0) -> np.ndarray:
+    if name not in df.columns:
+        return np.full(len(df), default, dtype=float)
+    return pd.to_numeric(df[name], errors="coerce").fillna(default).to_numpy(float)
+
+
+def _side_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per team in the game, with features from that team's side."""
+    length = np.maximum(_col(df, "nominal_min", REG_MIN), 1.0)
+    home_poss48 = _col(df, "home_poss") * REG_MIN / length
+    away_poss48 = _col(df, "away_poss") * REG_MIN / length
+    league = _col(df, "lg_poss")
+    pieces = []
+    for is_home, side, other, poss48, pts_name, poss_name in (
+        (1.0, "h", "a", home_poss48, "home_pts", "home_poss"),
+        (0.0, "a", "h", away_poss48, "away_pts", "away_poss"),
+    ):
+        pieces.append(pd.DataFrame({
+            "own_pace": _col(df, f"pace_{side}"),
+            "opp_pace": _col(df, f"pace_{other}"),
+            "is_home": is_home,
+            "own_b2b": _col(df, f"b2b_{side}"),
+            "own_rested": _col(df, f"rested_{side}"),
+            "opp_b2b": _col(df, f"b2b_{other}"),
+            "opp_rested": _col(df, f"rested_{other}"),
+            "total_dev": _col(df, "total_dev"),
+            "abs_spread": _col(df, "abs_spread"),
+            "total_missing": _col(df, "total_missing"),
+            "spread_missing": _col(df, "spread_missing"),
+            "own_lineup_pace": _col(df, f"lineup_pace_{side}"),
+            "opp_lineup_pace": _col(df, f"lineup_pace_{other}"),
+            "own_off": _col(df, f"lineup_off_rating_{side}"),
+            "opp_off": _col(df, f"lineup_off_rating_{other}"),
+            "own_def": _col(df, f"lineup_def_rating_{side}"),
+            "opp_def": _col(df, f"lineup_def_rating_{other}"),
+            "poss48": poss48,
+            "y_dev": poss48 - league,
+            "pts": _col(df, pts_name),
+            "poss": _col(df, poss_name),
+        }))
+    return pd.concat(pieces, ignore_index=True)
+
+
+def fit_player_context(df: pd.DataFrame) -> dict:
+    """Team possessions, points per possession, and overtime given |margin|.
+
+    Each game is stacked twice so the same coefficients apply to either side.
+    The two possession residuals share one shock; rho is their correlation.
+    """
+    sides = _side_frame(df)
+    design_x = np.column_stack([
+        np.ones(len(sides)),
+        sides[PLAYER_SIDE_FEATURES].to_numpy(float),
+    ])
+    y = sides["y_dev"].to_numpy(float)
+    beta = np.linalg.lstsq(design_x, y, rcond=None)[0]
+    resid = y - design_x @ beta
+    n_games = len(df)
+    resid_home, resid_away = resid[:n_games], resid[n_games:]
+    if (
+        n_games >= 3
+        and float(np.std(resid_home)) > 1e-8
+        and float(np.std(resid_away)) > 1e-8
+    ):
+        rho = float(np.corrcoef(resid_home, resid_away)[0, 1])
+    else:
+        rho = 0.0
+    if not np.isfinite(rho):
+        rho = 0.0
+    rho = float(np.clip(rho, 0.0, 0.95))
+    if float(np.std(resid)) < 1e-8:
+        nu, scale = 30.0, 0.0
+    else:
+        nu, scale = fit_t(resid)
+
+    poss = sides["poss"].to_numpy(float)
+    pts = sides["pts"].to_numpy(float)
+    ok = poss > 1.0
+    ppp = np.full(len(sides), np.nan)
+    ppp[ok] = pts[ok] / poss[ok]
+    league_ppp = float(np.nanmean(ppp))
+    off = sides["own_off"].to_numpy(float)
+    defense = sides["opp_def"].to_numpy(float)
+    off_center = float(np.nanmean(off))
+    def_center = float(np.nanmean(defense))
+    home_flag = sides["is_home"].to_numpy(float)
+    y_ppp = ppp[ok] - league_ppp
+    design_ppp = np.column_stack([
+        np.ones(int(ok.sum())),
+        off[ok] - off_center,
+        defense[ok] - def_center,
+        home_flag[ok],
+    ])
+    finite = np.isfinite(y_ppp) & np.isfinite(design_ppp).all(axis=1)
+    coef = np.linalg.lstsq(design_ppp[finite], y_ppp[finite], rcond=None)[0]
+    mu_pts = poss[ok][finite] * (league_ppp + design_ppp[finite] @ coef)
+    point_resid = pts[ok][finite] - mu_pts
+    if len(point_resid) >= 5 and float(np.std(point_resid)) > 1e-8:
+        point_nu, point_scale = fit_t(point_resid)
+    else:
+        point_nu, point_scale = 30.0, 0.0
+
+    abs_margin = np.abs(_col(df, "margin"))
+    overtime = (_col(df, "n_ot") >= 1).astype(float)
+    buckets = []
+    for lo, hi in zip(MARGIN_OT_EDGES[:-1], MARGIN_OT_EDGES[1:]):
+        bucket = (abs_margin >= lo) & (abs_margin < hi)
+        if int(bucket.sum()) >= 30:
+            buckets.append(float(overtime[bucket].mean()))
+        else:
+            buckets.append(float(overtime.mean()) if len(overtime) else 0.0)
+    extra = _col(df, "n_ot") >= 2
+    went = _col(df, "n_ot") >= 1
+    more = float(extra.sum() / went.sum()) if went.any() else 0.1
+    return {
+        "sides": {
+            "features": list(PLAYER_SIDE_FEATURES),
+            "beta": [float(value) for value in beta],
+            "residual": {"nu": float(nu), "scale": float(scale), "rho": rho},
+        },
+        "scoring": {
+            "league_ppp": league_ppp,
+            "off_center": off_center,
+            "def_center": def_center,
+            "beta": [float(value) for value in coef],
+            "residual": {"nu": float(point_nu), "scale": float(point_scale)},
+            "market_weight": 0.5,
+        },
+        "ot_given_margin": {
+            "edges": list(MARGIN_OT_EDGES),
+            "p_ot": buckets,
+            "p_more_given_ot": more,
+        },
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Training / evaluation
 # --------------------------------------------------------------------------- #
@@ -482,8 +637,13 @@ def train(g: pd.DataFrame, state: dict, args) -> dict:
         _print_coefs(final, df, eps0)
     _print_qq(eps, nu_p, sc_p)
 
+    context = fit_player_context(df)
+    print(f"  team possessions: shared-shock rho {context['sides']['residual']['rho']:.2f}"
+          f" | points/possession {context['scoring']['league_ppp']:.3f}"
+          f" | market weight {context['scoring']['market_weight']:.2f}")
+
     model = {
-        "version": 1,
+        "version": 2,
         "config": {"halflife": args.halflife, "prior_weight": args.prior_weight,
                    "season_carry": args.season_carry, "league_window": args.league_window},
         "features": FEATURES,
@@ -493,6 +653,9 @@ def train(g: pd.DataFrame, state: dict, args) -> dict:
         "margin": mm,
         "ot": fit_ot(df),
         "split": fit_split(df),
+        "sides": context["sides"],
+        "scoring": context["scoring"],
+        "ot_given_margin": context["ot_given_margin"],
         "holdout_rmse": rows,
         "state": state,
         "trained_games": int(len(df)),
@@ -586,88 +749,505 @@ def _resolve_team(model: dict, key) -> int:
     sys.exit(f"Unknown team {key!r}. Known: {sorted(s['abbr'] for s in teams.values())}")
 
 
-def simulate_game(model: dict, home, away, date, total=None, spread=None,
+def _finite(value) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _t_draw(nu: float, scale: float, n: int, rng: np.random.Generator) -> np.ndarray:
+    if scale <= 0:
+        return np.zeros(n)
+    return stats.t.rvs(nu, scale=scale, size=n, random_state=rng)
+
+
+def _feature_value(feats: dict, name: str, default: float = 0.0) -> float:
+    value = feats.get(name, default)
+    if value is None or not np.isfinite(value):
+        return default
+    return float(value)
+
+
+def _side_values(feats: dict, is_home: bool) -> dict[str, float]:
+    own = "h" if is_home else "a"
+    opp = "a" if is_home else "h"
+    return {
+        "own_pace": _feature_value(feats, f"pace_{own}"),
+        "opp_pace": _feature_value(feats, f"pace_{opp}"),
+        "is_home": 1.0 if is_home else 0.0,
+        "own_b2b": _feature_value(feats, f"b2b_{own}"),
+        "own_rested": _feature_value(feats, f"rested_{own}"),
+        "opp_b2b": _feature_value(feats, f"b2b_{opp}"),
+        "opp_rested": _feature_value(feats, f"rested_{opp}"),
+        "total_dev": _feature_value(feats, "total_dev"),
+        "abs_spread": _feature_value(feats, "abs_spread"),
+        "total_missing": _feature_value(feats, "total_missing"),
+        "spread_missing": _feature_value(feats, "spread_missing"),
+        "own_lineup_pace": _feature_value(feats, f"lineup_pace_{own}"),
+        "opp_lineup_pace": _feature_value(feats, f"lineup_pace_{opp}"),
+        "own_off": _feature_value(feats, f"lineup_off_rating_{own}"),
+        "opp_off": _feature_value(feats, f"lineup_off_rating_{opp}"),
+        "own_def": _feature_value(feats, f"lineup_def_rating_{own}"),
+        "opp_def": _feature_value(feats, f"lineup_def_rating_{opp}"),
+    }
+
+
+def _side_mu(sides: dict, values: dict[str, float], league_poss: float) -> float:
+    features = list(sides["features"])
+    beta = np.asarray(sides["beta"], dtype=float)
+    row = np.array([values[name] for name in features], dtype=float)
+    if len(beta) != len(features) + 1:
+        raise ValueError("sides beta must be intercept plus one coefficient per feature")
+    return float(league_poss + beta[0] + beta[1:] @ row)
+
+
+def _ppp(scoring: dict, off: float, defense: float, is_home: bool) -> float:
+    beta = np.asarray(scoring["beta"], dtype=float)
+    if len(beta) != 4:
+        raise ValueError("scoring beta must be intercept, offense, defense, and home")
+    return float(
+        scoring["league_ppp"]
+        + beta[0]
+        + beta[1] * (off - scoring["off_center"])
+        + beta[2] * (defense - scoring["def_center"])
+        + beta[3] * (1.0 if is_home else 0.0)
+    )
+
+
+def _implied_points(total: float, spread: float) -> tuple[float, float]:
+    team = float(total) / 2.0 - float(spread) / 2.0
+    return team, float(total) - team
+
+
+def _draw_overtime(abs_margin: np.ndarray, table: dict, n: int, rng: np.random.Generator) -> np.ndarray:
+    edges = np.asarray(table["edges"], dtype=float)
+    probs = np.asarray(table["p_ot"], dtype=float)
+    idx = np.clip(np.searchsorted(edges, abs_margin, side="right") - 1, 0, len(probs) - 1)
+    n_ot = (rng.random(n) < probs[idx]).astype(int)
+    more = float(table["p_more_given_ot"])
+    for k in range(1, 5):
+        matched = n_ot == k
+        n_ot[matched] += (rng.random(int(matched.sum())) < more).astype(int)
+    return n_ot
+
+
+def _environment_frame(
+    *,
+    poss48_team: np.ndarray,
+    poss48_opp: np.ndarray,
+    team_pts: np.ndarray,
+    opp_pts: np.ndarray,
+    n_ot: np.ndarray,
+    is_home: bool,
+) -> pd.DataFrame:
+    minutes = REG_MIN + OT_MIN * n_ot
+    out = pd.DataFrame({
+        "team_poss": poss48_team * minutes / REG_MIN,
+        "opp_poss": poss48_opp * minutes / REG_MIN,
+        "pace": (poss48_team + poss48_opp) / 2.0,
+        "team_pts": team_pts,
+        "opp_pts": opp_pts,
+        "game_total": team_pts + opp_pts,
+        "is_home": 1.0 if is_home else 0.0,
+        "n_ot": n_ot,
+        "game_minutes": minutes,
+        "team_margin": team_pts - opp_pts,
+    })
+    return out[ENVIRONMENT_COLUMNS]
+
+
+def _draw_sides(model: dict, feats: dict, is_home: bool, total, spread, n: int,
+                rng: np.random.Generator) -> pd.DataFrame:
+    sides = model["sides"]
+    scoring = model["scoring"]
+    team_values = _side_values(feats, is_home)
+    opp_values = _side_values(feats, not is_home)
+    league_poss = float(model["state"]["league_poss"])
+    mu_team = _side_mu(sides, team_values, league_poss)
+    mu_opp = _side_mu(sides, opp_values, league_poss)
+    resid = sides["residual"]
+    rho = float(np.clip(resid.get("rho", 0.0), 0.0, 1.0))
+    scale = float(resid["scale"])
+    shared = _t_draw(resid["nu"], scale * np.sqrt(rho), n, rng)
+    side_scale = scale * np.sqrt(1.0 - rho)
+    poss48_team = mu_team + shared + _t_draw(resid["nu"], side_scale, n, rng)
+    poss48_opp = mu_opp + shared + _t_draw(resid["nu"], side_scale, n, rng)
+
+    ppp_team = _ppp(scoring, team_values["own_off"], team_values["opp_def"], is_home)
+    ppp_opp = _ppp(scoring, opp_values["own_off"], opp_values["opp_def"], not is_home)
+    weight = float(scoring.get("market_weight", 0.0))
+    if not (_finite(total) and _finite(spread)):
+        weight = 0.0
+    base_team = poss48_team * ppp_team
+    base_opp = poss48_opp * ppp_opp
+    if weight:
+        implied_team, implied_opp = _implied_points(total, spread)
+        mu_pts_team = (1.0 - weight) * base_team + weight * implied_team
+        mu_pts_opp = (1.0 - weight) * base_opp + weight * implied_opp
+    else:
+        mu_pts_team, mu_pts_opp = base_team, base_opp
+    point_resid = scoring["residual"]
+    reg_team = mu_pts_team + _t_draw(point_resid["nu"], point_resid["scale"], n, rng)
+    reg_opp = mu_pts_opp + _t_draw(point_resid["nu"], point_resid["scale"], n, rng)
+    n_ot = _draw_overtime(np.abs(reg_team - reg_opp), model["ot_given_margin"], n, rng)
+    extra_team = (1.0 - weight) * poss48_team * (OT_MIN * n_ot / REG_MIN) * ppp_team
+    extra_opp = (1.0 - weight) * poss48_opp * (OT_MIN * n_ot / REG_MIN) * ppp_opp
+    return _environment_frame(
+        poss48_team=poss48_team,
+        poss48_opp=poss48_opp,
+        team_pts=reg_team + extra_team,
+        opp_pts=reg_opp + extra_opp,
+        n_ot=n_ot,
+        is_home=is_home,
+    )
+
+
+def _draw_legacy(model: dict, feats: dict, row: pd.DataFrame, feature_names: list[str],
+                 spread, total, n: int, is_home: bool, rng: np.random.Generator) -> pd.DataFrame:
+    """Older saved models: one pace, a historical possession gap, spread-bucket OT."""
+    st = model["state"]
+    mu_poss = float(st["league_poss"] + predict_dev(model["model"], row, feature_names)[0])
+    home_spread = spread if is_home else (-float(spread) if _finite(spread) else None)
+    mm, kappa, rt = model["margin"], model["script"]["kappa"], model["residual_t"]
+    mu_m = margin_mu(mm, home_spread)
+    margin = mu_m + stats.t.rvs(mm["nu"], scale=mm["scale"], size=n, random_state=rng)
+    script = np.abs(margin) - folded_mean(mu_m, mm["sd"])
+    poss48 = mu_poss + kappa * script + stats.t.rvs(rt["nu"], scale=rt["scale"], size=n, random_state=rng)
+    ot = model["ot"]
+    sp = abs(float(home_spread)) if _finite(home_spread) else None
+    if sp is None:
+        p_ot = ot["p_ot_overall"]
+    else:
+        bucket = int(np.searchsorted(SPREAD_EDGES, sp, side="right") - 1)
+        p_ot = ot["p_ot_by_spread_bucket"][bucket]
+    n_ot = (rng.random(n) < p_ot).astype(int)
+    for k in range(1, 5):
+        matched = n_ot == k
+        n_ot[matched] += (rng.random(int(matched.sum())) < ot["p_more_given_ot"]).astype(int)
+    minutes = REG_MIN + OT_MIN * n_ot
+    game_poss = poss48 * minutes / REG_MIN
+    split = model["split"]
+    diff = rng.choice(split["values"], size=n, p=np.asarray(split["probs"]) / np.sum(split["probs"]))
+    home_poss = game_poss + diff / 2.0
+    away_poss = game_poss - diff / 2.0
+    if is_home:
+        poss48_team = home_poss * REG_MIN / minutes
+        poss48_opp = away_poss * REG_MIN / minutes
+        team_margin = margin
+    else:
+        poss48_team = away_poss * REG_MIN / minutes
+        poss48_opp = home_poss * REG_MIN / minutes
+        team_margin = -margin
+    if _finite(total):
+        team_pts = (float(total) + team_margin) / 2.0
+        opp_pts = (float(total) - team_margin) / 2.0
+    else:
+        base = float(st["league_pts"])
+        team_pts = (base + team_margin) / 2.0
+        opp_pts = (base - team_margin) / 2.0
+    out = _environment_frame(
+        poss48_team=poss48_team,
+        poss48_opp=poss48_opp,
+        team_pts=team_pts,
+        opp_pts=opp_pts,
+        n_ot=n_ot,
+        is_home=is_home,
+    )
+    out.attrs["mu_poss48"] = mu_poss
+    out.attrs["mu_margin"] = float(mu_m if is_home else -mu_m)
+    return out
+
+
+def simulate_game(model: dict, team, opponent, date, total=None, spread=None,
                   n: int = 10000, seed: int | None = None,
-                  home_lineup: list | None = None, away_lineup: list | None = None) -> pd.DataFrame:
+                  *,
+                  is_home: bool = True,
+                  team_lineup: list | None = None,
+                  opponent_lineup: list | None = None,
+                  home_lineup: list | None = None,
+                  away_lineup: list | None = None,
+                  rng: np.random.Generator | None = None) -> pd.DataFrame:
     """
-    Draw `n` shared game environments for one upcoming game.
-    Every player in simulation k must use row k of the returned frame.
+    Draw `n` shared environments for the player's team against `opponent`.
 
-    home_lineup and away_lineup are the player ids starting on `date`.
-    Their ratings are priors stored on the model. Omit a side and that
-    side uses the training-average five.
+    `spread` is that team's spread (negative means the team is favored when
+    that is the training convention). `team_lineup` and `opponent_lineup`
+    are starter player ids. Omit a five and that side uses the training average.
 
-    Columns: poss48 (regulation-rate possessions), n_ot, game_minutes, game_poss,
-             home_poss, away_poss, home_margin
+    Every teammate in simulation k reuses row k.
     """
-    rng = np.random.default_rng(seed)
+    if isinstance(is_home, (bool, np.bool_)) is False:
+        raise ValueError("is_home must be true or false")
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or int(n) <= 0:
+        raise ValueError("n must be a positive integer")
+    n = int(n)
+    if team_lineup is None:
+        team_lineup = home_lineup if is_home else away_lineup
+    if opponent_lineup is None:
+        opponent_lineup = away_lineup if is_home else home_lineup
+    if rng is None:
+        rng = np.random.default_rng(seed)
     cfg, st = model["config"], model["state"]
-    hid, aid = _resolve_team(model, home), _resolve_team(model, away)
+    home_key, away_key = (team, opponent) if is_home else (opponent, team)
+    hid, aid = _resolve_team(model, home_key), _resolve_team(model, away_key)
     season = season_of(date)
-
     for t in (hid, aid):
         if pd.Timestamp(date) <= pd.Timestamp(st["teams"][str(t)]["last_date"]):
             print(f"  WARNING: {date} is not after {st['teams'][str(t)]['abbr']}'s last game in the "
                   f"training data ({st['teams'][str(t)]['last_date']}); rest/pace features will be off.")
     ph, rh = _team_snapshot(st["teams"][str(hid)], date, season, cfg["season_carry"], cfg["prior_weight"])
     pa, ra = _team_snapshot(st["teams"][str(aid)], date, season, cfg["season_carry"], cfg["prior_weight"])
-    f = _line_feats(total, spread, st["league_pts"])
-    f.update(pace_h=ph, pace_a=pa, b2b_h=float(rh <= 1), b2b_a=float(ra <= 1),
-             rested_h=float(rh >= 3), rested_a=float(ra >= 3))
-    feats = list(model.get("features") or FEATURES)
-    if any(str(name).startswith("lineup_") for name in feats):
+    feats_row = _line_feats(total, spread, st["league_pts"])
+    feats_row.update(pace_h=ph, pace_a=pa, b2b_h=float(rh <= 1), b2b_a=float(ra <= 1),
+                     rested_h=float(rh >= 3), rested_a=float(ra >= 3))
+    feature_names = list(model.get("features") or [])
+    if not feature_names and "sides" not in model:
+        feature_names = list(FEATURES)
+    home_ids = team_lineup if is_home else opponent_lineup
+    away_ids = opponent_lineup if is_home else team_lineup
+    if any(str(name).startswith("lineup_") for name in feature_names):
         lineup_state = st.get("lineup")
         if lineup_state is None:
             raise ValueError("model is missing lineup state; retrain before simulating")
-        if home_lineup is None or away_lineup is None:
+        if home_ids is None or away_ids is None:
             print("  WARNING: starting lineup not supplied; lineup features use the training-average five.")
-        f.update(lineup_game_features(lineup_state, season, home_lineup, away_lineup))
-    row = pd.DataFrame([{**f, "home_id": hid, "away_id": aid}])
-    mu_dev = float(predict_dev(model["model"], row, feats)[0])
-    mu_poss = st["league_poss"] + mu_dev
-
-    # margin first, then possessions conditional on the game script
-    mm, kappa, rt = model["margin"], model["script"]["kappa"], model["residual_t"]
-    mu_m = margin_mu(mm, spread)
-    margin = mu_m + stats.t.rvs(mm["nu"], scale=mm["scale"], size=n, random_state=rng)
-    script = np.abs(margin) - folded_mean(mu_m, mm["sd"])
-    poss48 = mu_poss + kappa * script + stats.t.rvs(rt["nu"], scale=rt["scale"], size=n, random_state=rng)
-
-    # overtime
-    ot, sp = model["ot"], (abs(float(spread)) if spread is not None and np.isfinite(float(spread)) else None)
-    p_ot = ot["p_ot_overall"] if sp is None else ot["p_ot_by_spread_bucket"][
-        int(np.searchsorted(SPREAD_EDGES, sp, side="right") - 1)]
-    n_ot = (rng.random(n) < p_ot).astype(int)
-    for k in range(1, 5):
-        m = n_ot == k
-        n_ot[m] += (rng.random(m.sum()) < ot["p_more_given_ot"]).astype(int)
-    minutes = REG_MIN + OT_MIN * n_ot
-    game_poss = poss48 * minutes / REG_MIN
-
-    # split shared game possessions between the teams
-    sp_ = model["split"]
-    diff = rng.choice(sp_["values"], size=n, p=np.asarray(sp_["probs"]) / np.sum(sp_["probs"]))
-    out = pd.DataFrame({"poss48": poss48, "n_ot": n_ot, "game_minutes": minutes, "game_poss": game_poss,
-                        "home_poss": game_poss + diff / 2.0, "away_poss": game_poss - diff / 2.0,
-                        "home_margin": margin})
-    out.attrs.update(mu_poss48=mu_poss, mu_margin=mu_m, home=st["teams"][str(hid)]["abbr"],
-                     away=st["teams"][str(aid)]["abbr"], rest_home=rh, rest_away=ra)
+        feats_row.update(lineup_game_features(lineup_state, season, home_ids, away_ids))
+    if "sides" in model and "scoring" in model and "ot_given_margin" in model:
+        out = _draw_sides(model, feats_row, is_home, total, spread, n, rng)
+        out.attrs.update(
+            team=st["teams"][str(hid if is_home else aid)]["abbr"],
+            opponent=st["teams"][str(aid if is_home else hid)]["abbr"],
+            rest_team=rh if is_home else ra,
+            rest_opponent=ra if is_home else rh,
+        )
+        return out
+    row = pd.DataFrame([{**feats_row, "home_id": hid, "away_id": aid}])
+    out = _draw_legacy(model, feats_row, row, feature_names, spread, total, n, is_home, rng)
+    out.attrs.update(
+        team=st["teams"][str(hid if is_home else aid)]["abbr"],
+        opponent=st["teams"][str(aid if is_home else hid)]["abbr"],
+        rest_team=rh if is_home else ra,
+        rest_opponent=ra if is_home else rh,
+    )
     return out
 
 
 def print_sim_summary(sim: pd.DataFrame, total, spread):
     a = sim.attrs
-    print(f"\nGame environment: {a['away']} @ {a['home']}"
-          f"  | total {total if total is not None else 'n/a'} | home spread {spread if spread is not None else 'n/a'}"
-          f"  | rest H/A {a['rest_home']:.0f}/{a['rest_away']:.0f} days")
-    print(f"  expected possessions/48: {a['mu_poss48']:.1f}   expected home margin: {a['mu_margin']:+.1f}")
-    q = sim[["poss48", "game_poss", "home_margin"]].quantile([.05, .25, .5, .75, .95]).T
+    print(f"\nGame environment: {a.get('opponent', '?')} at {a.get('team', '?')}"
+          f"  | total {total if total is not None else 'n/a'} | team spread {spread if spread is not None else 'n/a'}"
+          f"  | rest team/opponent {a.get('rest_team', float('nan')):.0f}/{a.get('rest_opponent', float('nan')):.0f} days")
+    q = sim[["pace", "team_poss", "team_pts", "opp_pts", "team_margin"]].quantile([.05, .25, .5, .75, .95]).T
     q.columns = ["p05", "p25", "p50", "p75", "p95"]
-    q.insert(0, "sd", sim[["poss48", "game_poss", "home_margin"]].std())
-    q.insert(0, "mean", sim[["poss48", "game_poss", "home_margin"]].mean())
+    q.insert(0, "sd", sim[["pace", "team_poss", "team_pts", "opp_pts", "team_margin"]].std())
+    q.insert(0, "mean", sim[["pace", "team_poss", "team_pts", "opp_pts", "team_margin"]].mean())
     print(q.round(2).to_string())
-    print(f"  P(OT) = {(sim.n_ot > 0).mean():.1%}   corr(poss48, |margin|) = "
-          f"{np.corrcoef(sim.poss48, sim.home_margin.abs())[0, 1]:+.3f}")
+    print(f"  P(OT) = {(sim.n_ot > 0).mean():.1%}")
+
+
+def _line_points(blocks, team_can, side, participants) -> float | None:
+    from src.scrapers.arbitrage import canonical_team
+
+    for block in blocks:
+        if block.get("period") not in (0, None) or block.get("is_alternate"):
+            continue
+        for line in block.get("lines") or []:
+            if side is not None and line.get("side") != side:
+                continue
+            if team_can is not None:
+                label = line.get("team")
+                if not label and len(participants) >= 2:
+                    if line.get("side") == "away":
+                        label = participants[0]
+                    elif line.get("side") == "home":
+                        label = participants[1]
+                if canonical_team(label, "nba") != team_can:
+                    continue
+            if line.get("points") is None:
+                continue
+            return float(line["points"])
+    return None
+
+
+def _roster_abbr(roster: pd.DataFrame, team_can: str) -> str | None:
+    from src.pipeline.silver.rotowire import normalize_team_abbreviation
+    from src.scrapers.arbitrage import canonical_team
+
+    for abbr in roster["team_abbreviation"].dropna().unique():
+        normalized = normalize_team_abbreviation(abbr)
+        if canonical_team(normalized, "nba") == team_can:
+            return normalized
+    return None
+
+
+def _match_roster_ids(
+    names: list, abbr: str, roster: pd.DataFrame
+) -> tuple[list, list]:
+    from src.pipeline.silver.positions import player_name_keys
+    from src.pipeline.silver.rotowire import normalize_team_abbreviation
+
+    team_rows = roster.loc[
+        roster["team_abbreviation"].map(normalize_team_abbreviation).eq(abbr)
+    ]
+    ids = []
+    missing = []
+    for name in names:
+        wanted = set(player_name_keys(name))
+        found = None
+        for rec in team_rows.itertuples(index=False):
+            if wanted & set(player_name_keys(rec.player_name)):
+                found = rec.player_id
+                break
+        if found is None:
+            missing.append(str(name))
+            continue
+        ids.append(
+            int(found) if _finite(found) and float(found).is_integer() else found
+        )
+    return ids, missing
+
+
+def _roster_ids(names: list, abbr: str, roster: pd.DataFrame) -> list:
+    ids, missing = _match_roster_ids(names, abbr, roster)
+    if missing:
+        raise ValueError(f"roster has no id for {missing} on {abbr}")
+    return ids
+
+
+def _starter_ids(lineups: dict, abbr: str, roster: pd.DataFrame) -> list | None:
+    names = list(lineups.get(abbr) or [])
+    if not names:
+        return None
+    return _roster_ids(names, abbr, roster)
+
+
+def player_slate(
+    games: list,
+    lineups: dict,
+    roster: pd.DataFrame,
+    team: str,
+    unavailable: dict | None = None,
+) -> dict:
+    """Opponent, home flag, Pinnacle lines, starter ids, and out ids.
+
+    An out name with no row on ``roster`` is listed under ``team_out_absent``
+    or ``opponent_out_absent`` and is left out of the id lists. He has no
+    minutes because he is not on the roster. A missing starter still raises.
+    """
+    from src.pipeline.silver.rotowire import normalize_team_abbreviation
+    from src.scrapers.arbitrage import canonical_team
+
+    required = {"player_name", "player_id", "team_abbreviation"}
+    missing = required.difference(roster.columns)
+    if missing:
+        raise ValueError(f"roster needs {sorted(missing)}")
+    abbr = normalize_team_abbreviation(team)
+    team_can = canonical_team(abbr, "nba")
+    if team_can is None:
+        raise ValueError(f"unknown team {team!r}")
+    for game in games:
+        participants = game.get("participants") or []
+        if len(participants) < 2:
+            continue
+        labels = [canonical_team(part, "nba") for part in participants]
+        if team_can not in labels:
+            continue
+        markets = game.get("team_markets") or {}
+        spread = _line_points(markets.get("spread") or [], team_can, None, participants)
+        total = _line_points(markets.get("total") or [], None, "over", participants)
+        if spread is None or total is None:
+            raise ValueError(f"Pinnacle spread or total missing for {abbr}")
+        opp_can = labels[1] if labels[0] == team_can else labels[0]
+        opponent = _roster_abbr(roster, opp_can)
+        if opponent is None:
+            raise ValueError(f"roster has no rows for opponent of {abbr}")
+        outs = unavailable or {}
+        team_out, team_absent = _match_roster_ids(
+            list(outs.get(abbr) or []), abbr, roster
+        )
+        opponent_out, opponent_absent = _match_roster_ids(
+            list(outs.get(opponent) or []), opponent, roster
+        )
+        return {
+            "team": abbr,
+            "opponent": opponent,
+            "is_home": labels[1] == team_can,
+            "spread": spread,
+            "total": total,
+            "team_lineup": _starter_ids(lineups, abbr, roster),
+            "opponent_lineup": _starter_ids(lineups, opponent, roster),
+            "team_out": team_out,
+            "opponent_out": opponent_out,
+            # No game on this roster, so the segment schedule never sees them.
+            "team_out_absent": team_absent,
+            "opponent_out_absent": opponent_absent,
+        }
+    raise ValueError(f"no Pinnacle game for {abbr}")
+
+
+def load_live_slate(team: str, date, roster: pd.DataFrame,
+                    pinnacle_dir=None, lineup_dir=None) -> dict:
+    """Read that date's Pinnacle team board and Rotowire fives, then build the slate."""
+    from src.live.predict_points import lineups_on, pinnacle_games_on, unavailable_on
+
+    return player_slate(
+        pinnacle_games_on(date, directory=pinnacle_dir),
+        lineups_on(date, directory=lineup_dir),
+        roster,
+        team,
+        unavailable_on(date, directory=lineup_dir),
+    )
+
+
+def _newest_snapshot(folder: Path, pattern: str) -> Path:
+    files = sorted(folder.glob(pattern))
+    if not files:
+        raise FileNotFoundError(f"no files matching {pattern} in {folder}")
+    return files[-1]
+
+
+def _snapshot_date(path: Path) -> str:
+    found = re.search(r"\d{4}-\d{2}-\d{2}", path.name)
+    if found is None:
+        raise ValueError(f"no slate date in {path.name}")
+    return found.group(0)
+
+
+def load_latest_slate(team: str, roster: pd.DataFrame,
+                      pinnacle_dir=None, lineup_dir=None) -> dict:
+    """Slate from the newest Pinnacle file and the newest Rotowire files.
+
+    Odds come from that one Pinnacle snapshot. Lineups use the newest
+    Rotowire file for each team, and an earlier file from that same day
+    still fills a team that has already left the page.
+    """
+    from src.live.predict_points import (
+        _LINEUP_DIR,
+        _PINNACLE_DIR,
+        lineups_on,
+        unavailable_on,
+    )
+
+    odds_dir = _PINNACLE_DIR if pinnacle_dir is None else Path(pinnacle_dir)
+    fives_dir = _LINEUP_DIR if lineup_dir is None else Path(lineup_dir)
+    odds_path = _newest_snapshot(odds_dir, "pinnacle_nba_*_team.json")
+    lineup_path = _newest_snapshot(fives_dir, "rotowire_nba_*.json")
+    games = json.loads(odds_path.read_text()).get("games") or []
+    lineup_day = _snapshot_date(lineup_path)
+    slate = player_slate(
+        games,
+        lineups_on(lineup_day, directory=fives_dir),
+        roster,
+        team,
+        unavailable_on(lineup_day, directory=fives_dir),
+    )
+    slate["date"] = _snapshot_date(odds_path)
+    slate["pinnacle_file"] = str(odds_path)
+    slate["lineup_file"] = str(lineup_path)
+    return slate
 
 
 # --------------------------------------------------------------------------- #
@@ -686,10 +1266,10 @@ def main():
     ap.add_argument("--league-window", type=int, default=300, help="# of past games in the league-pace prior")
     ap.add_argument("--min-league-games", type=int, default=30)
     ap.add_argument("--plots", action="store_true")
-    ap.add_argument("--simulate", nargs=2, metavar=("HOME", "AWAY"), help="team abbreviations (or ids)")
+    ap.add_argument("--simulate", nargs=2, metavar=("TEAM", "OPPONENT"), help="team abbreviations (or ids); TEAM is home")
     ap.add_argument("--date", default=str(pd.Timestamp.today().date()))
     ap.add_argument("--total", type=float)
-    ap.add_argument("--spread", type=float, help="HOME team spread, same convention as your data")
+    ap.add_argument("--spread", type=float, help="TEAM spread, same convention as your data")
     ap.add_argument("--n", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--sim-out", help="optionally write simulated draws to this parquet/csv path")
