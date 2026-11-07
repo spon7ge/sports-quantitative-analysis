@@ -24,6 +24,32 @@ def _box() -> BoxScoreSet:
     )
 
 
+def test_combo_over_is_the_sum_on_the_same_row() -> None:
+    box = BoxScoreSet(
+        teams={
+            "home": TeamBoxScore(
+                player_ids=("A",),
+                stats={
+                    "PTS": np.array([[10], [20], [30]]),
+                    "REB": np.array([[1], [1], [1]]),
+                    "AST": np.array([[2], [3], [4]]),
+                },
+            )
+        },
+        n_sims=3,
+        environment=pd.DataFrame({"game_minutes": [48, 48, 48]}),
+    )
+
+    points_assists = price_over(box, Prop("home", "A", "PA", 22.5), -110)
+    three_stat = price_over(box, Prop("home", "A", "PRA", 23.5), -110)
+    rebounds_assists = price_over(box, Prop("home", "A", "RA", 4), -110)
+
+    assert points_assists.p_over == pytest.approx(2 / 3)
+    assert three_stat.p_over == pytest.approx(2 / 3)
+    assert rebounds_assists.p_over == pytest.approx(1 / 3)
+    assert rebounds_assists.p_push == pytest.approx(1 / 3)
+
+
 def test_price_over_counts_a_push_as_neither_win_nor_loss() -> None:
     priced = price_over(_box(), Prop("home", "A", "PTS", 20), -119)
 

@@ -100,7 +100,7 @@ def test_prizepicks_keeps_one_standard_line_per_stat_at_minus_119(tmp_path: Path
     assert audit["source_file"].endswith("2026-11-07_000331.json")
 
 
-def test_other_books_keep_the_closest_two_way_line_and_ignore_combos(
+def test_other_books_keep_the_closest_two_way_line_and_the_three_combos(
     tmp_path: Path,
 ) -> None:
     props = tmp_path / "props"
@@ -143,6 +143,22 @@ def test_other_books_keep_the_closest_two_way_line_and_ignore_combos(
                 },
                 {
                     "full_name": "Jamal Murray",
+                    "stat_name": "points_rebounds",
+                    "stat_value": 30.5,
+                    "choice": "over",
+                    "american_price": -110,
+                    "start_time": "2026-11-08T01:10:00Z",
+                },
+                {
+                    "full_name": "Jamal Murray",
+                    "stat_name": "points_rebounds",
+                    "stat_value": 30.5,
+                    "choice": "under",
+                    "american_price": -110,
+                    "start_time": "2026-11-08T01:10:00Z",
+                },
+                {
+                    "full_name": "Jamal Murray",
                     "stat_name": "points_rebounds_assists",
                     "stat_value": 40.5,
                     "choice": "over",
@@ -180,13 +196,170 @@ def test_other_books_keep_the_closest_two_way_line_and_ignore_combos(
     markets, _ = latest_prop_markets(props, "fanduel")
     points = markets.loc[markets["stat"].eq("PTS")].iloc[0]
     assists = markets.loc[markets["stat"].eq("AST")].iloc[0]
+    combo = markets.loc[markets["stat"].eq("PRA")].iloc[0]
 
-    assert len(markets) == 2
+    assert set(markets["stat"]) == {"PTS", "AST", "PRA"}
     assert points["line"] == pytest.approx(24.5)
     assert points["over_american"] == -110
     assert assists["line"] == pytest.approx(6.5)
     assert assists["over_american"] == -115
+    assert combo["line"] == pytest.approx(40.5)
+    assert combo["over_american"] == -110
     assert markets["slate_date"].iloc[0] == pd.Timestamp("2026-11-07")
+
+
+def test_points_assists_combos_keep_one_main_line(tmp_path: Path) -> None:
+    props = tmp_path / "props"
+    _write(
+        props / "prizepicks/nba/prizepicks_nba_2026-11-07_111500.json",
+        {
+            "fetched_at": "2026-11-07T19:15:00Z",
+            "projections": [
+                {
+                    "player": "Christian Braun",
+                    "stat_type": "Pts+Asts",
+                    "line_score": 16.5,
+                    "odds_type": "standard",
+                },
+                {
+                    "player": "Christian Braun",
+                    "stat_type": "Pts+Rebs+Asts",
+                    "line_score": 22.5,
+                    "odds_type": "standard",
+                },
+                {
+                    "player": "Christian Braun",
+                    "stat_type": "Rebs+Asts",
+                    "line_score": 6.5,
+                    "odds_type": "standard",
+                },
+                {
+                    "player": "Christian Braun",
+                    "stat_type": "Pts+Rebs",
+                    "line_score": 15.5,
+                    "odds_type": "standard",
+                },
+                {
+                    "player": "Christian Braun",
+                    "stat_type": "Pts+Asts",
+                    "line_score": 24.5,
+                    "odds_type": "demon",
+                },
+            ],
+        },
+    )
+    _write(
+        props / "underdogs/nba/underdog_nba_2026-11-07_111500.json",
+        {
+            "fetched_at": "2026-11-07T19:15:00Z",
+            "picks": [
+                {
+                    "full_name": "Aaron Gordon",
+                    "stat_name": "pts_asts",
+                    "stat_value": 18.5,
+                    "choice": "over",
+                    "american_price": -120,
+                    "start_time": "2026-11-08T02:00:00Z",
+                },
+                {
+                    "full_name": "Aaron Gordon",
+                    "stat_name": "pts_asts",
+                    "stat_value": 18.5,
+                    "choice": "under",
+                    "american_price": 100,
+                    "start_time": "2026-11-08T02:00:00Z",
+                },
+                {
+                    "full_name": "Aaron Gordon",
+                    "stat_name": "pts_rebs_asts",
+                    "stat_value": 28.5,
+                    "choice": "over",
+                    "american_price": -110,
+                    "start_time": "2026-11-08T02:00:00Z",
+                },
+                {
+                    "full_name": "Aaron Gordon",
+                    "stat_name": "pts_rebs_asts",
+                    "stat_value": 28.5,
+                    "choice": "under",
+                    "american_price": -110,
+                    "start_time": "2026-11-08T02:00:00Z",
+                },
+                {
+                    "full_name": "Aaron Gordon",
+                    "stat_name": "rebs_asts",
+                    "stat_value": 8.5,
+                    "choice": "over",
+                    "american_price": -105,
+                    "start_time": "2026-11-08T02:00:00Z",
+                },
+                {
+                    "full_name": "Aaron Gordon",
+                    "stat_name": "rebs_asts",
+                    "stat_value": 8.5,
+                    "choice": "under",
+                    "american_price": -115,
+                    "start_time": "2026-11-08T02:00:00Z",
+                },
+            ],
+        },
+    )
+    _write(
+        props / "novig/nba/novig_nba_2026-11-07_111501_props.json",
+        {
+            "fetched_at": "2026-11-07T19:15:01Z",
+            "games": [
+                {
+                    "name": "IND @ DEN",
+                    "start_time": "2026-11-08T02:00:00Z",
+                    "props": [
+                        {
+                            "player": "Cameron Johnson",
+                            "stat": "points_assists",
+                            "line": 17.5,
+                            "over": {"american": -130},
+                            "under": {"american": 110},
+                        },
+                        {
+                            "player": "Cameron Johnson",
+                            "stat": "points_rebounds_assists",
+                            "line": 24.5,
+                            "over": {"american": -115},
+                            "under": {"american": -105},
+                        },
+                        {
+                            "player": "Cameron Johnson",
+                            "stat": "rebounds_assists",
+                            "line": 7.5,
+                            "over": {"american": 120},
+                            "under": {"american": -140},
+                        },
+                        {
+                            "player": "Cameron Johnson",
+                            "stat": "points_rebounds",
+                            "line": 16.5,
+                            "over": {"american": -110},
+                            "under": {"american": -110},
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    prizepicks, _ = latest_prop_markets(props, "prizepicks")
+    underdog, _ = latest_prop_markets(props, "underdog")
+    novig, _ = latest_prop_markets(props, "novig")
+
+    assert set(prizepicks["stat"]) == {"PA", "PRA", "RA"}
+    assert set(prizepicks["over_american"]) == {-119}
+    assert underdog.set_index("stat")["line"].to_dict() == {
+        "PA": 18.5,
+        "PRA": 28.5,
+        "RA": 8.5,
+    }
+    assert set(novig["stat"]) == {"PA", "PRA", "RA"}
+    assert "points_rebounds" not in set(novig["stat"])
 
 
 def test_unknown_book_names_the_saved_books(tmp_path: Path) -> None:

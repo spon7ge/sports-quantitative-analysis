@@ -1,4 +1,4 @@
-"""Main points, rebounds, assists, steals, and blocks from one saved bookmaker."""
+"""Main points, rebounds, assists, steals, blocks, and three combo markets from one saved bookmaker."""
 
 from __future__ import annotations
 
@@ -21,6 +21,9 @@ _STAT_NAMES = {
     "AST": frozenset({"assists", "ast"}),
     "STL": frozenset({"steals", "stl"}),
     "BLK": frozenset({"blocks", "blk", "blocked shots"}),
+    "PA": frozenset({"points_assists", "pts+asts", "pts_asts"}),
+    "PRA": frozenset({"points_rebounds_assists", "pts+rebs+asts", "pts_rebs_asts"}),
+    "RA": frozenset({"rebounds_assists", "rebs+asts", "rebs_asts"}),
 }
 _ACCEPTED = frozenset().union(*_STAT_NAMES.values())
 _MARKET_COLUMNS = [
@@ -43,11 +46,12 @@ def book_names() -> tuple[str, ...]:
 def latest_prop_markets(
     root: str | Path, book: str
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    """One main line per player for points, rebounds, assists, steals, and blocks.
+    """One main line per player for the counted stats and three combos.
 
     PrizePicks keeps the standard line and prices both sides at -119.
     Every other book keeps the two-way line whose over and under prices
-    are closest. Combo markets such as points plus rebounds stay out.
+    are closest. Points plus assists, points plus rebounds plus assists,
+    and rebounds plus assists are kept. Points plus rebounds stays out.
     """
     requested = str(book).strip().lower()
     folders = {name: (relative, kind) for name, relative, kind in _BOOKS}
