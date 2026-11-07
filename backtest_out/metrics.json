@@ -1,0 +1,507 @@
+{
+  "draws": 5000,
+  "seed": 7,
+  "splits": {
+    "train_last_date": "2023-12-22",
+    "val_first_date": "2023-12-23",
+    "val_last_date": "2025-02-27",
+    "test_first_date": "2025-02-28",
+    "test_last_date": "2026-11-05",
+    "n_train": 4981,
+    "n_val": 1685,
+    "n_test": 1701
+  },
+  "spread_sign": "negative = favorite",
+  "market_timing": "unspecified",
+  "market_note": "game_total and team_spread on the player logs come from the Rotowire season archive (Over_Under, Home_Line). That file has a tipoff and a final score, and no odds timestamp, so these lines are unspecified: they are not labeled opening or closing.",
+  "availability_source": "prior_only",
+  "gtd_probability": 0.5,
+  "gtd_probability_source": "assumption",
+  "availability_note": "Historical starters are players with start_position G, F, or C. A blank start_position is the bench. Their minutes and ratings still come from earlier games only. There is no injury snapshot, so a player absent from the log is not marked out. The live GTD probability 0.50 is an assumption, not a rate estimated from those snapshots. This test does not measure the value of live injury information.",
+  "availability_slice": {
+    "available": false,
+    "reason": "Historical starters are players with start_position G, F, or C. A blank start_position is the bench. Their minutes and ratings still come from earlier games only. There is no injury snapshot, so a player absent from the log is not marked out. The live GTD probability 0.50 is an assumption, not a rate estimated from those snapshots. This test does not measure the value of live injury information."
+  },
+  "unreadable_logs": [],
+  "pbp": {
+    "used": true,
+    "failed": [],
+    "matched_games": 1701,
+    "final_score_agreement": 0.9764844209288653,
+    "overtime_count_agreement": 1.0,
+    "target": "Model scores use gamelog full-game points and team possessions. Play-by-play checks the final score, the regulation score, and the overtime count."
+  },
+  "end_of_sample_state_used_for_test": false,
+  "models": {
+    "baseline": {
+      "n": 1701,
+      "possessions_per_48": {
+        "n": 1701,
+        "rmse": 4.072362009079041,
+        "mae": 3.2302870432044175,
+        "bias": 0.2164604628591661
+      },
+      "full_game_possessions": {
+        "home": {
+          "n": 1701,
+          "rmse": 4.687458010060691,
+          "mae": 3.601477430738425
+        },
+        "away": {
+          "n": 1701,
+          "rmse": 4.672074355139258,
+          "mae": 3.5977836329495507
+        }
+      },
+      "points": {
+        "home_pts": {
+          "n": 1701,
+          "rmse": 11.44981238236272,
+          "mae": 9.141237183205918,
+          "bias": -0.0766450786663314
+        },
+        "away_pts": {
+          "n": 1701,
+          "rmse": 11.35415939285281,
+          "mae": 9.02761970886811,
+          "bias": -0.5391543543911993
+        },
+        "total": {
+          "n": 1701,
+          "rmse": 18.103564156610823,
+          "mae": 14.3699680721223,
+          "bias": -0.6157994330575405
+        },
+        "margin": {
+          "n": 1701,
+          "rmse": 13.86691180640826,
+          "mae": 10.82228686503228,
+          "bias": 0.46250927572486866
+        }
+      },
+      "intervals": {
+        "pace": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7713109935332157,
+            "width": 9.735902090858424
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8806584362139918,
+            "width": 12.559291199958395
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9347442680776014,
+            "width": 15.046834510173394
+          }
+        },
+        "home_poss": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7818930041152263,
+            "width": 10.883705652553505
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8953556731334509,
+            "width": 14.862938949289516
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9523809523809523,
+            "width": 19.108906114726466
+          }
+        },
+        "away_poss": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7848324514991182,
+            "width": 10.885366809293883
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8935920047031158,
+            "width": 14.858753920941975
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9541446208112875,
+            "width": 19.11075185387277
+          }
+        },
+        "home_pts": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7836566725455615,
+            "width": 28.88598257912491
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8982951205173427,
+            "width": 37.172745944502765
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9500293944738389,
+            "width": 44.41805465531907
+          }
+        },
+        "away_pts": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7983539094650206,
+            "width": 28.89740182051639
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8959435626102292,
+            "width": 37.19319627982476
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9488536155202821,
+            "width": 44.42198780492642
+          }
+        },
+        "total": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7924750146972369,
+            "width": 45.738849860392094
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8941798941798942,
+            "width": 58.84819447951141
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9453262786596119,
+            "width": 70.3002690118037
+          }
+        },
+        "margin": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.8089359200470312,
+            "width": 35.31538761041624
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.9006466784244562,
+            "width": 45.446596140283575
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9470899470899471,
+            "width": 54.28304968991408
+          }
+        }
+      },
+      "overtime": {
+        "n": 1701,
+        "brier": 0.04373366457378013,
+        "predicted_frequency": 0.052629512051734266,
+        "observed_frequency": 0.04585537918871252
+      },
+      "possession_gap": {
+        "observed_mean": 0.012933568489124045,
+        "observed_std": 1.0640055709822527,
+        "simulated_draw_mean": 0.0023515579071134627,
+        "simulated_draw_std": 1.0579867834530912,
+        "mean_forecast_bias": -0.02564914756025883
+      },
+      "league_pace_baseline": {
+        "n": 1701,
+        "rmse": 4.922353241405431,
+        "mae": 3.9354675493551126,
+        "bias": -0.045694458628506095
+      },
+      "market": {
+        "n": 1673,
+        "model_margin_mae": 10.791368399622138,
+        "model_margin_rmse": 13.849873221441165,
+        "market_margin_mae": 10.795277943813508,
+        "market_margin_rmse": 13.854848036207242,
+        "model_home_pts_mae": 9.126156647248656,
+        "model_home_pts_rmse": 11.448762355548503,
+        "market_home_pts_mae": 9.127913927077106,
+        "market_home_pts_rmse": 11.448091611884246,
+        "model_away_pts_mae": 9.025561972162466,
+        "model_away_pts_rmse": 11.361814961951943,
+        "market_away_pts_mae": 9.027196652719665,
+        "market_away_pts_rmse": 11.363285301320698,
+        "model_total_mae": 14.385093906147146,
+        "model_total_rmse": 18.12487266595068,
+        "market_total_mae": 14.382247459653318,
+        "market_total_rmse": 18.12206651241009
+      },
+      "missing_market": {
+        "n": 28,
+        "possessions_per_48": {
+          "n": 28,
+          "rmse": 3.7833182480689085,
+          "mae": 3.0501222367218075,
+          "bias": 0.4712221913577694
+        },
+        "margin": {
+          "n": 28,
+          "rmse": 14.849527505958793,
+          "mae": 12.669665173288237,
+          "bias": -1.8771740466158708
+        }
+      },
+      "invalid_rotation_rate": 0.0,
+      "selection": {
+        "selected": "ridge_team",
+        "market_weight": 1.0,
+        "validation_pace_rmse": {
+          "league_prior": 4.618226864660402,
+          "ols": 3.835964935003149,
+          "ridge_team": 3.8276796144561036
+        }
+      }
+    },
+    "rotation": {
+      "n": 1701,
+      "possessions_per_48": {
+        "n": 1701,
+        "rmse": 4.067608239991271,
+        "mae": 3.225442548702736,
+        "bias": 0.08688136498331465
+      },
+      "full_game_possessions": {
+        "home": {
+          "n": 1701,
+          "rmse": 4.696064094644143,
+          "mae": 3.597058991765561
+        },
+        "away": {
+          "n": 1701,
+          "rmse": 4.681319745229736,
+          "mae": 3.5963370348579025
+        }
+      },
+      "points": {
+        "home_pts": {
+          "n": 1701,
+          "rmse": 11.437056638176932,
+          "mae": 9.138326849518977,
+          "bias": -0.028776060214425407
+        },
+        "away_pts": {
+          "n": 1701,
+          "rmse": 11.353409912811184,
+          "mae": 9.022947879935396,
+          "bias": -0.47537929592613865
+        },
+        "total": {
+          "n": 1701,
+          "rmse": 18.097565823465853,
+          "mae": 14.392374274971285,
+          "bias": -0.5041553561405685
+        },
+        "margin": {
+          "n": 1701,
+          "rmse": 13.85245370509112,
+          "mae": 10.82222827300083,
+          "bias": 0.44660323571170363
+        }
+      },
+      "intervals": {
+        "pace": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7707231040564374,
+            "width": 9.715615086339572
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8800705467372134,
+            "width": 12.537094662741094
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9335684891240447,
+            "width": 15.020411467459574
+          }
+        },
+        "home_poss": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7795414462081128,
+            "width": 10.860598292734018
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8953556731334509,
+            "width": 14.83392110870548
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.951793062904174,
+            "width": 19.078910758954365
+          }
+        },
+        "away_poss": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7854203409758965,
+            "width": 10.860154709596546
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8947677836566725,
+            "width": 14.833552245120499
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.951793062904174,
+            "width": 19.080825896892787
+          }
+        },
+        "home_pts": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7848324514991182,
+            "width": 28.8781055646068
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8994708994708994,
+            "width": 37.148600269419624
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9500293944738389,
+            "width": 44.4033278598608
+          }
+        },
+        "away_pts": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7977660199882423,
+            "width": 28.881468905833582
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8947677836566725,
+            "width": 37.170098320897715
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9500293944738389,
+            "width": 44.412976762702925
+          }
+        },
+        "total": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.7983539094650206,
+            "width": 45.732208073912915
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8935920047031158,
+            "width": 58.83060979152382
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9453262786596119,
+            "width": 70.27339998707585
+          }
+        },
+        "margin": {
+          "80": {
+            "n": 1701,
+            "coverage": 0.8077601410934744,
+            "width": 35.288491560910195
+          },
+          "90": {
+            "n": 1701,
+            "coverage": 0.8988830099941211,
+            "width": 45.397808201383256
+          },
+          "95": {
+            "n": 1701,
+            "coverage": 0.9494415049970606,
+            "width": 54.26162510398018
+          }
+        }
+      },
+      "overtime": {
+        "n": 1701,
+        "brier": 0.043731685643738985,
+        "predicted_frequency": 0.05262433862433863,
+        "observed_frequency": 0.04585537918871252
+      },
+      "possession_gap": {
+        "observed_mean": 0.012933568489124045,
+        "observed_std": 1.0640055709822527,
+        "simulated_draw_mean": -0.035861258083480306,
+        "simulated_draw_std": 1.0543190929268598,
+        "mean_forecast_bias": -0.025651263962374934
+      },
+      "league_pace_baseline": {
+        "n": 1701,
+        "rmse": 4.922353241405431,
+        "mae": 3.9354675493551126,
+        "bias": -0.045694458628506095
+      },
+      "market": {
+        "n": 1673,
+        "model_margin_mae": 10.789935596569487,
+        "model_margin_rmse": 13.84954077442403,
+        "market_margin_mae": 10.795277943813508,
+        "market_margin_rmse": 13.854848036207242,
+        "model_home_pts_mae": 9.128984706924427,
+        "model_home_pts_rmse": 11.44411703988178,
+        "market_home_pts_mae": 9.127913927077106,
+        "market_home_pts_rmse": 11.448091611884246,
+        "model_away_pts_mae": 9.022908967832818,
+        "model_away_pts_rmse": 11.36055253940372,
+        "market_away_pts_mae": 9.027196652719665,
+        "market_away_pts_rmse": 11.363285301320698,
+        "model_total_mae": 14.383398967283982,
+        "model_total_rmse": 18.11767529192681,
+        "market_total_mae": 14.382247459653318,
+        "market_total_rmse": 18.12206651241009
+      },
+      "missing_market": {
+        "n": 28,
+        "possessions_per_48": {
+          "n": 28,
+          "rmse": 3.783382035657445,
+          "mae": 3.004132689603558,
+          "bias": 0.3908915373334193
+        },
+        "margin": {
+          "n": 28,
+          "rmse": 14.02540336353702,
+          "mae": 12.751715689773743,
+          "bias": -2.7567852639555723
+        }
+      },
+      "invalid_rotation_rate": 0.0,
+      "selection": {
+        "selected": "ridge_team",
+        "market_weight": 1.0,
+        "validation_pace_rmse": {
+          "league_prior": 4.618226864660402,
+          "ols": 3.821697287768486,
+          "ridge_team": 3.8208396851999424
+        }
+      }
+    }
+  },
+  "comparison": {
+    "lines": [
+      "possessions per 48 RMSE baseline 4.072, rotation 4.068, change -0.005",
+      "home margin RMSE baseline 13.867, rotation 13.852, change -0.014",
+      "game total RMSE baseline 18.104, rotation 18.098, change -0.006"
+    ],
+    "verdict": "Held-out results do not show a clear accuracy gain from rotation features."
+  }
+}

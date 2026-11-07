@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from box_score import (
+from game_boxscore import (
     Prop,
     assemble_box_score,
     format_outcome,
@@ -14,7 +14,7 @@ from box_score import (
 )
 from game_enviroment import FEATURES
 from game_state import PRE
-from rotations import RotationSimulator
+from game_rotations import RotationSimulator
 
 
 def _environment_model(*, p_ot: float = 0.0) -> dict:
@@ -210,7 +210,7 @@ def test_one_outcome_is_a_single_simulation_row():
 
 
 def test_joint_probability_uses_the_same_simulation_index():
-    from box_score import BoxScoreSet, TeamBoxScore
+    from game_boxscore import BoxScoreSet, TeamBoxScore
 
     points = np.array([[30, 10], [30, 10], [10, 30], [10, 30]], dtype=float)
     box = BoxScoreSet(
@@ -256,7 +256,7 @@ def test_joint_probability_uses_the_same_simulation_index():
 
 
 def test_over_line_is_strict_for_half_point_props():
-    from box_score import BoxScoreSet, TeamBoxScore
+    from game_boxscore import BoxScoreSet, TeamBoxScore
 
     box = BoxScoreSet(
         teams={

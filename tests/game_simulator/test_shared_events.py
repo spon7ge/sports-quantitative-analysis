@@ -137,14 +137,21 @@ def test_no_eligible_assister_leaves_makes_unassisted():
     assert np.all(pairs == 0)
 
 
+_NEXT_PLAYER = 0
+
+
 def _team(n_sims, n_players, *, fga, fgm, tov, **overrides):
+    global _NEXT_PLAYER
+
     def _matrix(value):
         if np.ndim(value) == 0:
             return np.full((n_sims, n_players), value, dtype=np.int64)
         return np.asarray(value, dtype=np.int64)
 
+    ids = np.array([f"P{_NEXT_PLAYER + i}" for i in range(n_players)])
+    _NEXT_PLAYER += n_players
     team = {
-        "player_ids": np.array([f"P{i}" for i in range(n_players)]),
+        "player_ids": ids,
         "fga": _matrix(fga),
         "fgm": _matrix(fgm),
         "tov": _matrix(tov),

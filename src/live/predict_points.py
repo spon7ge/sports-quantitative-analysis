@@ -196,26 +196,22 @@ def pinnacle_games_on(date, directory=None):
 
 
 _OUT_BADGES = {"out", "ofs"}
+_PROBABLE_BADGES = {"prob", "probable"}
 
 
-def _badge_is_out(badge) -> bool:
+def _badge_token(badge) -> str:
     text = str(badge or "").strip().casefold()
     if not text:
-        return False
-    return text.split()[0] in _OUT_BADGES
+        return ""
+    return text.split()[0]
 
 
-def unavailable_on(date, directory=None) -> dict[str, list[str]]:
-    """Players Rotowire lists as out on ``date``.
-
-    The newest file wins for a team. A team that has already tipped drops
-    off the later page, so an earlier file that day still supplies his
-    status. Questionable and doubtful players stay off this list.
-    """
+def _names_with_badge(date, directory, tokens) -> dict[str, list[str]]:
+    """Newest file that day wins for a team. A tipped team keeps the earlier list."""
     folder = _LINEUP_DIR if directory is None else Path(directory)
     day = str(date)[:10]
     files = sorted(folder.glob(f"rotowire_nba_{day}_*.json"))
-    unavailable: dict[str, list[str]] = {}
+    found: dict[str, list[str]] = {}
     for path in reversed(files):
         payload = json.loads(path.read_text())
         for game in payload.get("games") or []:
@@ -225,15 +221,30 @@ def unavailable_on(date, directory=None) -> dict[str, list[str]]:
                 if not team:
                     continue
                 abbr = normalize_team_abbreviation(team)
-                if abbr in unavailable:
+                if abbr in found:
                     continue
                 names = []
                 for player in block.get("may_not_play") or []:
                     name = str(player.get("name") or "").strip()
-                    if name and _badge_is_out(player.get("badge")):
+                    if name and _badge_token(player.get("badge")) in tokens:
                         names.append(name)
-                unavailable[abbr] = names
-    return unavailable
+                found[abbr] = names
+    return found
+
+
+def unavailable_on(date, directory=None) -> dict[str, list[str]]:
+    """Players Rotowire lists as out on ``date``.
+
+    The newest file wins for a team. A team that has already tipped drops
+    off the later page, so an earlier file that day still supplies his
+    status. Questionable and doubtful players stay off this list.
+    """
+    return _names_with_badge(date, directory, _OUT_BADGES)
+
+
+def probable_on(date, directory=None) -> dict[str, list[str]]:
+    """Players Rotowire lists as probable. They stay available and play."""
+    return _names_with_badge(date, directory, _PROBABLE_BADGES)
 
 
 def lineups_on(date, directory=None):

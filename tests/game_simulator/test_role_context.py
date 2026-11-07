@@ -229,6 +229,23 @@ def test_training_script_is_this_game_from_the_players_side():
     assert close["team_final_margin"] == 2.0
 
 
+def test_box_score_minutes_snap_to_the_overtime_count():
+    """A fraction of a minute of box-score drift still names a 48-minute game."""
+    home = _appearance(min=242.0, team_pts=110.0, opp_pts=100.0)
+    away = _appearance(
+        team_id=20,
+        team_abbreviation="AWY",
+        matchup="AWY @ HOM",
+        player_id=2,
+        min=242.0,
+        team_pts=100.0,
+        opp_pts=110.0,
+    )
+    history = build_role_history(_logs([home, away]))
+    assert history["n_ot"].eq(0).all()
+    assert history["game_minutes"].eq(48.0).all()
+
+
 def test_rest_uses_the_previous_game_in_training_and_the_slate_date_live():
     logs = _logs(
         [

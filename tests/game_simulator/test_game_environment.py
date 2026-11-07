@@ -307,6 +307,7 @@ def test_live_slate_marks_rotowire_out_players_unavailable(tmp_path):
                             "may_not_play": [
                                 {"name": "Anthony Davis", "badge": "Out"},
                                 {"name": "Austin Reaves", "badge": "Ques"},
+                                {"name": "Rui Hachimura", "badge": "Probable"},
                             ],
                         },
                         "away": {
@@ -326,6 +327,7 @@ def test_live_slate_marks_rotowire_out_players_unavailable(tmp_path):
             {"player_name": "LeBron James", "player_id": 2544, "team_abbreviation": "LAL"},
             {"player_name": "Anthony Davis", "player_id": 203076, "team_abbreviation": "LAL"},
             {"player_name": "Austin Reaves", "player_id": 1630559, "team_abbreviation": "LAL"},
+            {"player_name": "Rui Hachimura", "player_id": 1629060, "team_abbreviation": "LAL"},
             {"player_name": "Jayson Tatum", "player_id": 1628369, "team_abbreviation": "BOS"},
             {
                 "player_name": "Kristaps Porzingis",
@@ -345,6 +347,8 @@ def test_live_slate_marks_rotowire_out_players_unavailable(tmp_path):
 
     assert slate["team_out"] == [203076]
     assert slate["opponent_out"] == [204001]
+    assert slate["team_probable"] == [1629060]
+    assert slate["opponent_probable"] == []
     assert slate["team_out_absent"] == []
     assert slate["opponent_out_absent"] == []
     assert slate["team_lineup"] == [2544]

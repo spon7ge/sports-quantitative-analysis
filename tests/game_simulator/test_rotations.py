@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from role_context import SCRIPT
-from rotations import (
+from game_rotations import (
     CONDITIONAL,
     RotationSimulator,
     allocate_rotation,
@@ -20,6 +20,8 @@ from rotations import (
     fit_rotation,
     invalid_segment_count,
     live_minutes,
+    scale_mu,
+    segments_from_minutes,
     training_minutes,
 )
 from sklearn.preprocessing import StandardScaler
@@ -207,6 +209,66 @@ def test_a_rotation_is_one_team():
             roster,
             environment,
             np.random.default_rng(0),
+        )
+
+
+def test_allocate_rotation_rejects_more_than_one_game():
+    roster = _roster(8)
+    environment = _environment([0.0, 0.0], [0, 0], [48.0, 48.0])
+    environment["game_id"] = ["g1", "g2"]
+
+    with pytest.raises(ValueError, match="single game"):
+        allocate_rotation(
+            RotationSimulator(fallback_mu=30.0, fallback_sd=1.0),
+            roster,
+            environment,
+            np.random.default_rng(0),
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "values"),
+    [
+        ("game_id", ["g1", "g2"]),
+        ("gameId", ["g1", "g2"]),
+        ("game_date", ["2024-01-01", "2024-01-02"]),
+    ],
+)
+def test_segments_from_minutes_rejects_more_than_one_game(column, values):
+    role = _segment_role()
+    environment = _environment([4.0, 4.0], [0, 0], [48.0, 48.0])
+    environment[column] = values
+
+    with pytest.raises(ValueError, match="single game"):
+        segments_from_minutes(role, environment, np.zeros((2, len(role))))
+
+
+def test_segments_from_minutes_accepts_repeated_rows_of_one_game():
+    role = _segment_role()
+    environment = _environment([4.0, -4.0], [0, 0], [48.0, 48.0])
+    environment["game_id"] = ["g1", "g1"]
+    environment["gameId"] = ["g1", "g1"]
+    environment["game_date"] = ["2024-01-01", "2024-01-01"]
+    minutes = np.tile(np.array([48.0] * 5 + [0.0] * 3), (2, 1))
+
+    schedules = segments_from_minutes(role, environment, minutes)
+
+    assert len(schedules) == 2
+    assert schedules[0][0]["players"] == _five(0)
+    covered = sum(segment["end_min"] - segment["start_min"] for segment in schedules[1])
+    assert abs(covered - 48.0) < 1e-6
+
+
+def test_the_direct_segment_builder_rejects_two_teams():
+    role = _segment_role()
+    role.loc[4:, "team_id"] = 2
+
+    with pytest.raises(ValueError, match="one team"):
+        build_rotation_segments(
+            role,
+            game_minutes=48.0,
+            n_ot=0,
+            team_margin=4.0,
         )
 
 
@@ -431,6 +493,53 @@ def test_high_recent_minutes_revert_toward_the_league():
 
     assert high < 36.0 - 3.0
     assert low > 8.0 + 3.0
+
+
+def test_residuals_are_added_before_the_final_allocation():
+    class _RawMinutes:
+        def predict(self, frame: pd.DataFrame) -> np.ndarray:
+            starter = frame["is_starter"].to_numpy(dtype=float) == 1.0
+            return np.where(starter, 36.0, 6.0)
+
+    roster = _roster(8)
+    # Bins are the pregame role, matching how the residual bank was built.
+    roster["min_mean_10"] = [32.0] * 5 + [4.0] * 3
+    for column in CONDITIONAL:
+        if column not in roster:
+            roster[column] = 0.0
+
+    simulator = RotationSimulator(
+        cond_model=_RawMinutes(),
+        residual_cond={
+            "groups": [
+                np.array([24.0]),
+                np.array([0.0]),
+                np.array([0.0]),
+                np.array([0.0]),
+                np.array([0.0]),
+            ]
+        },
+        fallback_sd=1.0,
+    )
+    minutes = allocate_rotation(
+        simulator,
+        roster,
+        _environment([0.0], [0], [48.0]),
+        np.random.default_rng(0),
+    )
+    raw = np.array([36.0] * 5 + [6.0] * 3)
+    noise = np.array([0.0] * 5 + [24.0] * 3)
+    expected = constrain(
+        scale_mu(np.maximum(raw + noise, 0.0), [240.0]),
+        np.ones(8),
+        [240.0],
+        [48.0],
+    )
+
+    assert minutes.shape == (1, 8)
+    assert np.allclose(minutes, expected)
+    assert minutes[0, :5] == pytest.approx(32.0)
+    assert minutes[0, 5:] == pytest.approx(80.0 / 3.0)
 
 
 def test_conditional_noise_is_tighter_than_the_pregame_residual():
@@ -766,8 +875,10 @@ def test_segment_minutes_are_not_rescaled(monkeypatch):
     def _rejected(*_args, **_kwargs):
         raise AssertionError("segment minutes must not be rescaled")
 
-    monkeypatch.setattr("rotations.scale_mu", _rejected)
-    monkeypatch.setattr("rotations.constrain", _rejected)
+    monkeypatch.setattr("game_rotations.simulator.scale_mu", _rejected)
+    monkeypatch.setattr("game_rotations.simulator.constrain", _rejected)
+    monkeypatch.setattr("game_rotations.segments.scale_mu", _rejected)
+    monkeypatch.setattr("game_rotations.segments.constrain", _rejected)
     role = _segment_role(10)
     schedule = _regulation(
         [

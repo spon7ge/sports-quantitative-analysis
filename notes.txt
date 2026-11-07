@@ -27,6 +27,7 @@ Document the hypothesis, methodology, baselines, uncertainty, failed experiments
 
 How to fetch data (run from the repo root on macOS or Windows):
 python -m src.pipeline.clean --league nba --season 2026-27 --fetch
+python -m src.pipeline.bronze.play_by_play --season 2026-27
 
 BR positions and rotowire game closing lines:
 python -m src.scrapers.basketball_reference_nba_positions --years 2027

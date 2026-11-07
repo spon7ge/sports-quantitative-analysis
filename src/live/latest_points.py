@@ -123,25 +123,30 @@ def _newest_snapshot(folder: Path) -> Path | None:
     return max(stamped, key=lambda item: item[0])[1]
 
 
-def _points_rows(payload: dict, kind: str) -> list[dict[str, object]]:
+def _points_rows(
+    payload: dict, kind: str, stats: frozenset[str] = _POINTS
+) -> list[dict[str, object]]:
     if kind == "projections":
-        return _projection_points(payload.get("projections") or [])
+        return _projection_points(payload.get("projections") or [], stats)
     if kind == "picks":
-        return _pick_points(payload.get("picks") or [])
+        return _pick_points(payload.get("picks") or [], stats)
     if kind == "games":
-        return _game_points(payload.get("games") or [])
+        return _game_points(payload.get("games") or [], stats)
     raise ValueError(f"unknown snapshot kind: {kind}")
 
 
-def _projection_points(rows: list[dict]) -> list[dict[str, object]]:
+def _projection_points(
+    rows: list[dict], stats: frozenset[str] = _POINTS
+) -> list[dict[str, object]]:
     kept: list[dict[str, object]] = []
     for row in rows:
         stat = str(row.get("stat_type") or "").strip().lower()
-        if stat not in _POINTS or row.get("odds_type") != "standard":
+        if stat not in stats or row.get("odds_type") != "standard":
             continue
         kept.append(
             {
                 "player": row.get("player"),
+                "stat": stat,
                 "line": float(row["line_score"]),
                 "side": None,
                 "american_price": None,
@@ -152,15 +157,18 @@ def _projection_points(rows: list[dict]) -> list[dict[str, object]]:
     return kept
 
 
-def _pick_points(rows: list[dict]) -> list[dict[str, object]]:
+def _pick_points(
+    rows: list[dict], stats: frozenset[str] = _POINTS
+) -> list[dict[str, object]]:
     kept: list[dict[str, object]] = []
     for row in rows:
         stat = str(row.get("stat_name") or "").strip().lower()
-        if stat not in _POINTS:
+        if stat not in stats:
             continue
         kept.append(
             {
                 "player": row.get("full_name"),
+                "stat": stat,
                 "line": float(row["stat_value"]),
                 "side": str(row.get("choice") or "").lower() or None,
                 "american_price": row.get("american_price"),
@@ -171,17 +179,20 @@ def _pick_points(rows: list[dict]) -> list[dict[str, object]]:
     return kept
 
 
-def _game_points(games: list[dict]) -> list[dict[str, object]]:
+def _game_points(
+    games: list[dict], stats: frozenset[str] = _POINTS
+) -> list[dict[str, object]]:
     kept: list[dict[str, object]] = []
     for game in games:
         event = game.get("name") or game.get("label")
         start = game.get("scheduled") or game.get("start_time")
         for prop in game.get("props") or []:
             stat = str(prop.get("stat") or "").strip().lower()
-            if stat not in _POINTS:
+            if stat not in stats:
                 continue
             base = {
                 "player": prop.get("player"),
+                "stat": stat,
                 "line": float(prop["line"]),
                 "event_name": event,
                 "start_time": start,

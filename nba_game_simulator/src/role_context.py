@@ -369,12 +369,14 @@ def _script(frame: pd.DataFrame) -> pd.DataFrame:
     grouped = frame.groupby(["game_id", "team_id"], as_index=False)
     team_minutes = grouped["minutes"].sum()
     totals = team_minutes.groupby("game_id", as_index=False)["minutes"].sum()
-    totals["game_minutes"] = totals["minutes"] / 10.0
-    totals["n_ot"] = np.clip(
-        np.round((totals["game_minutes"] - REG_MIN) / OT_MIN),
-        0,
-        None,
-    ).astype(int)
+    raw = totals["minutes"] / 10.0
+    n_ot = np.clip(np.round((raw - REG_MIN) / OT_MIN), 0, None).astype(int)
+    legal = REG_MIN + n_ot * OT_MIN
+    # A complete box score drifts by a fraction of a minute. Snap only that
+    # drift; a partial extract keeps the minutes it actually summed.
+    close = np.abs(raw - legal) <= 1.0
+    totals["game_minutes"] = np.where(close, legal, raw)
+    totals["n_ot"] = n_ot
     totals["went_ot"] = (totals["n_ot"] > 0).astype(float)
     return totals[["game_id", "game_minutes", "n_ot", "went_ot"]]
 
