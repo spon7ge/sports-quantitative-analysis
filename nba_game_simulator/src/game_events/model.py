@@ -20,6 +20,7 @@ from game_events.constants import (
     TEAM_EVENT_RATES,
     TEAM_WINDOW,
 )
+from game_events.strength import prior_minutes_map
 
 
 @dataclass(frozen=True)
@@ -46,9 +47,10 @@ class EventModel:
     p_steal_against: float
     p_block: float
     p_block_against: float
-    player_window: int = PLAYER_WINDOW
+    player_window: int | None = PLAYER_WINDOW
     team_window: int = TEAM_WINDOW
-    player_prior_minutes: float = PLAYER_PRIOR_MINUTES
+    # A number stands for every rate. A map is one strength per rate.
+    player_prior_minutes: float | dict[str, float] = PLAYER_PRIOR_MINUTES
     team_prior_scale: float = 1.0
     pool_dispersion: dict = field(default_factory=dict)
     share_concentration: dict = field(default_factory=dict)
@@ -66,9 +68,12 @@ class EventModel:
                 raise ValueError(f"{column} must be nonnegative and finite")
         for column in TEAM_EVENT_RATES:
             _as_probability(getattr(self, column), column)
-        _positive_int(self.player_window, "player_window")
+        if self.player_window is not None:
+            _positive_int(self.player_window, "player_window")
         _positive_int(self.team_window, "team_window")
-        _positive_float(self.player_prior_minutes, "player_prior_minutes")
+        object.__setattr__(
+            self, "player_prior_minutes", prior_minutes_map(self.player_prior_minutes)
+        )
         _positive_float(self.team_prior_scale, "team_prior_scale")
         for key, rho in self.pool_dispersion.items():
             if key not in POOL_DISPERSION_KEYS:

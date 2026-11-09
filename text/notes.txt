@@ -32,3 +32,42 @@ python -m src.pipeline.bronze.play_by_play --season 2026-27
 BR positions and rotowire game closing lines:
 python -m src.scrapers.basketball_reference_nba_positions --years 2027
 python -m src.scrapers.rotowire_nba_odds --seasons 2026
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+.venv/bin/python - <<'PY'
+import sys
+from pathlib import Path
+
+ROOT = Path(".").resolve()
+sys.path.insert(0, str(ROOT / "notebooks/nba/line_movement_analysis/src"))
+
+from line_movement.closing import write_closing_files, write_team_closing_files
+from src.scrapers.nba.nba_rotowire_lineup import write_lineup_closing_files
+
+PROPS = ROOT / "data" / "props"
+PROP_BOOKS = (
+    "prizepicks",
+    "underdog",
+    "fanduel",
+    "draftkings",
+    "novig",
+    "prophetx",
+    "pinnacle",
+)
+TEAM_BOOKS = ("fanduel", "draftkings", "novig", "prophetx", "pinnacle")
+FOLDERS = {**{book: book for book in PROP_BOOKS}, "underdog": "underdogs"}
+
+for book in PROP_BOOKS:
+    folder = PROPS / FOLDERS[book] / "nba"
+    written = write_closing_files(folder, folder / "closing", book=book)
+    print(book, "props", *[p.name for p in written if "2026-11-08" in p.name])
+
+for book in TEAM_BOOKS:
+    folder = PROPS / book / "nba"
+    written = write_team_closing_files(folder, folder / "team_closing_lines", book=book)
+    print(book, "teams", *[p.name for p in written if "2026-11-08" in p.name])
+
+lineups = PROPS / "rotowire_nba_lineup"
+written = write_lineup_closing_files(lineups, lineups / "closing")
+print("rotowire", *[p.name for p in written if "2026-11-08" in p.name])
+PY

@@ -5,6 +5,7 @@ data/mlb/
 data/props/
 data/raw/
 data/backtest/singleBets.csv
+data/backtest/slate_cache/
 data/odds/*.json
 data/historical/nba_historical_odds.parquet
 data/historical/nba_props.parquet

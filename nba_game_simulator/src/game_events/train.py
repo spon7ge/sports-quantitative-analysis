@@ -12,7 +12,6 @@ from game_events.constants import (
     _MAX_POOL_RHO,
     _MIN_DISPERSION_GROUPS,
     _MIN_TUNING_DATES,
-    _PLAYER_GRID,
     _PLAYER_SOURCES,
     _RATE_WEIGHT_STAT,
     _TEAM_GRID,
@@ -20,6 +19,7 @@ from game_events.constants import (
     PLAYER_EVENT_RATES,
     PLAYER_PRIOR_MINUTES,
     PLAYER_WINDOW,
+    PLAYER_WINDOW_GRID,
     POOL_DISPERSION_KEYS,
     TEAM_EVENT_RATES,
     TEAM_WINDOW,
@@ -29,11 +29,13 @@ from game_events.logs import _prepare_event_logs
 from game_events.model import EventModel
 from game_events.rates import (
     _player_counts,
+    _player_rate_components,
     _player_rates,
     _targets,
     _team_counts,
     _team_rates,
 )
+from game_events.strength import predictive_nll, tune_strength
 
 
 def fit_events(
@@ -44,11 +46,12 @@ def fit_events(
 ) -> EventModel:
     """Fit league rates, rate settings, and dispersion from official logs.
 
-    League rates are summed events over summed exposure. With ``tune``, the
-    window lengths and prior strengths are chosen by log likelihood on the
-    final ``validation_fraction`` of dates; every prediction there uses only
-    earlier games. Dispersion is fitted on residuals around those same
-    prior-only rates after a burn-in.
+    League rates are summed events over summed exposure. With ``tune``, each
+    player rate's shrinkage and the shared player window are chosen by
+    one-step-ahead predictive loss on dates before the final
+    ``validation_fraction``. Team windows still use that final slice. Pool
+    dispersion and player-share concentration are fit afterward, on the
+    games after a short burn-in, using the chosen strengths.
     """
     if not 0.0 < validation_fraction < 1.0:
         raise ValueError("validation_fraction must be in (0, 1)")
@@ -100,17 +103,8 @@ def fit_events(
 def _tune_settings(
     played: pd.DataFrame, teams: pd.DataFrame, validation_start: pd.Timestamp
 ) -> tuple[dict, dict]:
-    """Grid search scored on validation dates with prior-only rates."""
-    player_targets = _targets(played, "player_id")
-    player_valid = (played["game_date"] >= validation_start).to_numpy()
-    player_scores = {}
-    for window in _PLAYER_GRID[0]:
-        for prior in _PLAYER_GRID[1]:
-            rates = _player_rates(played, player_targets, window, prior)
-            player_scores[(window, prior)] = _player_log_likelihood(
-                played, rates, player_valid
-            )
-
+    """Player strengths on training dates; team grid on the validation slice."""
+    player = _tune_player_strengths(played, validation_start)
     team_targets = _targets(teams, "team_id")
     team_valid = (teams["game_date"] >= validation_start).to_numpy()
     team_scores = {}
@@ -121,33 +115,69 @@ def _tune_settings(
                 teams, rates, team_valid
             )
 
-    best_player = max(player_scores, key=player_scores.get)
     best_team = max(team_scores, key=team_scores.get)
     settings = {
-        "player_window": int(best_player[0]),
-        "player_prior_minutes": float(best_player[1]),
+        "player_window": player["player_window"],
+        "player_prior_minutes": player["player_prior_minutes"],
         "team_window": int(best_team[0]),
         "team_prior_scale": float(best_team[1]),
     }
     report = {
-        "player_log_likelihood": {f"{w}/{k}": v for (w, k), v in player_scores.items()},
+        "player_predictive_nll": player["predictive_nll"],
         "team_log_likelihood": {f"{w}/{k}": v for (w, k), v in team_scores.items()},
     }
     return settings, report
 
 
-def _player_log_likelihood(
-    played: pd.DataFrame, rates: pd.DataFrame, valid: np.ndarray
-) -> float:
-    total = 0.0
-    for rate in PLAYER_EVENT_RATES:
-        exposure = played[f"{rate}_d"].to_numpy()
-        events = played[f"{rate}_n"].to_numpy()
-        mean = rates[rate].to_numpy() * exposure
-        use = valid & (exposure > 0) & np.isfinite(mean)
-        mean = np.maximum(mean[use], 1e-12)
-        total += float(np.sum(events[use] * np.log(mean) - mean))
-    return total
+def _tune_player_strengths(played: pd.DataFrame, validation_start) -> dict:
+    """One window, and one strength per rate, from pre-validation games."""
+    best_total = np.inf
+    best_window: int | None = PLAYER_WINDOW
+    best_strength = {rate: float(PLAYER_PRIOR_MINUTES) for rate in PLAYER_EVENT_RATES}
+    scores: dict[str, float] = {}
+    train = (played["game_date"] < validation_start).to_numpy()
+    targets = _targets(played, "player_id")
+    for window in PLAYER_WINDOW_GRID:
+        components = _player_rate_components(played, targets, window)
+        strength: dict[str, float] = {}
+        total = 0.0
+        for rate in PLAYER_EVENT_RATES:
+            n = components[f"{rate}_n"].to_numpy(dtype=float)[train]
+            d = components[f"{rate}_d"].to_numpy(dtype=float)[train]
+            t = components[f"{rate}_t"].to_numpy(dtype=float)[train]
+            x_f = played[f"{rate}_n"].to_numpy(dtype=float)[train]
+            e_f = played[f"{rate}_d"].to_numpy(dtype=float)[train]
+            k = tune_strength(n, d, t, x_f, e_f)
+            strength[rate] = k
+            use = _predictive_rows(n, d, t, x_f, e_f)
+            if np.any(use):
+                total += predictive_nll(
+                    np.log(k), n[use], d[use], t[use], x_f[use], e_f[use]
+                )
+        label = "all" if window is None else str(window)
+        scores[label] = float(total)
+        if total < best_total:
+            best_total = float(total)
+            best_window = window
+            best_strength = strength
+    return {
+        "player_window": best_window,
+        "player_prior_minutes": best_strength,
+        "predictive_nll": scores,
+    }
+
+
+def _predictive_rows(n, d, t, x_f, e_f) -> np.ndarray:
+    return (
+        np.isfinite(n)
+        & np.isfinite(d)
+        & np.isfinite(t)
+        & np.isfinite(x_f)
+        & np.isfinite(e_f)
+        & (t >= 0.0)
+        & (e_f > 0.0)
+        & ((n > 0.0) | (t > 0.0))
+    )
 
 
 def _team_log_likelihood(

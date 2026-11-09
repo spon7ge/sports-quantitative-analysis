@@ -12,6 +12,7 @@ from src.scrapers.nba.nba_rotowire_lineup import (
     output_directory,
     run,
     snapshot_filename,
+    write_lineup_closing_files,
     write_snapshot,
 )
 
@@ -326,3 +327,84 @@ def test_run_writes_nothing_when_the_fetch_fails(tmp_path, capsys) -> None:
     err = capsys.readouterr().err
     assert "rotowire 503" in err
     assert "Traceback" in err
+
+
+def test_opening_lineup_is_the_first_posting_and_closing_is_confirmed(tmp_path) -> None:
+    folder = tmp_path / "in"
+    folder.mkdir()
+    _lineup_snapshot(
+        folder / "rotowire_nba_2026-10-26_063000.json",
+        "2026-10-26T06:30:00Z",
+        away=("Early", "projected"),
+        home=("HomeEarly", "projected"),
+    )
+    _lineup_snapshot(
+        folder / "rotowire_nba_2026-10-26_160000.json",
+        "2026-10-26T16:00:00Z",
+        away=("Open", "projected"),
+        home=("HomeOpen", "projected"),
+    )
+    _lineup_snapshot(
+        folder / "rotowire_nba_2026-10-26_230000.json",
+        "2026-10-26T23:00:00Z",
+        away=("Mid", "confirmed"),
+        home=("HomeOpen", "projected"),
+    )
+    _lineup_snapshot(
+        folder / "rotowire_nba_2026-10-27_010000.json",
+        "2026-10-27T01:00:00Z",
+        away=("Close", "confirmed"),
+        home=("HomeOpen", "projected"),
+    )
+    written = write_lineup_closing_files(folder, tmp_path / "out")
+    assert [path.name for path in written] == [
+        "rotowire_nba_lineup_closing_2026-10-26.json"
+    ]
+    game = json.loads(written[0].read_text())["games"][0]
+    assert [player["name"] for player in game["away_opening"]["lineup"]] == ["Open"]
+    assert game["away_opening"]["status"] == "projected"
+    assert game["away_opening"]["fetched_at"] == "2026-10-26T16:00:00Z"
+    assert [player["name"] for player in game["away_closing"]["lineup"]] == ["Close"]
+    assert game["away_closing"]["status"] == "confirmed"
+    assert game["away_closing"]["fetched_at"] == "2026-10-27T01:00:00Z"
+    assert [player["name"] for player in game["home_opening"]["lineup"]] == ["HomeOpen"]
+    assert game["home_closing"] is None
+
+
+def test_a_side_that_never_confirms_is_left_out(tmp_path) -> None:
+    folder = tmp_path / "in"
+    folder.mkdir()
+    _lineup_snapshot(
+        folder / "rotowire_nba_2026-10-26_160000.json",
+        "2026-10-26T16:00:00Z",
+        away=("Open", "projected"),
+        home=("Home", "projected"),
+    )
+    _lineup_snapshot(
+        folder / "rotowire_nba_2026-10-26_230000.json",
+        "2026-10-26T23:00:00Z",
+        away=("Later", "projected"),
+        home=("Home", "projected"),
+    )
+    assert write_lineup_closing_files(folder, tmp_path / "out") == []
+
+
+def _lineup_snapshot(path, fetched_at: str, *, away: tuple[str, str], home: tuple[str, str]) -> None:
+    def side(team: str, posted: tuple[str, str]) -> dict:
+        name, status = posted
+        return {
+            "team": team,
+            "status": status,
+            "lineup": [{"name": name, "position": "PG"}],
+            "may_not_play": [],
+        }
+
+    path.write_text(
+        json.dumps(
+            {
+                "source": "rotowire",
+                "fetched_at": fetched_at,
+                "games": [{"away": side("TOR", away), "home": side("MIN", home)}],
+            }
+        )
+    )

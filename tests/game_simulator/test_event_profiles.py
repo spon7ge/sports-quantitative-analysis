@@ -176,6 +176,306 @@ def test_live_rates_keep_the_latest_completed_game():
     assert np.isnan(live["p_block"])
 
 
+def test_player_rates_shrink_toward_the_same_position():
+    """A center with no minutes takes the center rate, not the league rate.
+
+    2025-26 centers blocked about 0.042 per minute and the league about
+    0.020. Power forwards were near the league rate, so they stay their
+    own position. A blank start_position does not erase a listed position.
+    """
+    prior = "2026-11-01"
+    upcoming = "2026-11-15"
+    quiet = {
+        "ast": 0.0,
+        "oreb": 0.0,
+        "dreb": 0.0,
+        "stl": 0.0,
+        "team_blk": 6.0,
+    }
+    logs = pd.DataFrame(
+        [
+            _row(
+                player_id=1,
+                game_id="g1",
+                game_date=prior,
+                min=30.0,
+                blk=6.0,
+                pos="C",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=2,
+                game_id="g1",
+                game_date=prior,
+                min=30.0,
+                blk=0.0,
+                pos="PG",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=3,
+                game_id="g1",
+                game_date=prior,
+                min=30.0,
+                blk=1.5,
+                pos="PF",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=9,
+                game_id="g1",
+                game_date=prior,
+                min=30.0,
+                blk=6.0,
+                pos="",
+                start_position="G",
+                **quiet,
+            ),
+            _row(
+                player_id=4,
+                game_id="g2",
+                game_date=upcoming,
+                min=0.0,
+                blk=0.0,
+                pos="C",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=5,
+                game_id="g2",
+                game_date=upcoming,
+                min=0.0,
+                blk=0.0,
+                pos="PG",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=6,
+                game_id="g2",
+                game_date=upcoming,
+                min=0.0,
+                blk=0.0,
+                pos="PF",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=7,
+                game_id="g2",
+                game_date=upcoming,
+                min=0.0,
+                blk=0.0,
+                pos="",
+                start_position="",
+                **quiet,
+            ),
+            _row(
+                player_id=10,
+                game_id="g2",
+                game_date=upcoming,
+                min=0.0,
+                blk=0.0,
+                pos="",
+                start_position="G",
+                **quiet,
+            ),
+            _row(
+                player_id=11,
+                game_id="g2",
+                game_date=upcoming,
+                min=0.0,
+                blk=0.0,
+                pos="",
+                start_position="C",
+                **quiet,
+            ),
+        ]
+    )
+    trained = training_events(logs)
+    upcoming_rows = trained.loc[trained["game_id"].eq("g2")].set_index("player_id")
+    # 6/30. The league pool is (6 + 0 + 1.5 + 6) / 120 = 0.1125.
+    assert upcoming_rows.loc["4", "blk_per_min"] == pytest.approx(0.2)
+    assert upcoming_rows.loc["5", "blk_per_min"] == pytest.approx(0.0)
+    assert upcoming_rows.loc["6", "blk_per_min"] == pytest.approx(1.5 / 30.0)
+    assert upcoming_rows.loc["7", "blk_per_min"] == pytest.approx(13.5 / 120.0)
+    # Start slot G pools point guards and the unlabeled guard.
+    assert upcoming_rows.loc["10", "blk_per_min"] == pytest.approx((0.0 + 6.0) / 60.0)
+    assert upcoming_rows.loc["11", "blk_per_min"] == pytest.approx(0.2)
+
+
+def test_current_season_outweighs_earlier_seasons():
+    """A 2026-27 slate weights that season above 2025-26 and 2024-25.
+
+    Per-minute weights are 1, 0.1, and 0.01. Equal weights would leave the
+    rookie at 12/60 = 0.2. Games after the slate date stay out.
+    """
+    quiet = {"oreb": 0.0, "dreb": 0.0, "stl": 0.0, "blk": 0.0, "pos": "PG"}
+    logs = pd.DataFrame(
+        [
+            _row(
+                player_id=1,
+                game_id="old",
+                game_date="2024-11-01",
+                min=20.0,
+                ast=0.0,
+                **quiet,
+            ),
+            _row(
+                player_id=1,
+                game_id="mid",
+                game_date="2025-11-01",
+                min=20.0,
+                ast=4.0,
+                **quiet,
+            ),
+            _row(
+                player_id=1,
+                game_id="now",
+                game_date="2026-11-01",
+                min=20.0,
+                ast=8.0,
+                **quiet,
+            ),
+            _row(
+                player_id=1,
+                game_id="later",
+                game_date="2026-12-01",
+                min=20.0,
+                ast=0.0,
+                **quiet,
+            ),
+            _row(
+                player_id=9,
+                game_id="slate",
+                game_date="2026-11-15",
+                min=0.0,
+                ast=0.0,
+                **quiet,
+            ),
+        ]
+    )
+    trained = training_events(logs)
+    rookie = trained.loc[trained["player_id"].eq("9")].iloc[0]
+    # 0*0.01 + 4*0.1 + 8*1 over 20*0.01 + 20*0.1 + 20*1.
+    assert rookie["ast_per_min"] == pytest.approx(8.4 / 22.2)
+    veteran = trained.loc[trained["game_id"].eq("now")].iloc[0]
+    # His own prior is 4 assists in 40 minutes. December is not in yet.
+    # League target is 0.4/2.2, shrunk with 60 prior minutes.
+    assert veteran["ast_per_min"] == pytest.approx(41.0 / 275.0)
+
+
+def test_team_rates_use_the_same_season_weights():
+    logs = pd.DataFrame(
+        [
+            _row(
+                game_id="old",
+                game_date="2024-11-01",
+                ast=0.0,
+                team_ast=0.0,
+                team_fgm=40.0,
+                team_fga=50.0,
+            ),
+            _row(
+                game_id="mid",
+                game_date="2025-11-01",
+                ast=0.0,
+                team_ast=20.0,
+                team_fgm=40.0,
+                team_fga=50.0,
+            ),
+            _row(game_id="now", game_date="2026-11-01"),
+        ]
+    )
+    trained = training_events(logs)
+    current = trained.loc[trained["game_id"].eq("now")].iloc[0]
+    # League assists/makes = (0*0.01 + 20*0.1) / (40*0.01 + 40*0.1) = 2/4.4.
+    # Team window is both prior games, 20/80, shrunk with 120 trials.
+    assert current["assisted_rate"] == pytest.approx(41.0 / 110.0)
+
+
+def test_a_center_prior_decays_older_center_seasons():
+    quiet = {"ast": 0.0, "oreb": 0.0, "dreb": 0.0, "stl": 0.0, "pos": "C"}
+    logs = pd.DataFrame(
+        [
+            _row(
+                player_id=1,
+                game_id="old",
+                game_date="2025-11-01",
+                min=30.0,
+                blk=0.0,
+                team_blk=6.0,
+                **quiet,
+            ),
+            _row(
+                player_id=1,
+                game_id="now",
+                game_date="2026-11-01",
+                min=30.0,
+                blk=6.0,
+                team_blk=6.0,
+                **quiet,
+            ),
+            _row(
+                player_id=9,
+                game_id="slate",
+                game_date="2026-11-15",
+                min=0.0,
+                blk=0.0,
+                team_blk=6.0,
+                **quiet,
+            ),
+        ]
+    )
+    trained = training_events(logs)
+    rookie = trained.loc[trained["player_id"].eq("9")].iloc[0]
+    # (0*0.1 + 6*1) / (30*0.1 + 30*1). Equal weights would be 6/60.
+    assert rookie["blk_per_min"] == pytest.approx(6.0 / 33.0)
+
+
+def test_live_slate_inherits_a_listed_position_from_earlier_games():
+    logs = pd.DataFrame(
+        [
+            _row(
+                player_id=1,
+                game_date="2026-11-01",
+                min=30.0,
+                blk=6.0,
+                ast=0.0,
+                oreb=0.0,
+                dreb=0.0,
+                stl=0.0,
+                team_blk=6.0,
+                pos="C",
+                start_position="",
+            ),
+            _row(
+                player_id=2,
+                game_date="2026-11-01",
+                min=30.0,
+                blk=0.0,
+                ast=0.0,
+                oreb=0.0,
+                dreb=0.0,
+                stl=0.0,
+                team_blk=6.0,
+                pos="PG",
+                start_position="",
+            ),
+        ]
+    )
+    slate = pd.DataFrame(
+        [{"player_id": 1, "game_date": "2026-11-15", "team_id": 10}]
+    )
+    live = live_events(logs, slate).iloc[0]
+    # Own 6/30 shrunk toward centers (6/30), not the 6/60 league rate.
+    assert live["blk_per_min"] == pytest.approx(0.2)
+
+
 def test_live_rates_stop_before_the_slate_date():
     future = _row(
         game_id="g3",

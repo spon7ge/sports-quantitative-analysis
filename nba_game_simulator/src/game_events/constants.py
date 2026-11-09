@@ -67,6 +67,11 @@ _EVENT_TEAM_COLUMNS = (
 PLAYER_WINDOW = 10
 TEAM_WINDOW = 20
 PLAYER_PRIOR_MINUTES = 60.0
+# Weight of a season k years before the target date. That date's own season
+# weighs 1. A full earlier season is about 600k minutes, so 0.1 leaves it
+# near 60k and the current season is the largest term once it passes that.
+# Equal weights left a three-week season under 2% of the total.
+LEAGUE_SEASON_DECAY = 0.1
 # Roughly three team-games of each rate's denominator. ``team_prior_scale``
 # multiplies all of them.
 _TEAM_PRIOR_TRIALS = {
@@ -79,7 +84,9 @@ _TEAM_PRIOR_TRIALS = {
     "p_block": 140.0,
     "p_block_against": 140.0,
 }
-_PLAYER_GRID = ((5, 10, 20), (30.0, 60.0, 120.0, 240.0))
+# None means every earlier game. The strength and the window trade off, so
+# they are chosen together.
+PLAYER_WINDOW_GRID = (20, 40, 82, None)
 _TEAM_GRID = ((10, 20, 40), (0.5, 1.0, 2.0))
 _MIN_TUNING_DATES = 8
 _MIN_DISPERSION_GROUPS = 50

@@ -12,7 +12,23 @@ from line_movement.closing import (
     closing_boards,
     standard_closing_points,
     write_closing_files,
+    write_team_closing_files,
 )
+
+
+def _started(player: str, price: int, start: datetime) -> ListedLine:
+    return ListedLine(
+        player=player,
+        stat_type="moneyline",
+        line_score=None,
+        odds_type=None,
+        updated_at=None,
+        league="NBA",
+        side="Los Angeles Lakers",
+        american_price=price,
+        label="Miami Heat vs Los Angeles Lakers",
+        starts_at=start,
+    )
 
 
 def _line(player: str, stat: str, line: float, odds: str = "standard") -> ListedLine:
@@ -160,6 +176,76 @@ def test_write_closing_files_emits_one_json_per_date(tmp_path: Path) -> None:
     assert payload["left_out"]["next_fetch_too_late"] == 0
 
 
+def test_opening_line_is_the_first_listing_on_the_pacific_date(tmp_path: Path) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    _write_snapshot(
+        source / "prizepicks_nba_2026-10-26_063000.json",
+        "2026-10-26T06:30:00Z",
+        [{"player": "Jalen Brunson", "stat_type": "Points", "line_score": 24.5,
+          "odds_type": "standard", "league": "NBA"}],
+    )
+    _write_snapshot(
+        source / "prizepicks_nba_2026-10-26_160000.json",
+        "2026-10-26T16:00:00Z",
+        [{"player": "Jalen Brunson", "stat_type": "Points", "line_score": 26.5,
+          "odds_type": "standard", "league": "NBA"}],
+    )
+    _write_snapshot(
+        source / "prizepicks_nba_2026-10-26_230000.json",
+        "2026-10-26T23:00:00Z",
+        [{"player": "Jalen Brunson", "stat_type": "Points", "line_score": 28.5,
+          "odds_type": "standard", "league": "NBA"}],
+    )
+    _write_snapshot(
+        source / "prizepicks_nba_2026-10-26_231500.json",
+        "2026-10-26T23:15:00Z",
+        [],
+    )
+    written = write_closing_files(source, tmp_path / "out")
+    player = json.loads(written[0].read_text())["players"][0]
+    assert player["opening_fetched_at"] == "2026-10-26T16:00:00Z"
+    assert player["opening_lines"][0]["line_score"] == 26.5
+    assert player["closing_fetched_at"] == "2026-10-26T23:00:00Z"
+    assert player["lines"][0]["line_score"] == 28.5
+
+
+def test_team_opening_is_the_first_full_game_board_that_day(tmp_path: Path) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    early = _team_game(american=-130)
+    first = _team_game(american=-150)
+    close = _team_game(american=-170)
+    _write_games(
+        source / "novig_nba_2026-10-26_063000_team.json",
+        "2026-10-26T06:30:00Z",
+        [early],
+    )
+    _write_games(
+        source / "novig_nba_2026-10-26_160000_team.json",
+        "2026-10-26T16:00:00Z",
+        [first],
+    )
+    _write_games(
+        source / "novig_nba_2026-10-26_230000_team.json",
+        "2026-10-26T23:00:00Z",
+        [close],
+    )
+    _write_games(
+        source / "novig_nba_2026-10-26_231500_team.json",
+        "2026-10-26T23:15:00Z",
+        [],
+    )
+    written = write_team_closing_files(source, tmp_path / "out", book="novig")
+    game = json.loads(written[0].read_text())["games"][0]
+    assert game["opening_fetched_at"] == "2026-10-26T16:00:00Z"
+    assert game["closing_fetched_at"] == "2026-10-26T23:00:00Z"
+    opened = next(row for row in game["opening_markets"] if row["side"] == "BOS")
+    closed = next(row for row in game["markets"] if row["side"] == "BOS")
+    assert opened["american_price"] == -150
+    assert closed["american_price"] == -170
+
+
 def _write_close(path: Path, day: str, players: list[dict]) -> None:
     path.write_text(
         json.dumps(
@@ -230,6 +316,48 @@ def test_standard_closing_points_rejects_two_standard_points_lines(tmp_path: Pat
     )
     with pytest.raises(ValueError, match="standard points"):
         standard_closing_points(tmp_path, "Julius Randle")
+
+
+@pytest.mark.parametrize(
+    ("book", "source_name"),
+    [("fanduel", "FanDuel"), ("draftkings", "DraftKings")],
+)
+def test_fanduel_and_draftkings_closing_keep_side_and_price(
+    tmp_path: Path,
+    book: str,
+    source_name: str,
+) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    picks = [
+        {
+            "full_name": "Jayson Tatum",
+            "stat_name": "points",
+            "stat_value": 25.5,
+            "choice": "over",
+            "american_price": -120,
+            "updated_at": "2026-10-27T23:00:00Z",
+        },
+        {
+            "full_name": "Jayson Tatum",
+            "stat_name": "points",
+            "stat_value": 25.5,
+            "choice": "under",
+            "american_price": -103,
+            "updated_at": "2026-10-27T23:00:00Z",
+        },
+    ]
+    _write_picks(source / f"{book}_nba_2026-10-27_161500.json", "2026-10-27T23:15:00Z", picks)
+    _write_picks(source / f"{book}_nba_2026-10-27_163000.json", "2026-10-27T23:30:00Z", [])
+    written = write_closing_files(source, tmp_path / "out", book=book)
+    payload = json.loads(written[0].read_text())
+    assert written[0].name == f"{book}_nba_closing_2026-10-27.json"
+    assert payload["source"] == source_name
+    lines = payload["players"][0]["lines"]
+    assert [(line["side"], line["line_score"], line["american_price"]) for line in lines] == [
+        ("over", 25.5, -120),
+        ("under", 25.5, -103),
+    ]
 
 
 def test_underdog_closing_keeps_side_and_price(tmp_path: Path) -> None:
@@ -381,10 +509,324 @@ def test_prophetx_closing_uses_the_games_snapshot(tmp_path: Path) -> None:
     assert json.loads(written[0].read_text())["source"] == "ProphetX"
 
 
+@pytest.mark.parametrize("book", ["prizepicks", "underdog"])
+def test_team_closing_rejects_books_without_a_team_board(book: str) -> None:
+    with pytest.raises(ValueError, match="no team snapshots"):
+        write_team_closing_files(Path("."), Path("."), book=book)
+
+
+@pytest.mark.parametrize(
+    ("book", "source_name"),
+    [("novig", "Novig"), ("prophetx", "ProphetX")],
+)
+def test_team_snapshot_closes_full_game_markets(
+    tmp_path: Path,
+    book: str,
+    source_name: str,
+) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    game = {
+        "event_id": "evt-1",
+        "name": "Nets @ Celtics",
+        "team_markets": {
+            "moneyline": [
+                {"name": "BOS", "american": -150, "line": None},
+                {"name": "BKN", "american": 130, "line": None},
+            ],
+            "spread": [
+                {"name": "BOS -4.5", "american": -110, "line": -4.5},
+                {"name": "BKN +4.5", "american": -110, "line": 4.5},
+            ],
+            "total": [
+                {"name": "Over 220.5", "american": -105, "line": 220.5},
+                {"name": "Under 220.5", "american": -115, "line": 220.5},
+            ],
+            "first_half_total": [
+                {"name": "over 110.5", "american": -102, "line": 110.5},
+            ],
+        },
+    }
+    _write_games(
+        source / f"{book}_nba_2026-10-27_160000_team.json",
+        "2026-10-27T23:00:00Z",
+        [game],
+    )
+    _write_games(
+        source / f"{book}_nba_2026-10-27_161500_team.json",
+        "2026-10-27T23:15:00Z",
+        [],
+    )
+    (source / f"{book}_nba_2026-10-27_160000_props.json").write_text("{not json")
+    written = write_team_closing_files(source, tmp_path / "out", book=book)
+    payload = json.loads(written[0].read_text())
+    assert written[0].name == f"{book}_nba_team_closing_2026-10-27.json"
+    assert payload["source"] == source_name
+    assert payload["games"][0]["game"] == "Nets @ Celtics"
+    assert payload["games"][0]["game_id"] == "evt-1"
+    assert [
+        (row["market"], row["side"], row["line"], row["american_price"])
+        for row in payload["games"][0]["markets"]
+    ] == [
+        ("moneyline", "BKN", None, 130),
+        ("moneyline", "BOS", None, -150),
+        ("spread", "BKN +4.5", 4.5, -110),
+        ("spread", "BOS -4.5", -4.5, -110),
+        ("total", "Over 220.5", 220.5, -105),
+        ("total", "Under 220.5", 220.5, -115),
+    ]
+
+
+def test_pinnacle_team_closing_keeps_the_full_game_main_line(tmp_path: Path) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    _write_games(
+        source / "pinnacle_nba_2026-10-27_160000_team.json",
+        "2026-10-27T23:00:00Z",
+        [
+            {
+                "matchup_id": 99,
+                "label": "Nets vs Celtics",
+                "team_markets": {
+                    "moneyline": [
+                        {
+                            "period": 0,
+                            "lines": [
+                                {"side": "home", "team": "Celtics", "american": -150},
+                                {"side": "away", "team": "Nets", "american": 130},
+                            ],
+                        },
+                        {
+                            "period": 1,
+                            "lines": [
+                                {"side": "home", "team": "Celtics", "american": -120},
+                                {"side": "away", "team": "Nets", "american": 100},
+                            ],
+                        },
+                    ],
+                    "spread": [
+                        {
+                            "period": 0,
+                            "lines": [
+                                {"side": "home", "team": "Celtics", "points": -4.5, "american": -110},
+                                {"side": "away", "team": "Nets", "points": 4.5, "american": -110},
+                            ],
+                        },
+                        {
+                            "period": 0,
+                            "is_alternate": True,
+                            "lines": [
+                                {"side": "home", "team": "Celtics", "points": -7.5, "american": 120},
+                                {"side": "away", "team": "Nets", "points": 7.5, "american": -140},
+                            ],
+                        },
+                    ],
+                    "total": [
+                        {
+                            "period": 0,
+                            "lines": [
+                                {"side": "over", "points": 220.5, "american": -105},
+                                {"side": "under", "points": 220.5, "american": -115},
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    _write_games(
+        source / "pinnacle_nba_2026-10-27_161500_team.json",
+        "2026-10-27T23:15:00Z",
+        [],
+    )
+    written = write_team_closing_files(source, tmp_path / "out", book="pinnacle")
+    markets = json.loads(written[0].read_text())["games"][0]["markets"]
+    assert [
+        (row["market"], row["side"], row["line"], row["american_price"])
+        for row in markets
+    ] == [
+        ("moneyline", "Celtics", None, -150),
+        ("moneyline", "Nets", None, 130),
+        ("spread", "Celtics", -4.5, -110),
+        ("spread", "Nets", 4.5, -110),
+        ("total", "over", 220.5, -105),
+        ("total", "under", 220.5, -115),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("book", "source_name"),
+    [("fanduel", "FanDuel"), ("draftkings", "DraftKings")],
+)
+def test_game_lines_close_when_the_event_drops(
+    tmp_path: Path,
+    book: str,
+    source_name: str,
+) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    lines = [
+        {
+            "market": "moneyline",
+            "event_name": "Nets @ Celtics",
+            "side": "Celtics",
+            "line": None,
+            "american": -150,
+        },
+        {
+            "market": "moneyline",
+            "event_name": "Nets @ Celtics",
+            "side": "Nets",
+            "line": None,
+            "american": 130,
+        },
+        {
+            "market": "spread",
+            "event_name": "Nets @ Celtics",
+            "side": "Celtics",
+            "line": -4.5,
+            "american": -110,
+        },
+        {
+            "market": "total",
+            "event_name": "Nets @ Celtics",
+            "side": "over",
+            "line": 220.5,
+            "american": -105,
+        },
+        {
+            "market": "total",
+            "event_name": "Nets @ Celtics",
+            "side": "under",
+            "line": 220.5,
+            "american": -115,
+        },
+    ]
+    _write_board(
+        source / f"{book}_nba_2026-10-27_160000.json",
+        "2026-10-27T23:00:00Z",
+        lines,
+    )
+    _write_board(
+        source / f"{book}_nba_2026-10-27_161500.json",
+        "2026-10-27T23:15:00Z",
+        [],
+    )
+    written = write_team_closing_files(source, tmp_path / "out", book=book)
+    payload = json.loads(written[0].read_text())
+    assert written[0].name == f"{book}_nba_team_closing_2026-10-27.json"
+    assert payload["source"] == source_name
+    assert payload["games"][0]["game_id"] == "Nets @ Celtics"
+    assert [row["market"] for row in payload["games"][0]["markets"]] == [
+        "moneyline",
+        "moneyline",
+        "spread",
+        "total",
+        "total",
+    ]
+
+
+def test_close_is_the_last_fetch_at_or_before_start_time() -> None:
+    start = datetime(2026, 11, 3, 3, 10, tzinfo=UTC)
+    early = _snap(
+        "2026-11-02T23:00:00+00:00",
+        [_started("1639326129", -120, start)],
+    )
+    close = _snap(
+        "2026-11-03T03:00:00+00:00",
+        [_started("1639326129", -124, start)],
+    )
+    after = _snap(
+        "2026-11-03T03:20:00+00:00",
+        [_started("1639326129", -200, start)],
+    )
+    boards = closing_boards([early, close, after])
+    rows = boards.by_date[date(2026, 11, 2)]
+    assert len(rows) == 1
+    assert rows[0].closing_fetched_at == datetime(2026, 11, 3, 3, 0, tzinfo=UTC)
+    assert rows[0].lines[0].american_price == -124
+    assert rows[0].opening_lines[0].american_price == -120
+
+
+def test_two_games_in_one_snapshot_close_separately() -> None:
+    tonight = datetime(2026, 11, 3, 3, 10, tzinfo=UTC)
+    later = datetime(2026, 11, 10, 3, 0, tzinfo=UTC)
+    listed = _snap(
+        "2026-11-03T02:00:00+00:00",
+        [
+            _started("Brunson", -110, tonight),
+            _started("Brunson", -130, later),
+        ],
+    )
+    boards = closing_boards([listed])
+    prices = sorted(row.lines[0].american_price for row in boards.by_date[date(2026, 11, 2)])
+    assert prices == [-130, -110]
+
+
+def test_a_fetch_after_start_time_is_not_a_close_by_itself() -> None:
+    start = datetime(2026, 11, 3, 3, 10, tzinfo=UTC)
+    after = _snap(
+        "2026-11-03T03:20:00+00:00",
+        [_started("1639326129", -200, start)],
+    )
+    boards = closing_boards([after])
+    assert boards.by_date[date(2026, 11, 2)] == ()
+    assert boards.left_out[date(2026, 11, 2)]["after_start"] == 1
+
+
+def test_a_game_still_on_the_next_team_board_is_not_closed(tmp_path: Path) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    game = {
+        "event_id": "evt-1",
+        "name": "Nets @ Celtics",
+        "team_markets": {
+            "moneyline": [{"name": "BOS", "american": -150, "line": None}],
+        },
+    }
+    _write_games(
+        source / "novig_nba_2026-10-27_160000_team.json",
+        "2026-10-27T23:00:00Z",
+        [game],
+    )
+    _write_games(
+        source / "novig_nba_2026-10-27_161500_team.json",
+        "2026-10-27T23:15:00Z",
+        [game],
+    )
+    assert write_team_closing_files(source, tmp_path / "out", book="novig") == []
+
+
+def _write_board(path: Path, fetched_at: str, game_lines: list[dict]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "source": path.name.split("_", 1)[0],
+                "fetched_at": fetched_at,
+                "picks": [{"full_name": "Jayson Tatum", "stat_name": "points"}],
+                "game_lines": game_lines,
+            }
+        )
+    )
+
+
 def _write_picks(path: Path, fetched_at: str, picks: list[dict]) -> None:
     path.write_text(
         json.dumps({"source": "Underdog", "fetched_at": fetched_at, "picks": picks})
     )
+
+
+def _team_game(american: int) -> dict:
+    return {
+        "event_id": "evt-1",
+        "name": "Nets @ Celtics",
+        "team_markets": {
+            "moneyline": [
+                {"name": "BOS", "american": american, "line": None},
+                {"name": "BKN", "american": 120, "line": None},
+            ],
+        },
+    }
 
 
 def _write_games(path: Path, fetched_at: str, games: list[dict]) -> None:
