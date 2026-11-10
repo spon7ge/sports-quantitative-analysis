@@ -120,6 +120,13 @@ _SUB = re.compile(r"SUB:\s*(.+?)\s+FOR\s+(.+)$", re.IGNORECASE)
 _TIP = re.compile(r"Tip to (.+)$", re.IGNORECASE)
 _FREE_THROW = re.compile(r"(\d+)\s+of\s+(\d+)", re.IGNORECASE)
 _REBOUND = re.compile(r"Off:(\d+)\s+Def:(\d+)")
+# The assist is the last parenthetical on a make: "(Name 1 AST)".
+_ASSIST = re.compile(r"\(([^()]+?)\s+\d+\s+ast\)", re.IGNORECASE)
+_BLOCK = re.compile(r"\bblock\s+\(\d+\s+blk\)", re.IGNORECASE)
+_STEAL = re.compile(r"\bsteal\s+\(\d+\s+stl\)", re.IGNORECASE)
+# A steal row is attached only to these labels. Out-of-bounds bad passes and
+# lost balls are dead-ball turnovers; the feed does not put a steal on them.
+LIVE_TURNOVERS = frozenset({"bad pass", "lost ball"})
 _ACTORS = {
     "made shot",
     "missed shot",
@@ -196,7 +203,11 @@ def possession_table(
     records: list[dict] = []
 
     for game_id, game in frame.groupby("gameId", sort=False):
-        records.extend(_parse_game(str(game_id), game, starter_rows))
+        parser = _parse_game(str(game_id), game, starter_rows)
+        records.extend(
+            _record(str(game_id), index, possession)
+            for index, possession in enumerate(parser.done, start=1)
+        )
 
     if not records:
         return pd.DataFrame(columns=list(POSSESSION_COLUMNS))
@@ -283,7 +294,7 @@ def _parse_game(
     game_id: str,
     game: pd.DataFrame,
     starters: pd.DataFrame | None,
-) -> list[dict]:
+) -> _Parser:
     rows = list(game.itertuples(index=False))
     teams = _teams(rows, starters, game_id)
     home = _home_team(rows, teams, game_id)
@@ -297,10 +308,7 @@ def _parse_game(
         parser.consume(row)
 
     parser.finish()
-    return [
-        _record(game_id, index, possession)
-        for index, possession in enumerate(parser.done, start=1)
-    ]
+    return parser
 
 
 def _teams(rows, starters, game_id: str) -> set[int]:
@@ -532,6 +540,11 @@ class _Parser:
         self.rebound_totals: dict[int, tuple[int, int]] = {}
         self.done: list[_Possession] = []
         self.current = None
+        self.open_miss: dict | None = None
+        self.expect_steal = False
+        self.shot_links: list[dict] = []
+        self.rebound_links: list[dict] = []
+        self.turnover_links: list[dict] = []
 
     def consume(self, row) -> None:
         self.current = row
@@ -541,7 +554,10 @@ class _Parser:
             self._adopt_score(row)
 
         if not kind:
+            self._credit_marker(row)
             return
+
+        self.expect_steal = False
 
         sub = _text(row.subType).lower()
         if kind == "substitution":
@@ -586,6 +602,7 @@ class _Parser:
         self._abandon_free_throw()
         self._break_unfinished_foul()
         # The rebound row is not always present. The next shot says who has the ball.
+        self._finish_miss("unresolved", None)
         self.await_rebound = False
 
         team = self._require_team(row)
@@ -595,6 +612,22 @@ class _Parser:
         zone = shot_zone(row.shotValue, row.shotDistance, row.xLegacy, row.yLegacy)
         assert self.possession is not None
         self.possession.shots.append((player, zone, made))
+        assisted, passer = self._assist_passer(row, team)
+        link = {
+            "game_id": self.game_id,
+            "shooter_id": player,
+            "zone": zone,
+            "made": made,
+            "assisted": assisted,
+            "passer_id": passer,
+            "blocked": False,
+            "blocker_id": None,
+            **self._credit_lineup(),
+        }
+        if made:
+            self.shot_links.append(link)
+        else:
+            self.open_miss = link
 
         if made:
             self._adopt_score(row)
@@ -745,9 +778,18 @@ class _Parser:
             player = _named_player(row)
             if player is not None:
                 self._on_court(self.possession.offense, player, "offensive rebounder")
+                self._finish_miss("oreb", player)
+            else:
+                # The club grabbed it. That rebound is not on any player's line.
+                self._finish_miss("team", None)
             self.possession.oreb += 1
             return
 
+        player = _named_player(row)
+        if player is None:
+            self._finish_miss("team", None)
+        else:
+            self._finish_miss("dreb", player)
         self._close(
             "miss",
             self._rebound_team(row),
@@ -820,6 +862,19 @@ class _Parser:
         assert self.possession is not None
         self.possession.turnover = True
         self.possession.tov_player = player
+        subtype = _text(row.subType).lower()
+        self._finish_miss("unresolved", None)
+        self.turnover_links.append(
+            {
+                "game_id": self.game_id,
+                "player_id": player,
+                "subtype": subtype,
+                "live_ball": subtype in LIVE_TURNOVERS,
+                "stealer_id": None,
+                **self._credit_lineup(),
+            }
+        )
+        self.expect_steal = True
         self._close(
             "turnover",
             self._other(team),
@@ -895,6 +950,7 @@ class _Parser:
         )
 
     def _close(self, terminal: str, nxt: int | None, clock: float, period: int) -> None:
+        self._finish_miss("unresolved", None)
         current = self.possession
         self.possession = None
         self.pending_make = False
@@ -936,9 +992,7 @@ class _Parser:
 
         inferred = self.period_lineups.get(period)
         if inferred:
-            self.lineups = {
-                team: set(players) for team, players in inferred.items()
-            }
+            self.lineups = {team: set(players) for team, players in inferred.items()}
 
         self.uncertain_period = None
         self.last_seen = {}
@@ -1132,6 +1186,68 @@ class _Parser:
             raise ValueError(f"{self.game_id} {role} has no player")
         return player
 
+    def _credit_lineup(self) -> dict:
+        current = self.possession
+        if current is None:
+            raise RuntimeError(f"{self.game_id} credit event with no possession")
+        offense = tuple(sorted(self.lineups[current.offense]))
+        defense = tuple(sorted(self.lineups[current.defense]))
+        if len(offense) != 5 or len(defense) != 5:
+            raise RuntimeError(
+                f"{self.game_id} credit lineup does not have five players"
+            )
+        linked = {
+            "offense_team_id": current.offense,
+            "defense_team_id": current.defense,
+        }
+        for index, player in enumerate(offense, start=1):
+            linked[f"off_{index}"] = player
+        for index, player in enumerate(defense, start=1):
+            linked[f"def_{index}"] = player
+        return linked
+
+    def _assist_passer(self, row, offense: int) -> tuple[bool, int | None]:
+        match = _ASSIST.search(_text(row.description))
+        if match is None:
+            return False, None
+        found = _resolve_name(match.group(1).strip(), self.aliases, offense)
+        if found is None:
+            return True, None
+        return True, found[1]
+
+    def _finish_miss(self, outcome: str, rebounder: int | None) -> None:
+        link = self.open_miss
+        if link is None:
+            return
+        self.open_miss = None
+        self.shot_links.append(link)
+        chance = {
+            "game_id": link["game_id"],
+            "shooter_id": link["shooter_id"],
+            "zone": link["zone"],
+            "outcome": outcome,
+            "rebounder_id": rebounder,
+            "offense_team_id": link["offense_team_id"],
+            "defense_team_id": link["defense_team_id"],
+        }
+        for index in range(1, 6):
+            chance[f"off_{index}"] = link[f"off_{index}"]
+            chance[f"def_{index}"] = link[f"def_{index}"]
+        self.rebound_links.append(chance)
+
+    def _credit_marker(self, row) -> None:
+        text = _text(row.description)
+        if _BLOCK.search(text):
+            if self.open_miss is not None:
+                # The block row shares the shot. Only a rim attempt is a
+                # block chance later; the link still records every block.
+                self.open_miss["blocked"] = True
+                self.open_miss["blocker_id"] = _named_player(row)
+            return
+        if _STEAL.search(text) and self.expect_steal and self.turnover_links:
+            self.turnover_links[-1]["stealer_id"] = _named_player(row)
+            self.expect_steal = False
+
 
 def _record(game_id: str, possession_id: int, possession: _Possession) -> dict:
     shots = possession.shots
@@ -1186,13 +1302,9 @@ def _record(game_id: str, possession_id: int, possession: _Possession) -> dict:
         row[f"def_{index}"] = player
 
     for zone in ZONES:
-        row[f"{zone}_fga"] = sum(
-            1 for name in zones if name == zone
-        )
+        row[f"{zone}_fga"] = sum(1 for name in zones if name == zone)
         row[f"{zone}_fgm"] = sum(
-            1
-            for name, made in zip(zones, makes, strict=True)
-            if name == zone and made
+            1 for name, made in zip(zones, makes, strict=True) if name == zone and made
         )
 
     return row

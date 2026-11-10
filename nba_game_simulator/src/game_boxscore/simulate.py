@@ -13,6 +13,7 @@ from game_boxscore.assemble import assemble_box_score
 from game_boxscore.checks import _player_id_tuple, _reject_shared_players
 from game_boxscore.constants import (
     _ENVIRONMENT_COLUMNS,
+    _LAYER4_EVENT_INPUTS,
     _LAYER4_STATS,
     _VIEW_PAIRS,
     LAYER_MODULES,
@@ -131,9 +132,7 @@ def simulate_box_scores(
         **layer4_kwargs,
     )
     shots = {
-        side: _stat_arrays(
-            _side_output(opportunities, side), _LAYER4_STATS, f"Layer 4 {side}"
-        )
+        side: _shots_for_events(_side_output(opportunities, side), f"Layer 4 {side}")
         for side in SIDES
     }
 
@@ -373,15 +372,38 @@ def _side_output(result: Any, side: str) -> Any:
     raise ValueError(f"Layer 4 output has no {side} entry")
 
 
-def _stat_arrays(output: Any, keys: tuple, label: str) -> dict[str, np.ndarray]:
+def _shot_source(output: Any, label: str) -> Mapping:
     if isinstance(output, Mapping) and "FGA" in output:
-        source = output
-    elif isinstance(output, Mapping) and isinstance(output.get("stats"), Mapping):
-        source = output["stats"]
-    elif isinstance(getattr(output, "stats", None), Mapping):
-        source = output.stats
-    else:
-        raise ValueError(f"{label} must map stat names to player arrays")
+        return output
+    if isinstance(output, Mapping) and isinstance(output.get("stats"), Mapping):
+        return output["stats"]
+    if isinstance(getattr(output, "stats", None), Mapping):
+        return output.stats
+    raise ValueError(f"{label} must map stat names to player arrays")
+
+
+def _shots_for_events(output: Any, label: str) -> dict[str, np.ndarray]:
+    """Counting stats plus the zone arrays Layer 5 consumes.
+
+    Assists and offensive rebounds are left for Layer 5 when the zone makes
+    and the misses by zone are present. Layer 4's copies of those two stats
+    are not forwarded.
+    """
+
+    source = _shot_source(output, label)
+    shots = _stat_arrays(output, _LAYER4_STATS, label)
+    for key in _LAYER4_EVENT_INPUTS:
+        if key in source:
+            shots[key] = np.asarray(source[key])
+    if "ZONE_FGM" in source:
+        shots.pop("AST", None)
+    if "MISS_BY_ZONE" in source:
+        shots.pop("OREB", None)
+    return shots
+
+
+def _stat_arrays(output: Any, keys: tuple, label: str) -> dict[str, np.ndarray]:
+    source = _shot_source(output, label)
     missing = [key for key in keys if key not in source]
     if missing:
         raise ValueError(f"{label} needs {missing}")

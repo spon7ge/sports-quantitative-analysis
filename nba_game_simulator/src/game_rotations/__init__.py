@@ -4,7 +4,9 @@ Use existing Layer 1 draws. To turn Layer 2 minutes into segments, supply
 target_minutes; this preserves those draws instead of sampling minutes again.
 
 segments_from_minutes packs those totals into a feasible five. The play-by-play
-templates arrange the same totals into a historical pattern.
+templates arrange the same totals into a historical pattern. The process
+module draws the minutes and the five together from foul, blowout, stint,
+and exit hazards, conditional on the margin path.
 """
 
 from __future__ import annotations
@@ -24,7 +26,14 @@ from game_rotations.pbp import (
     fit_pbp_rotation,
     learned_segments_from_minutes,
     reconstruct_rotation_segments,
+    rotation_ticks,
     script_exposure,
+)
+from game_rotations.process import (
+    expand_stints,
+    fit_rotation_process,
+    minutes_from_process,
+    simulate_rotations,
 )
 from game_rotations.segments import (
     build_rotation_segments,
@@ -46,10 +55,13 @@ __all__ = [
     "build_rotation_segments",
     "constrain",
     "draw_minutes",
+    "expand_stints",
     "fit_pbp_rotation",
     "fit_rotation",
+    "fit_rotation_process",
     "invalid_segment_count",
     "learned_segments_from_minutes",
+    "minutes_from_process",
     "live_minutes",
     "play_prior",
     "play_rates",
@@ -57,8 +69,10 @@ __all__ = [
     "script_rates",
     "shrink_play_rate",
     "reconstruct_rotation_segments",
+    "rotation_ticks",
     "scale_mu",
     "segments_from_minutes",
     "sim_gaussian",
+    "simulate_rotations",
     "training_minutes",
 ]

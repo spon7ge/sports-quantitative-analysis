@@ -47,7 +47,38 @@ def _quarters(players) -> list[dict]:
     ]
 
 
-def test_model_carries_assist_and_rebound_rates():
+def test_zone_shares_choose_the_shot_type():
+    players = [1, 2, 3, 4, 5]
+    profile = pd.DataFrame(
+        {
+            "player_id": players,
+            "fga_per_min": 0.5,
+            "p_3pa": 0.0,
+            "p_3p": 0.4,
+            "p_2p": 0.5,
+            "rim_share": [1.0, 0.0, 1.0, 1.0, 1.0],
+            "mid_share": 0.0,
+            "corner3_share": 0.0,
+            "atb3_share": [0.0, 1.0, 0.0, 0.0, 0.0],
+            "rim_fg_pct": 0.6,
+            "mid_fg_pct": 0.4,
+            "corner3_fg_pct": 0.3,
+            "atb3_fg_pct": 0.35,
+        }
+    )
+    drawn = allocate_opportunities(
+        _model(fga_per_poss=1.0, alpha=0.0),
+        profile,
+        np.full((1, 5), 48.0),
+        np.array([200.0]),
+        np.random.default_rng(1),
+        game_minutes=np.array([48.0]),
+    )
+
+    assert drawn["3PA"][0, 0] == 0
+    assert drawn["FGA"][0, 1] > 0
+    assert drawn["2PA"][0, 1] == 0
+    assert drawn["3PA"][0, 1] == drawn["FGA"][0, 1]
     model = _model()
 
     assert model.version == 3

@@ -6,6 +6,10 @@ MODEL_VERSION = 3
 
 _TOL = 1e-6
 
+# Share of turnovers that are live-ball when the profile has no shrunk rate.
+# Not an estimate from a sample. A profile column replaces it.
+LIVE_TOV_PRIOR = 0.5
+
 _MAX_POOL = 10000
 
 _DEFAULTS = {

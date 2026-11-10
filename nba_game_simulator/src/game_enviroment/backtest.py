@@ -25,6 +25,7 @@ from game_enviroment.rotation import (
     GTD_PROBABILITY_SOURCE,
     build_rotation_history,
 )
+from game_enviroment.pbp_script import apply_possession_counts, load_play_by_play
 from game_enviroment.script import (
     _draw,
     _expected_possessions,
@@ -33,6 +34,7 @@ from game_enviroment.script import (
     fit_scoring,
     fit_split,
 )
+from game_enviroment.train import _attach_script
 from game_enviroment.train import _spread_sign
 from lineup import LINEUP_GAME_FEATURES
 
@@ -113,7 +115,7 @@ def assign_splits(games, train_frac=0.6, val_frac=0.2):
     return out
 
 
-def fit_frozen_model(train, val, features):
+def fit_frozen_model(train, val, features, script=None):
     """Fit on train, choose the pace model and market weight on validation."""
     train = train.copy()
     val = val.copy()
@@ -154,6 +156,7 @@ def fit_frozen_model(train, val, features):
             "lambda": lam,
         },
     }
+    _attach_script(model, script, train.game_id, val.game_id)
     scoring = model["scoring"]
     home_poss, away_poss = _expected_possessions(model, val)
     weight_errors = {}
@@ -308,6 +311,9 @@ def run_backtest(args):
 
     logs, failed_files = _load_logs(args.data)
     games = build_game_table(logs, getattr(args, "include_playoffs", False))
+    script = load_play_by_play(getattr(args, "pbp_dir", None))
+    if script is not None:
+        games = apply_possession_counts(games, script["counts"])
     games, _end_state = build_features(
         games,
         args.halflife,
@@ -362,6 +368,7 @@ def run_backtest(args):
             frame.loc[frame["split"].eq("train")],
             frame.loc[frame["split"].eq("val")],
             columns,
+            script,
         )
         print(
             f"  selected {model['selection']['selected']}; "
@@ -411,6 +418,11 @@ def run_backtest(args):
         },
         "unreadable_logs": failed_files,
         "pbp": pbp_note,
+        "possession_target": (
+            "play-by-play counts"
+            if script is not None
+            else "box estimate on the player logs"
+        ),
         "end_of_sample_state_used_for_test": False,
         "models": {
             name: {
@@ -828,8 +840,9 @@ def _attach_pbp(predicted, pbp_dir):
         "final_score_agreement": float(score_ok[matched].mean()) if matched.any() else None,
         "overtime_count_agreement": float(ot_ok[matched].mean()) if matched.any() else None,
         "target": (
-            "Model scores use gamelog full-game points and team possessions. "
-            "Play-by-play checks the final score, the regulation score, and the overtime count."
+            "Model scores use full-game points. Possessions per 48 use "
+            "play-by-play counts when a game parsed, and the box estimate otherwise. "
+            "Play-by-play also checks the final score, the regulation score, and the overtime count."
         ),
     }
     return note, out

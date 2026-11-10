@@ -17,6 +17,10 @@ def main():
 
     from game_enviroment.features import build_features
     from game_enviroment.games import build_game_table, load_gamelogs
+    from game_enviroment.pbp_script import (
+        apply_possession_counts,
+        load_play_by_play,
+    )
     from game_enviroment.simulate import (
         load_model,
         print_sim_summary,
@@ -125,6 +129,9 @@ def main():
 
         logs = load_gamelogs(args.data)
         g = build_game_table(logs, args.include_playoffs)
+        script = load_play_by_play(args.pbp_dir)
+        if script is not None:
+            g = apply_possession_counts(g, script["counts"])
         lineups, lineup_state = build_lineup_features(
             logs,
             args.halflife,
@@ -142,7 +149,7 @@ def main():
             args.league_window,
             args.min_league_games,
         )
-        model = train(g, state, args)
+        model = train(g, state, args, script)
         model["state"]["lineup"] = attach_lineup_fill(
             lineup_state, g
         )

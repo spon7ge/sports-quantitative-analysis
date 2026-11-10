@@ -7,8 +7,8 @@ import pandas as pd
 from game_enviroment.constants import ENVIRONMENT_COLUMNS
 from game_enviroment.features import _finite, _line_feats, _team_snapshot
 from game_enviroment.games import season_of
-from game_enviroment.script import _draw
 from game_enviroment.rotation import lineup_overrides
+from game_enviroment.script import _draw, margin_paths
 from lineup import LINEUP_GAME_FEATURES, lineup_game_features
 
 
@@ -22,9 +22,7 @@ def load_model(path):
     with open(path) as file:
         model = json.load(file)
     if model.get("version") != 3:
-        raise ValueError(
-            "Retrain the model with this version of the script."
-        )
+        raise ValueError("Retrain the model with this version of the script.")
     return model
 
 
@@ -39,8 +37,15 @@ def _resolve_team(model, key):
 
 
 def simulate_game(
-    model, team, opponent, date, total=None, spread=None,
-    n=10000, seed=None, *,
+    model,
+    team,
+    opponent,
+    date,
+    total=None,
+    spread=None,
+    n=10000,
+    seed=None,
+    *,
     is_home=True,
     team_lineup=None,
     opponent_lineup=None,
@@ -69,9 +74,7 @@ def simulate_game(
     if total is not None and float(total) <= 0:
         raise ValueError("total must be positive")
     if model.get("version") != 3:
-        raise ValueError(
-            "Retrain the model with this version of the script."
-        )
+        raise ValueError("Retrain the model with this version of the script.")
 
     rng = np.random.default_rng(seed) if rng is None else rng
     st, cfg = model["state"], model["config"]
@@ -84,10 +87,7 @@ def simulate_game(
     if pd.isna(date):
         raise ValueError("date must be valid")
     season = season_of(date)
-    cutoff = max(
-        pd.Timestamp(t["last_date"])
-        for t in st["teams"].values()
-    )
+    cutoff = max(pd.Timestamp(t["last_date"]) for t in st["teams"].values())
     if date <= cutoff:
         raise ValueError(
             "Simulation date must be after the training cutoff; "
@@ -96,13 +96,17 @@ def simulate_game(
 
     ph, rh = _team_snapshot(
         st["teams"][str(hid)],
-        date, season,
-        cfg["season_carry"], cfg["prior_weight"],
+        date,
+        season,
+        cfg["season_carry"],
+        cfg["prior_weight"],
     )
     pa, ra = _team_snapshot(
         st["teams"][str(aid)],
-        date, season,
-        cfg["season_carry"], cfg["prior_weight"],
+        date,
+        season,
+        cfg["season_carry"],
+        cfg["prior_weight"],
     )
 
     if team_lineup is not None:
@@ -117,20 +121,11 @@ def simulate_game(
             home_lineup = opponent_lineup
 
     for lineup in (home_lineup, away_lineup):
-        if lineup is not None and (
-            len(lineup) != 5 or len(set(lineup)) != 5
-        ):
-            raise ValueError(
-                "A supplied lineup must have five distinct player IDs"
-            )
+        if lineup is not None and (len(lineup) != 5 or len(set(lineup)) != 5):
+            raise ValueError("A supplied lineup must have five distinct player IDs")
 
-    home_spread = (
-        None if spread is None
-        else float(spread) * (1 if is_home else -1)
-    )
-    row = _line_feats(
-        total, home_spread, st["league_pts"]
-    )
+    home_spread = None if spread is None else float(spread) * (1 if is_home else -1)
+    row = _line_feats(total, home_spread, st["league_pts"])
     row.update(
         home_id=hid,
         away_id=aid,
@@ -148,9 +143,7 @@ def simulate_game(
     if LINEUP_GAME_FEATURES:
         if "lineup" not in st:
             raise ValueError("Missing lineup state; retrain the model")
-        row.update(lineup_game_features(
-            st["lineup"], season, home_lineup, away_lineup
-        ))
+        row.update(lineup_game_features(st["lineup"], season, home_lineup, away_lineup))
         for name in LINEUP_GAME_FEATURES:
             if not _finite(row.get(name)):
                 row[name] = model["lineup_fill"].get(name, 0.0)
@@ -167,29 +160,26 @@ def simulate_game(
                     "rotation_features must be one mapping or one per draw"
                 )
             multi = True
-            frame = pd.DataFrame([
-                {**row, **lineup_overrides(item)}
-                for item in rotation_features
-            ])
+            frame = pd.DataFrame(
+                [{**row, **lineup_overrides(item)} for item in rotation_features]
+            )
     samples = _draw(model, frame, 1 if multi else int(n), rng)
     index = (0, slice(None)) if multi else (slice(None), 0)
-    own, other = (
-        ("home", "away") if is_home else ("away", "home")
-    )
-    out = pd.DataFrame({
-        "team_poss": samples[f"{own}_poss"][index],
-        "opp_poss": samples[f"{other}_poss"][index],
-        "pace": samples["pace"][index],
-        "team_pts": samples[f"{own}_pts"][index],
-        "opp_pts": samples[f"{other}_pts"][index],
-        "game_total": samples["game_total"][index],
-        "is_home": float(is_home),
-        "n_ot": samples["n_ot"][index],
-        "game_minutes": samples["game_minutes"][index],
-        "team_margin": (
-            samples["margin"][index] * (1 if is_home else -1)
-        ),
-    })[ENVIRONMENT_COLUMNS]
+    own, other = ("home", "away") if is_home else ("away", "home")
+    out = pd.DataFrame(
+        {
+            "team_poss": samples[f"{own}_poss"][index],
+            "opp_poss": samples[f"{other}_poss"][index],
+            "pace": samples["pace"][index],
+            "team_pts": samples[f"{own}_pts"][index],
+            "opp_pts": samples[f"{other}_pts"][index],
+            "game_total": samples["game_total"][index],
+            "is_home": float(is_home),
+            "n_ot": samples["n_ot"][index],
+            "game_minutes": samples["game_minutes"][index],
+            "team_margin": (samples["margin"][index] * (1 if is_home else -1)),
+        }
+    )[ENVIRONMENT_COLUMNS]
 
     out.attrs.update(
         team=st["teams"][str(hid if is_home else aid)]["abbr"],
@@ -199,6 +189,15 @@ def simulate_game(
     )
     if rotation_context is not None:
         out.attrs["rotation"] = rotation_context
+    sign = 1.0 if is_home else -1.0
+    final = np.asarray(samples["margin"][index], dtype=float) * sign
+    length = np.asarray(samples["game_minutes"][index], dtype=float)
+    if "h1_margin" in samples:
+        half = np.asarray(samples["h1_margin"][index], dtype=float) * sign
+        regulation = np.asarray(samples["regulation_margin"][index], dtype=float) * sign
+        out.attrs["margin_path"] = margin_paths(final, length, half, regulation)
+    else:
+        out.attrs["margin_path"] = margin_paths(final, length)
     return out
 
 
@@ -209,17 +208,17 @@ def print_sim_summary(sim, total, spread):
         if bool(sim.is_home.iloc[0])
         else f"{a['team']} at {a['opponent']}"
     )
-    print(
-        f"\n{location} | total {total} | team spread {spread}"
-    )
+    print(f"\n{location} | total {total} | team spread {spread}")
 
     columns = [
-        "pace", "team_poss", "team_pts",
-        "opp_pts", "game_total", "team_margin",
+        "pace",
+        "team_poss",
+        "team_pts",
+        "opp_pts",
+        "game_total",
+        "team_margin",
     ]
-    summary = sim[columns].quantile(
-        [0.05, 0.25, 0.5, 0.75, 0.95]
-    ).T
+    summary = sim[columns].quantile([0.05, 0.25, 0.5, 0.75, 0.95]).T
     summary.columns = ["p05", "p25", "p50", "p75", "p95"]
     summary.insert(0, "sd", sim[columns].std())
     summary.insert(0, "mean", sim[columns].mean())

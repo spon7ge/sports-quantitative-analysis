@@ -2,8 +2,10 @@
 
 Train from player parquet logs or load a saved model. Live spreads belong to
 the target team: negative means favored. --spread-convention describes logs.
-Overtime is a pregame approximation, not a tied-score possession simulation.
-Retrain existing models: this simplified version writes model version 3.
+With play-by-play, pace is the counted trips and overtime follows the
+simulated late margin and the final score. Without it, overtime stays a
+pregame spread approximation. Retrain existing models: this version writes
+model version 3.
 """
 from __future__ import annotations
 

@@ -10,6 +10,11 @@ from game_enviroment.pace import (
     fit_t,
     predict_dev,
 )
+from game_enviroment.pbp_script import (
+    choose_ot_blend,
+    fit_ot_path,
+    fit_pace_state,
+)
 from game_enviroment.script import (
     _col,
     _draw,
@@ -72,7 +77,7 @@ def _deploy_frame(df, holdout_season):
     return df.loc[~df.season_year.astype(str).eq(holdout)].copy()
 
 
-def train(g, state, args):
+def train(g, state, args, script=None):
     df = g.dropna(subset=["lg_poss"]).reset_index(drop=True)
     validation_season = getattr(args, "validation_season", None)
     holdout_season = getattr(args, "holdout_season", None)
@@ -162,6 +167,7 @@ def train(g, state, args):
         "split": fit_split(tr),
         "scoring": fit_scoring(tr),
     }
+    _attach_script(model, script, tr.game_id, va.game_id)
 
     scoring = model["scoring"]
     hp, ap = _expected_possessions(model, va)
@@ -238,9 +244,12 @@ def train(g, state, args):
             f"coverage {coverage:.1%}"
         )
 
-    probability = _ot_probability(
-        model["ot"], _col(te, "home_spread", np.nan)
-    )
+    if "ot_path" in model:
+        probability = (samples["n_ot"] > 0).mean(axis=0)
+    else:
+        probability = _ot_probability(
+            model["ot"], _col(te, "home_spread", np.nan)
+        )
     metrics["ot_brier"] = float(np.mean(
         (probability - te.n_ot.ge(1).to_numpy()) ** 2
     ))
@@ -286,10 +295,26 @@ def train(g, state, args):
             ),
         },
     )
+    if script is not None:
+        blend = model["ot_path"]["blend"]
+        _attach_script(model, script, deploy.game_id, None)
+        model["ot_path"]["blend"] = blend
 
     if args.plots:
         _plots(pace_resid, model["residual_t"])
     return model
+
+
+def _attach_script(model, script, fit_ids, blend_ids):
+    """Fit pace and overtime on fit_ids. Choose the blend on blend_ids."""
+
+    if script is None:
+        return
+    model["pace_state"] = fit_pace_state(script["exposure"], fit_ids)
+    ot_path = fit_ot_path(script["paths"], fit_ids)
+    if blend_ids is not None:
+        ot_path["blend"] = choose_ot_blend(ot_path, script["paths"], blend_ids)
+    model["ot_path"] = ot_path
 
 
 def _plots(

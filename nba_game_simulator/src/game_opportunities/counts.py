@@ -159,6 +159,119 @@ def allocate_and_shoot(
     }
 
 
+def apply_zone_shots(fga, zone_share, zone_make, rng):
+    """Split each player's attempts into rim, mid, corner, and above the break.
+
+    ``zone_share`` and ``zone_make`` are ``(players, 4)`` in that zone order.
+    Twos are rim plus mid. Threes are the two zones beyond the arc.
+    """
+
+    _rng(rng)
+    attempts = np.asarray(fga, dtype=np.int64)
+    if attempts.ndim != 2:
+        raise ValueError("fga must be (rows, players)")
+    share = np.asarray(zone_share, dtype=float)
+    make = np.asarray(zone_make, dtype=float)
+    rows, players = attempts.shape
+    if share.shape != (players, 4) or make.shape != (players, 4):
+        raise ValueError("zone rates must have shape (players, 4)")
+    if not np.isfinite(share).all() or (share < 0).any():
+        raise ValueError("zone shares must be finite and nonnegative")
+    if not np.isfinite(make).all() or (make < 0).any() or (make > 1).any():
+        raise ValueError("zone make rates must be probabilities")
+
+    zones = np.zeros((rows, players, 4), dtype=np.int64)
+    for player in range(players):
+        total = float(share[player].sum())
+        probs = share[player] / total if total > 0 else np.array([1.0, 0.0, 0.0, 0.0])
+        for row in np.flatnonzero(attempts[:, player]):
+            zones[row, player] = rng.multinomial(int(attempts[row, player]), probs)
+
+    made = np.zeros_like(zones)
+    for zone in range(4):
+        made[:, :, zone] = rng.binomial(zones[:, :, zone], make[None, :, zone])
+
+    two_pa = zones[:, :, 0] + zones[:, :, 1]
+    two_pm = made[:, :, 0] + made[:, :, 1]
+    three_pa = zones[:, :, 2] + zones[:, :, 3]
+    three_pm = made[:, :, 2] + made[:, :, 3]
+    return two_pa, two_pm, three_pa, three_pm, zones, made
+
+
+def zones_from_point_value(two_pa, two_pm, three_pa, three_pm):
+    """Put twos at the rim and threes above the break.
+
+    The four-zone mix is unknown on this path. A two is the short-range
+    attempt, and a three is not. Rim is the only short zone the model records.
+    """
+
+    two_pa = np.asarray(two_pa, dtype=np.int64)
+    attempts = np.zeros((*two_pa.shape, 4), dtype=np.int64)
+    makes = np.zeros_like(attempts)
+    attempts[..., 0] = two_pa
+    makes[..., 0] = np.asarray(two_pm, dtype=np.int64)
+    attempts[..., 3] = np.asarray(three_pa, dtype=np.int64)
+    makes[..., 3] = np.asarray(three_pm, dtype=np.int64)
+    return attempts, makes
+
+
+def align_zone_makes(zone_fga, two_pm, three_pm, rng):
+    """Place conditioned twos and threes back onto the zone attempts.
+
+    Attempts stay fixed. The two makes are split across rim and mid, and the
+    three makes across the two zones beyond the arc.
+    """
+
+    _rng(rng)
+    zone_fga = np.asarray(zone_fga, dtype=np.int64)
+    two_pm = np.asarray(two_pm, dtype=np.int64)
+    three_pm = np.asarray(three_pm, dtype=np.int64)
+    made = np.zeros_like(zone_fga)
+    rows, players, _zones = zone_fga.shape
+    for row in range(rows):
+        for player in range(players):
+            made[row, player, 0] = _share_successes(
+                int(zone_fga[row, player, 0]),
+                int(zone_fga[row, player, 1]),
+                int(two_pm[row, player]),
+                rng,
+            )
+            made[row, player, 1] = int(two_pm[row, player]) - int(made[row, player, 0])
+            made[row, player, 2] = _share_successes(
+                int(zone_fga[row, player, 2]),
+                int(zone_fga[row, player, 3]),
+                int(three_pm[row, player]),
+                rng,
+            )
+            made[row, player, 3] = int(three_pm[row, player]) - int(
+                made[row, player, 2]
+            )
+    return made
+
+
+def _share_successes(first, second, successes, rng):
+    total = first + second
+    if successes < 0 or successes > total:
+        raise ValueError("makes exceed zone attempts")
+    if first == 0 or successes == 0:
+        return 0
+    if second == 0 or successes == total:
+        return min(successes, first)
+    return int(rng.hypergeometric(first, second, successes))
+
+
+def split_turnovers(turnovers, live_share, rng):
+    """Split each player's turnovers into live-ball and dead-ball."""
+
+    _rng(rng)
+    turnovers = np.asarray(turnovers, dtype=np.int64)
+    share = np.asarray(live_share, dtype=float)
+    if np.any(~np.isfinite(share)) or np.any((share < 0.0) | (share > 1.0)):
+        raise ValueError("live-ball turnover share must be in [0, 1]")
+    live = rng.binomial(turnovers, share).astype(np.int64)
+    return live, turnovers - live
+
+
 def simulate_fta_ftm(
     fga,
     fta_per_fga,
@@ -392,6 +505,8 @@ def _shoot_pools(
     pft,
     rng,
     target=None,
+    zone_share=None,
+    zone_make=None,
 ):
     shot = allocate_and_shoot(
         team_fga,
@@ -401,6 +516,25 @@ def _shoot_pools(
         p2,
         rng,
     )
+    if zone_share is not None:
+        two_pa, two_pm, three_pa, three_pm, zone_fga, zone_fgm = apply_zone_shots(
+            shot["FGA"],
+            zone_share,
+            zone_make,
+            rng,
+        )
+        shot["2PA"] = two_pa
+        shot["2PM"] = two_pm
+        shot["3PA"] = three_pa
+        shot["3PM"] = three_pm
+        shot["FGM"] = two_pm + three_pm
+    else:
+        zone_fga, zone_fgm = zones_from_point_value(
+            shot["2PA"],
+            shot["2PM"],
+            shot["3PA"],
+            shot["3PM"],
+        )
     fta = multinomial_rows(team_fta, ft_shares, rng)
 
     if target is None:
@@ -415,12 +549,15 @@ def _shoot_pools(
             target,
             rng,
         )
+        zone_fgm = align_zone_makes(zone_fga, shot["2PM"], shot["3PM"], rng)
 
     return {
         **shot,
         "FTA": fta,
         "FTM": ftm,
         "PTS": 2 * shot["2PM"] + 3 * shot["3PM"] + ftm,
+        "ZONE_FGA": zone_fga,
+        "ZONE_FGM": zone_fgm,
     }
 
 

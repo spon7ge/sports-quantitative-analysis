@@ -102,6 +102,91 @@ def test_live_rates_keep_the_latest_completed_game():
     assert live["p_3pa"] == pytest.approx((0.4 + 12.0 / 30.0) / 2.0)
 
 
+def _possession(**kwargs):
+    row = {
+        "game_id": "1002",
+        "game_date": "2024-01-15",
+        "garbage": False,
+        "lineup_changed": False,
+        "shot_player_ids": (1,),
+        "shot_zones": ("rim",),
+        "shot_made": (True,),
+        "ft_kinds": (),
+        "ft_player_ids": (),
+        "ft_fta": (),
+        "ft_ftm": (),
+        "ft_zones": (),
+        "tov": 0,
+        "off_1": 1,
+        "off_2": 2,
+        "off_3": 3,
+        "off_4": 4,
+        "off_5": 5,
+    }
+    row.update(kwargs)
+    return row
+
+
+def test_live_rates_use_possession_usage_when_a_table_is_supplied():
+    rows = []
+    for index in range(30):
+        made = index < 12
+        rows.append(
+            _possession(
+                shot_made=(made,),
+                ft_kinds=("shooting2",) if index < 3 else (),
+                ft_player_ids=(1,) if index < 3 else (),
+                ft_fta=(2,) if index < 3 else (),
+                ft_ftm=(2,) if index < 3 else (),
+                ft_zones=(None,) if index < 3 else (),
+                tov=int(index < 6),
+            )
+        )
+    rows.append(
+        _possession(
+            game_id="1009",
+            game_date="2024-02-01",
+            shot_player_ids=(),
+            shot_zones=(),
+            shot_made=(),
+        )
+    )
+    rows.append(
+        _possession(
+            game_id="1001",
+            game_date="2024-01-01",
+            shot_made=(False,),
+        )
+    )
+
+    logs = pd.DataFrame(
+        [
+            _row(game_id="1001"),
+            _row(
+                game_id="1002",
+                game_date="2024-01-15",
+                min=30.0,
+                fga=30.0,
+                fgm=12.0,
+                fg3_a=12.0,
+                fg3_m=3.0,
+                fta=6.0,
+                ftm=6.0,
+                tov=6.0,
+                team_fga=80.0,
+                team_poss=100.0,
+                team_tov=20.0,
+            ),
+        ]
+    )
+    live = live_opportunities(logs, _slate(), possessions=pd.DataFrame(rows)).iloc[0]
+
+    # Thirty shots in thirty possessions, shrunk toward one shot per five men.
+    assert live["fga_per_min"] == pytest.approx((30 + 400 * 0.2) / 430)
+    assert live["p_3pa"] == pytest.approx(0.0)
+    assert live["rim_share"] == pytest.approx(1.0)
+
+
 def test_live_rates_stop_before_the_slate_date():
     logs = _logs()
     future = _row(game_id="g3", game_date="2024-02-01", fga=99.0, min=10.0)
@@ -150,7 +235,9 @@ def test_allocation_uses_the_supplied_possessions_and_minutes():
     assert np.array_equal(short["TOV"].sum(axis=1), short["team_tov"])
     assert np.array_equal(short["PTS"], 2 * short["FGA"])
     assert np.all(short["TOV"][:, 1] == 0)
-    assert short["FGA"][:, 0].mean() / short["team_fga"].mean() == pytest.approx(0.75, abs=0.03)
+    assert short["FGA"][:, 0].mean() / short["team_fga"].mean() == pytest.approx(
+        0.75, abs=0.03
+    )
     assert short["team_fga"].mean() == pytest.approx(80.0, abs=3.0)
     assert long["team_fga"].mean() == pytest.approx(160.0, abs=4.0)
 
@@ -209,7 +296,9 @@ def test_missing_history_uses_the_fitted_fallback():
         model, blank, minutes, np.full(1500, 100.0), np.random.default_rng(2)
     )
     assert drawn["team_fga"].mean() == pytest.approx(40.0, abs=2.0)
-    assert drawn["FGA"][:, 0].mean() / drawn["team_fga"].mean() == pytest.approx(0.5, abs=0.04)
+    assert drawn["FGA"][:, 0].mean() / drawn["team_fga"].mean() == pytest.approx(
+        0.5, abs=0.04
+    )
 
 
 def test_conflicting_team_attempts_raise():

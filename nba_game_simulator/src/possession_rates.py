@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from pbp_guard import rows_before
 from possession_table import ZONES
 
 # A few hundred possessions of prior keeps a short on/off split from moving
 # the rate. Eighty attempts does the same for one zone.
 USAGE_PRIOR_POSSESSIONS = 400.0
 ZONE_PRIOR_ATTEMPTS = 80.0
+
+# Eighty free-throw possessions of prior keeps a short foul sample near the league.
+FTA_PRIOR_POSSESSIONS = 80.0
 
 _OFFENSE = ("off_1", "off_2", "off_3", "off_4", "off_5")
 _TRIP_KINDS = ("shooting2", "shooting3", "and1", "bonus")
@@ -48,9 +52,16 @@ def shrunk_usage(
     teammate_on: bool,
     prior_possessions: float = USAGE_PRIOR_POSSESSIONS,
     garbage_weight: float = 0.0,
+    before=None,
 ) -> float:
-    """Usage with or without one teammate, pulled toward the unconditional rate."""
+    """Usage with or without one teammate, pulled toward the unconditional rate.
 
+    ``before`` keeps possessions whose date is strictly earlier. The slate
+    date itself is not a with/without sample.
+    """
+
+    if before is not None:
+        table = rows_before(table, before)
     if player_id == teammate_id:
         raise ValueError("teammate must be a different player")
     if prior_possessions < 0:
@@ -152,37 +163,116 @@ def ft_structure(
         raise ValueError(f"player {player_id} has no offensive possessions")
 
     _require(table, ("ft_kinds", "ft_player_ids", "ft_zones"))
-    trips = {kind: 0.0 for kind in _TRIP_KINDS}
-    and1_zones = {zone: 0.0 for zone in ZONES}
-    and1_total = 0.0
+    league_poss = float(weights.sum())
+    league_trips, league_zones = _trip_tally(table, weights, None)
+    trips, and1_zones = _trip_tally(table, weights, player_id)
+    and1_total = sum(and1_zones.values())
+    league_and1 = sum(league_zones.values())
+    share = {}
+    for zone in ZONES:
+        league_share = league_zones[zone] / league_and1 if league_and1 else 0.0
+        share[zone] = (and1_zones[zone] + ZONE_PRIOR_ATTEMPTS * league_share) / (
+            and1_total + ZONE_PRIOR_ATTEMPTS
+        )
 
-    for index in np.flatnonzero(on):
-        weight = float(weights[index])
-        if weight == 0:
+    rates = {}
+    for kind in _TRIP_KINDS:
+        league_rate = league_trips[kind] / league_poss if league_poss else 0.0
+        rates[f"{kind}_per_poss"] = (
+            trips[kind] + FTA_PRIOR_POSSESSIONS * league_rate
+        ) / (possessions + FTA_PRIOR_POSSESSIONS)
+    rates["and1_zone_share"] = share
+    return rates
+
+
+def possession_player_rates(table: pd.DataFrame, player_ids) -> pd.DataFrame:
+    """Shot and foul rates, one row per player, for the Layer 4 draw.
+
+    ``fga_per_min`` holds field goals per offensive possession, shrunk toward
+    the table's average player usage. The allocator multiplies that by minutes
+    on the floor, so the share is usage times playing time. Zone shares and
+    make rates are the four-zone draw. Free throws per possession are shrunk
+    toward the table's own rate.
+    """
+
+    if not isinstance(table, pd.DataFrame):
+        raise ValueError("rates need a possession DataFrame")
+
+    columns = [
+        "player_id",
+        "fga_per_min",
+        "p_3pa",
+        "p_2p",
+        "p_3p",
+        "fta_per_min",
+        "ft_pct",
+        *(f"{zone}_share" for zone in ZONES),
+        *(f"{zone}_fg_pct" for zone in ZONES),
+    ]
+    ids: list[int] = []
+    for player in player_ids:
+        player = int(player)
+        if player not in ids:
+            ids.append(player)
+    if not ids:
+        return pd.DataFrame(columns=columns)
+
+    weights = _weights(table, 0.0)
+    league_poss = float(weights.sum())
+    league_usage = _league_usage(table, weights)
+    league_fta, league_ftm = _ft_counts(table, weights, None)
+    league_fta_per = league_fta / league_poss if league_poss else 0.0
+    league_ft_pct = league_ftm / league_fta if league_fta else 0.0
+    rows = []
+
+    for player in ids:
+        _, on = _exposure(table, player, 0.0)
+        possessions = float(weights[on].sum())
+        if possessions <= 0:
             continue
-        for kind, player, zone in zip(
-            table["ft_kinds"].iat[index],
-            table["ft_player_ids"].iat[index],
-            table["ft_zones"].iat[index],
-            strict=True,
-        ):
-            if player != player_id or kind not in trips:
-                continue
-            trips[kind] += weight
-            if kind == "and1" and zone in and1_zones:
-                and1_zones[zone] += weight
-                and1_total += weight
+        attempts = _field_goals(table, weights, on, player)
+        usage = (attempts + USAGE_PRIOR_POSSESSIONS * league_usage) / (
+            possessions + USAGE_PRIOR_POSSESSIONS
+        )
+        mix = zone_shot_mix(table, player)
+        makes = zone_make_rates(table, player)
+        two = mix["rim"] + mix["mid"]
+        three = mix["corner3"] + mix["atb3"]
+        p_2p = (
+            (mix["rim"] * makes["rim"] + mix["mid"] * makes["mid"]) / two
+            if two
+            else 0.0
+        )
+        p_3p = (
+            (mix["corner3"] * makes["corner3"] + mix["atb3"] * makes["atb3"]) / three
+            if three
+            else 0.0
+        )
+        fta, ftm = _ft_counts(table, weights, player)
+        fta_per = (fta + FTA_PRIOR_POSSESSIONS * league_fta_per) / (
+            possessions + FTA_PRIOR_POSSESSIONS
+        )
+        ft_denominator = fta + FTA_PRIOR_POSSESSIONS * league_fta_per
+        ft_pct = (
+            (ftm + FTA_PRIOR_POSSESSIONS * league_fta_per * league_ft_pct)
+            / ft_denominator
+            if ft_denominator
+            else np.nan
+        )
+        row = {
+            "player_id": player,
+            "fga_per_min": usage,
+            "p_3pa": three,
+            "p_2p": p_2p,
+            "p_3p": p_3p,
+            "fta_per_min": fta_per,
+            "ft_pct": ft_pct,
+        }
+        row.update({f"{zone}_share": mix[zone] for zone in ZONES})
+        row.update({f"{zone}_fg_pct": makes[zone] for zone in ZONES})
+        rows.append(row)
 
-    share = {
-        zone: (and1_zones[zone] / and1_total if and1_total else 0.0) for zone in ZONES
-    }
-    return {
-        "shooting2_per_poss": trips["shooting2"] / possessions,
-        "shooting3_per_poss": trips["shooting3"] / possessions,
-        "and1_per_poss": trips["and1"] / possessions,
-        "bonus_per_poss": trips["bonus"] / possessions,
-        "and1_zone_share": share,
-    }
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _exposure(table: pd.DataFrame, player_id: int, garbage_weight: float):
@@ -206,6 +296,46 @@ def _on_offense(table: pd.DataFrame, player_id: int) -> np.ndarray:
     for column in _OFFENSE:
         mask |= table[column].to_numpy() == player_id
     return mask
+
+
+def _league_usage(table: pd.DataFrame, weights: np.ndarray) -> float:
+    """Field goals per offensive player-possession. Five men share each trip."""
+
+    shots = 0.0
+    slots = 0.0
+    shooters = table["shot_player_ids"]
+    for index in range(len(table)):
+        weight = float(weights[index])
+        if weight == 0.0:
+            continue
+        shots += weight * len(list(shooters.iat[index]))
+        slots += weight * len(_OFFENSE)
+    if slots <= 0.0:
+        return 0.0
+    return shots / slots
+
+
+def _trip_tally(table, weights, player_id: int | None):
+    trips = {kind: 0.0 for kind in _TRIP_KINDS}
+    zones = {zone: 0.0 for zone in ZONES}
+    for index in range(len(table)):
+        weight = float(weights[index])
+        if weight == 0.0:
+            continue
+        for kind, player, zone in zip(
+            table["ft_kinds"].iat[index],
+            table["ft_player_ids"].iat[index],
+            table["ft_zones"].iat[index],
+            strict=True,
+        ):
+            if player_id is not None and player != player_id:
+                continue
+            if kind not in trips:
+                continue
+            trips[kind] += weight
+            if kind == "and1" and zone in zones:
+                zones[zone] += weight
+    return trips, zones
 
 
 def _field_goals(table, weights, mask, player_id: int) -> float:
@@ -243,6 +373,29 @@ def _zone_counts(table, weights, player_id: int | None) -> dict[str, list[float]
                 counts[zone][0] += weight
 
     return counts
+
+
+def _ft_counts(table, weights, player_id: int | None) -> tuple[float, float]:
+    _require(table, ("ft_player_ids", "ft_fta", "ft_ftm"))
+    attempts = 0.0
+    makes = 0.0
+
+    for index in range(len(table)):
+        weight = float(weights[index])
+        if weight == 0:
+            continue
+        for player, taken, made in zip(
+            table["ft_player_ids"].iat[index],
+            table["ft_fta"].iat[index],
+            table["ft_ftm"].iat[index],
+            strict=True,
+        ):
+            if player_id is not None and player != player_id:
+                continue
+            attempts += weight * taken
+            makes += weight * made
+
+    return attempts, makes
 
 
 def _require(table: pd.DataFrame, columns) -> None:

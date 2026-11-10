@@ -24,6 +24,8 @@ from game_opportunities.history import (
     _team_games,
 )
 from game_opportunities.model import OpportunityModel, _model
+from pbp_guard import possessions_for_slate
+from possession_rates import possession_player_rates
 
 
 def training_opportunities(
@@ -175,8 +177,14 @@ def live_opportunities(
     prior_minutes=100.0,
     prior_attempts=40.0,
     prior_possessions=500.0,
+    possessions=None,
 ):
-    """Upcoming rates through the latest completed observed appearance."""
+    """Upcoming rates through the latest completed observed appearance.
+
+    ``possessions`` is a possession table. Only games strictly before the
+    slate date are used, and a game whose shots, free throws, or turnovers
+    do not match the official logs is left out.
+    """
     prepared = _prepare_opportunity_logs(logs)
     upcoming = _prepare_slate(slate)
     _positive_int(window, "window")
@@ -270,6 +278,34 @@ def live_opportunities(
 
                 result[name] = result[entity].map(rates).fillna(league)
 
+        if possessions is not None:
+            scoped = possessions_for_slate(possessions, date, prepared)
+            result = _overlay_possession_rates(result, scoped)
+
         parts.append(result)
 
     return pd.concat(parts, ignore_index=True)
+
+
+def _overlay_possession_rates(result: pd.DataFrame, possessions) -> pd.DataFrame:
+    if not isinstance(possessions, pd.DataFrame) or possessions.empty:
+        return result
+
+    rates = possession_player_rates(possessions, result["player_id"].unique())
+    if rates.empty:
+        return result
+
+    indexed = rates.assign(
+        _key=pd.to_numeric(rates["player_id"], errors="coerce")
+    ).set_index("_key")
+    overlaid = result.copy()
+    keys = pd.to_numeric(overlaid["player_id"], errors="coerce")
+    for column in rates.columns:
+        if column == "player_id":
+            continue
+        incoming = keys.map(indexed[column])
+        if column in overlaid.columns:
+            overlaid[column] = incoming.where(incoming.notna(), overlaid[column])
+        else:
+            overlaid[column] = incoming
+    return overlaid

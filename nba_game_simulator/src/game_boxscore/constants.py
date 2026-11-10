@@ -17,6 +17,14 @@ LAYER_MODULES = {
 _SHOT_STATS = ("FGA", "FGM", "2PA", "2PM", "3PA", "3PM", "FTA", "FTM", "PTS", "TOV")
 _EVENT_STATS = ("AST", "OREB", "DREB", "REB", "STL", "BLK")
 _LAYER4_STATS = (*_SHOT_STATS, "AST", "OREB")
+# Count arrays Layer 5 reads directly. They are not box-score columns.
+_LAYER4_EVENT_INPUTS = (
+    "ZONE_FGA",
+    "ZONE_FGM",
+    "LIVE_TOV",
+    "DEAD_TOV",
+    "MISS_BY_ZONE",
+)
 _COUNT_STATS = (*_SHOT_STATS, *_EVENT_STATS)
 _ENVIRONMENT_COLUMNS = (
     "team_poss",

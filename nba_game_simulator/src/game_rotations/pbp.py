@@ -757,6 +757,278 @@ def _split_margin(start, end, times, margins):
     return close, garbage
 
 
+_COUNTING_FOULS = frozenset(
+    {
+        "personal",
+        "shooting",
+        "offensive",
+        "offensive charge",
+        "loose ball",
+        "personal take",
+        "transition take",
+        "double personal",
+    }
+)
+
+
+def player_stints(pbp, official_logs):
+    """On-court stints labeled for the foul, blowout, and exit hazards.
+
+    A game that cannot be parsed is skipped. The margin is the absolute
+    score difference at the moment the player leaves the floor. A player
+    who stays through a period break keeps one stint.
+    """
+
+    labels = _exposure_logs(official_logs)
+    work = _exposure_pbp(pbp)
+    grouped = {key: group for key, group in labels.groupby("game_id", sort=False)}
+    rows = []
+    for game_id, raw in work.groupby("game_id", sort=False):
+        if game_id not in grouped:
+            continue
+        try:
+            periods, _maximum = _exposure_periods(raw)
+        except (TypeError, ValueError):
+            continue
+        if not periods:
+            continue
+        last_period = max(periods)
+        game_minutes = REG_MIN + OT_MIN * max(0, last_period - 4)
+        official = grouped[game_id]
+        for _, roster in official.groupby("team_id", sort=False):
+            try:
+                rows.extend(
+                    _team_player_stints(periods, roster, raw, game_id, game_minutes)
+                )
+            except (TypeError, ValueError):
+                continue
+    columns = (
+        "game_id",
+        "team_id",
+        "player_id",
+        "is_starter",
+        "start_elapsed",
+        "end_elapsed",
+        "game_minutes",
+        "margin",
+        "fouls",
+        "timeout",
+        "reason",
+    )
+    return pd.DataFrame(rows, columns=list(columns))
+
+
+def rotation_ticks(pbp, official_logs):
+    """Player-minute rows for ``fit_rotation_process``, from parsed stints."""
+
+    from game_rotations.process import expand_stints
+
+    stints = player_stints(pbp, official_logs)
+    if stints.empty:
+        raise ValueError("play-by-play produced no on-court stints")
+    ticks = expand_stints(stints)
+    extra = _blowout_returns(stints)
+    if extra:
+        ticks = pd.concat([ticks, pd.DataFrame(extra)], ignore_index=True)
+    return ticks
+
+
+def _team_player_stints(periods, roster, game, game_id, game_minutes):
+    team = roster.team_id.iloc[0]
+    aliases = _exposure_aliases(roster, game)
+    starters = set()
+    if "is_starter" in roster.columns:
+        starters = set(roster.loc[roster.is_starter.astype(bool), "player_id"])
+    fouls = _foul_times(game, team, periods)
+    ejections = _ejection_times(game, team, periods)
+    timeouts = _timeout_times(game, periods)
+    runs = {}
+    open_run = {}
+    for period in sorted(periods):
+        part = periods[period]
+        offset = (period - 1) * 12.0 if period <= 4 else REG_MIN + (period - 5) * OT_MIN
+        segments = _period_segments(part["rows"], team, roster, aliases, period)
+        for segment in segments:
+            start = offset + float(segment["start_min"])
+            end = offset + float(segment["end_min"])
+            margin = _margin_at(
+                part["times"], part["margins"], float(segment["end_min"])
+            )
+            present = set(segment["players"])
+            for player, run in list(open_run.items()):
+                if player not in present or start > run["end"] + 1e-6:
+                    runs.setdefault(player, []).append(run)
+                    del open_run[player]
+            for player in present:
+                continued = (
+                    player in open_run and abs(open_run[player]["end"] - start) <= 1e-6
+                )
+                if continued:
+                    open_run[player]["end"] = end
+                    open_run[player]["margin"] = margin
+                    continue
+                if player in open_run:
+                    runs.setdefault(player, []).append(open_run.pop(player))
+                open_run[player] = {
+                    "start": start,
+                    "end": end,
+                    "margin": margin,
+                }
+    for player, run in open_run.items():
+        runs.setdefault(player, []).append(run)
+
+    stints = []
+    for player, pieces in runs.items():
+        for run in pieces:
+            start = float(np.floor(run["start"] + 1e-8))
+            end = float(np.ceil(run["end"] - 1e-8))
+            end = min(end, float(game_minutes))
+            if end <= start:
+                end = min(float(game_minutes), start + 1.0)
+            if end <= start:
+                continue
+            run = {**run, "start": start, "end": end}
+            foul_count = sum(time <= end + 1e-6 for time in fouls.get(player, ()))
+            ejected = any(abs(time - end) <= 1.0 for time in ejections.get(player, ()))
+            if end >= game_minutes - 1e-4:
+                reason = "censored"
+            elif ejected:
+                reason = "ejection"
+            elif foul_count >= 5 or (
+                foul_count >= 2 and foul_count > 6.0 * end / REG_MIN
+            ):
+                reason = "foul_trouble"
+            elif player in starters and float(run["margin"]) >= 15.0:
+                reason = "blowout"
+            else:
+                reason = "rotation"
+            timeout = any(end - 1.0 < time <= end + 1e-6 for time in timeouts)
+            stints.append(
+                {
+                    "game_id": game_id,
+                    "team_id": team,
+                    "player_id": player,
+                    "is_starter": int(player in starters),
+                    "start_elapsed": float(run["start"]),
+                    "end_elapsed": end,
+                    "game_minutes": float(game_minutes),
+                    "margin": float(run["margin"]),
+                    "fouls": float(foul_count),
+                    "timeout": int(timeout),
+                    "reason": reason,
+                }
+            )
+    return stints
+
+
+def _elapsed_marks(periods):
+    marks = {}
+    for period, part in periods.items():
+        offset = (period - 1) * 12.0 if period <= 4 else REG_MIN + (period - 5) * OT_MIN
+        rows = part["rows"]
+        elapsed = offset + rows["elapsed"].to_numpy(dtype=float)
+        marks[period] = elapsed
+    return marks
+
+
+def _foul_times(game, team, periods):
+    found = {}
+    marks = _elapsed_marks(periods)
+    for period, part in periods.items():
+        rows = part["rows"]
+        elapsed = marks[period]
+        action = rows["action_type"].to_numpy()
+        sub = rows["sub_type"].to_numpy()
+        owner = rows["team_id"].to_numpy()
+        player = rows["player_id"].to_numpy()
+        for index in range(len(rows)):
+            if owner[index] != team or player[index] in {None, "0"}:
+                continue
+            if action[index] == "foul" and sub[index] in _COUNTING_FOULS:
+                found.setdefault(player[index], []).append(float(elapsed[index]))
+    return found
+
+
+def _ejection_times(game, team, periods):
+    found = {}
+    marks = _elapsed_marks(periods)
+    for period, part in periods.items():
+        rows = part["rows"]
+        elapsed = marks[period]
+        action = rows["action_type"].to_numpy()
+        owner = rows["team_id"].to_numpy()
+        player = rows["player_id"].to_numpy()
+        for index in range(len(rows)):
+            if action[index] != "ejection" or owner[index] != team:
+                continue
+            if player[index] in {None, "0"}:
+                continue
+            found.setdefault(player[index], []).append(float(elapsed[index]))
+    return found
+
+
+def _timeout_times(game, periods):
+    marks = _elapsed_marks(periods)
+    times = []
+    for period, part in periods.items():
+        rows = part["rows"]
+        elapsed = marks[period]
+        action = rows["action_type"].to_numpy()
+        for index in range(len(rows)):
+            if action[index] == "timeout":
+                times.append(float(elapsed[index]))
+    return times
+
+
+def _margin_at(times, margins, minute):
+    current = 0.0
+    for time, margin in zip(times, margins):
+        if time <= minute + 1e-6:
+            current = float(margin)
+        else:
+            break
+    return current
+
+
+def _blowout_returns(stints):
+    rows = []
+    grouped = stints.groupby(["game_id", "team_id", "player_id"], sort=False)
+    for (game_id, team_id, player_id), group in grouped:
+        ordered = group.sort_values("start_elapsed")
+        pieces = list(ordered.itertuples(index=False))
+        for index, stint in enumerate(pieces):
+            if stint.reason != "blowout":
+                continue
+            later = pieces[index + 1 :]
+            returned = any(
+                piece.start_elapsed >= stint.end_elapsed - 1e-6 for piece in later
+            )
+            rows.append(
+                {
+                    "game_id": game_id,
+                    "team_id": team_id,
+                    "player_id": player_id,
+                    "stint_minutes": 0.0,
+                    "fatigue_minutes": float(stint.end_elapsed),
+                    "timeout": 0.0,
+                    "rotation_sub": 0.0,
+                    "fouls": float(stint.fouls),
+                    "elapsed_minutes": float(stint.end_elapsed),
+                    "foul_trouble_exit": 0.0,
+                    "margin": float(stint.margin),
+                    "minutes_left": float(stint.game_minutes - stint.end_elapsed),
+                    "is_starter": float(stint.is_starter),
+                    "blowout_exit": 0.0,
+                    "injury_exit": 0.0,
+                    "ejection_exit": 0.0,
+                    "blowout_benched": 1.0,
+                    "inside_threshold": 1.0,
+                    "returned": float(returned),
+                }
+            )
+    return rows
+
+
 def reconstruct_rotation_segments(
     pbp,
     official_logs,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -21,15 +22,26 @@ from game_events.constants import (
     PLAYER_EVENT_RATES,
     TEAM_EVENT_RATES,
 )
+from game_events.credit import (
+    CHANCE_RATE_COLUMNS,
+    PASSER_PRIOR_ASSISTS,
+    CreditRates,
+    assisted_matrix,
+    passer_counts_matrix,
+    passer_tensor,
+    profile_with_credit,
+)
 from game_events.draws import _log5
 from game_events.model import EventModel
 from game_events.segments import _apply_segments
 from game_events.simulate import (
     _draw_events,
+    _optional_counts,
     _reject_shared_players,
     _Side,
     _validate_upstream,
 )
+from possession_table import ZONES
 
 
 def allocate_events(
@@ -45,6 +57,7 @@ def allocate_events(
     resimulate: tuple[str, ...] = (),
     dispersion: bool = True,
     return_details: bool = False,
+    credit: CreditRates | None = None,
 ):
     """Credit both teams for events the Layer 4 draw already produced.
 
@@ -64,6 +77,18 @@ def allocate_events(
     or ``(n_players,)``. ``factors[team][stat]`` multiplies that stat's
     player weights, for lineup or matchup context. ``dispersion=False``
     ignores the fitted dispersion.
+
+    ``credit`` is the play-by-play rate table from ``credit_rates``. It
+    replaces the team assisted rate with P(assisted | shooter, zone) and
+    P(passer | shooter, lineup), rebound weights with rebounds per chance
+    on the floor, blocks with missed rim attempts, and steals with live-ball
+    turnovers. The shot dict then needs ``LIVE_TOV`` and either ``RIM_FGA``
+    or ``MISS_BY_ZONE``, and ``ZONE_FGM`` when assists are drawn here.
+
+    When ``ZONE_FGM`` is present, assists are linked to those makes and a
+    supplied ``AST`` array is not reused. When ``MISS_BY_ZONE`` is present,
+    offensive rebounds are drawn from those misses and a supplied ``OREB``
+    array is not reused.
 
     Row ``k`` of every output is simulation row ``k`` of the inputs.
     """
@@ -96,12 +121,19 @@ def allocate_events(
             f"resimulate accepts only {_UPSTREAM_STATS}, got {sorted(unknown)}"
         )
 
+    if credit is not None and not isinstance(credit, CreditRates):
+        raise ValueError("credit must be CreditRates")
     sides = []
     indexes = []
     for name in profiles:
+        profile = profiles[name]
+        redraw_assists = "AST" not in shots[name] or "AST" in resimulate
+        if credit is not None:
+            _require_credit_shots(name, shots[name], redraw_assists)
+            profile = profile_with_credit(profile, credit)
         side, index = _prepare_side(
             name,
-            profiles[name],
+            profile,
             shots[name],
             minutes[name],
             model,
@@ -109,6 +141,14 @@ def allocate_events(
             None if factors is None else factors.get(name),
             frozenset(resimulate),
         )
+        if credit is not None:
+            side = replace(
+                side,
+                credit_rates=True,
+                p_assisted=assisted_matrix(credit, side.player_ids),
+                passer_counts=passer_counts_matrix(credit, side.player_ids),
+                passer_strength=PASSER_PRIOR_ASSISTS,
+            )
         sides.append(side)
         indexes.append(index)
     if sides[0].fga.shape[0] != sides[1].fga.shape[0]:
@@ -122,6 +162,7 @@ def allocate_events(
     _reject_shared_players(sides)
     if segments is not None:
         sides = _apply_segments(sides, segments, indexes)
+    sides = [_apply_passers(side) for side in sides]
 
     probs = [
         _matchup_probabilities(model, sides[index], sides[1 - index])
@@ -149,7 +190,19 @@ def allocate_events(
 def _matchup_probabilities(
     model: EventModel, offense: _Side, defense: _Side
 ) -> dict[str, float]:
-    """Event probabilities for ``offense``'s possessions against ``defense``."""
+    """Event probabilities for ``offense``'s possessions against ``defense``.
+
+    Play-by-play rates are already per chance, per rim attempt, or per
+    live-ball turnover. Mixing them with the box-score allowed rates would
+    put them back on the wrong denominator.
+    """
+    if offense.credit_rates or defense.credit_rates:
+        return {
+            "p_rebound": offense.rates["p_rebound"],
+            "p_oreb": offense.rates["p_oreb"],
+            "p_steal": defense.rates["p_steal"],
+            "p_block": defense.rates["p_block"],
+        }
     return {
         "p_rebound": offense.rates["p_rebound"],
         "p_oreb": _log5(
@@ -221,10 +274,15 @@ def _prepare_side(
             raise ValueError(f"{name} unavailable players received minutes")
         on_floor &= mask
 
+    zone_makes = "ZONE_FGM" in shot
+    zone_misses = "MISS_BY_ZONE" in shot
     upstream = {
         key: _as_count_matrix(shot[key], n_sims, n_players, f"{name} {key}")
         for key in _UPSTREAM_STATS
-        if key in shot and key not in resimulate
+        if key in shot
+        and key not in resimulate
+        and not (key == "AST" and zone_makes)
+        and not (key == "OREB" and zone_misses)
     }
     for key, value in {"FGA": fga, "TOV": tov, **upstream}.items():
         if np.any((value > 0) & ~on_floor):
@@ -232,9 +290,17 @@ def _prepare_side(
     for key, value in upstream.items():
         _validate_upstream(name, key, value, fga, fgm)
 
+    rate_names = list(PLAYER_EVENT_RATES)
+    rate_names.extend(
+        column for column in CHANCE_RATE_COLUMNS.values() if column in profile.columns
+    )
     rates = {
-        column: _filled_event_rate(profile, column, getattr(model, column))
-        for column in PLAYER_EVENT_RATES
+        column: _filled_event_rate(
+            profile,
+            column,
+            getattr(model, column) if column in PLAYER_EVENT_RATES else 0.0,
+        )
+        for column in rate_names
     }
     for column, values in rates.items():
         if np.any(values < 0.0):
@@ -252,7 +318,9 @@ def _prepare_side(
     intensity = {}
     weights = {}
     for stat, rate in _RATE_WEIGHT_STAT.items():
-        values = np.broadcast_to(rates[rate][None, :], (n_sims, n_players)).copy()
+        chance = CHANCE_RATE_COLUMNS.get(stat)
+        rate_name = chance if chance in rates else rate
+        values = np.broadcast_to(rates[rate_name][None, :], (n_sims, n_players)).copy()
         if stat in factors:
             values = values * _as_factor(
                 factors[stat], n_sims, n_players, f"{name} {stat} factor"
@@ -273,8 +341,114 @@ def _prepare_side(
         rates=team_rates,
         minutes=minutes,
         intensity=intensity,
+        zone_fgm=_zone_makes(name, shot, n_sims, n_players, fgm),
+        rim_fga=_optional_counts(shot, "RIM_FGA", n_sims, n_players, fga, "FGA"),
+        live_tov=_optional_counts(shot, "LIVE_TOV", n_sims, n_players, tov, "TOV"),
+        on_floor=on_floor,
+        miss_by_zone=_misses_by_zone(name, shot, n_sims, fga, fgm),
+        p_oreb_zone=_zone_oreb_rates(profile, name),
     )
     return side, index
+
+
+def _require_credit_shots(
+    name: str, shot: Mapping[str, Any], redraw_assists: bool
+) -> None:
+    missing = ["LIVE_TOV"] if "LIVE_TOV" not in shot else []
+    if "RIM_FGA" not in shot and "MISS_BY_ZONE" not in shot:
+        missing.append("RIM_FGA")
+    if redraw_assists and "ZONE_FGM" not in shot:
+        missing.append("ZONE_FGM")
+    if missing:
+        raise ValueError(f"{name} event credit needs {missing}")
+
+
+def _misses_by_zone(name, shot, n_sims, fga, fgm):
+    if "MISS_BY_ZONE" not in shot:
+        return None
+    try:
+        values = np.asarray(shot["MISS_BY_ZONE"], dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} MISS_BY_ZONE must be a count array") from exc
+    if values.shape != (n_sims, len(ZONES)):
+        raise ValueError(
+            f"{name} MISS_BY_ZONE must have shape ({n_sims}, {len(ZONES)})"
+        )
+    if (
+        np.any(~np.isfinite(values))
+        or np.any(values < 0)
+        or np.any(values != np.floor(values))
+    ):
+        raise ValueError(f"{name} MISS_BY_ZONE must be a nonnegative integer array")
+    values = values.astype(np.int64)
+    misses = fga.sum(axis=1) - fgm.sum(axis=1)
+    if np.any(values.sum(axis=1) != misses):
+        raise ValueError(f"{name} MISS_BY_ZONE must add up to missed field goals")
+    return values
+
+
+def _zone_oreb_rates(profile, name):
+    columns = [f"{zone}_p_oreb" for zone in ZONES]
+    if any(column not in profile.columns for column in columns):
+        return None
+    rates = np.array(
+        [_team_rate(profile, column, np.nan, name) for column in columns],
+        dtype=float,
+    )
+    if not np.isfinite(rates).all():
+        return None
+    return rates
+
+
+def _zone_makes(name, shot, n_sims, n_players, fgm):
+    if "ZONE_FGM" not in shot:
+        return None
+    try:
+        zone_fgm = np.asarray(shot["ZONE_FGM"], dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} ZONE_FGM must be a count array") from exc
+    if zone_fgm.shape != (n_sims, n_players, len(ZONES)):
+        raise ValueError(
+            f"{name} ZONE_FGM must have shape ({n_sims}, {n_players}, {len(ZONES)})"
+        )
+    if (
+        np.any(~np.isfinite(zone_fgm))
+        or np.any(zone_fgm < 0)
+        or np.any(zone_fgm != np.floor(zone_fgm))
+    ):
+        raise ValueError(f"{name} ZONE_FGM must be a nonnegative integer array")
+    zone_fgm = zone_fgm.astype(np.int64)
+    if np.any(zone_fgm.sum(axis=2) != fgm):
+        raise ValueError(f"{name} ZONE_FGM must add up to FGM")
+    return zone_fgm
+
+
+def _apply_passers(side: _Side) -> _Side:
+    """Replace creation weights with P(passer | shooter, lineup)."""
+    if side.passer_counts is None or side.ast is not None:
+        return side
+    creation = (
+        side.intensity["AST"] if side.intensity is not None else side.weights["AST"]
+    )
+    if creation.ndim != 2:
+        raise ValueError(f"{side.name} assist intensity must be per player")
+    on_floor = side.on_floor
+    if on_floor is None:
+        on_floor = np.ones(creation.shape, dtype=bool)
+    if side.weights["AST"].ndim == 3:
+        # Segments already zero teammates who were not on the floor with the
+        # shooter. The pair counts then pick which of those teammates passed.
+        tensor = side.weights["AST"] * (
+            side.passer_counts[None, :, :] + side.passer_strength
+        )
+        tensor = np.array(tensor, copy=True)
+        diagonal = np.arange(tensor.shape[-1])
+        tensor[:, diagonal, diagonal] = 0.0
+    else:
+        tensor = passer_tensor(
+            creation, side.passer_counts, side.passer_strength, on_floor
+        )
+    return replace(side, weights={**side.weights, "AST": tensor})
 
 
 def _filled_event_rate(

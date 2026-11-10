@@ -16,13 +16,20 @@ from game_opportunities.checks import (
     _rng,
     as_nonneg_int_vector,
 )
-from game_opportunities.constants import _MAX_POOL, _PROBABILITIES, OPPORTUNITY_RATES
+from game_opportunities.constants import (
+    _MAX_POOL,
+    _PROBABILITIES,
+    LIVE_TOV_PRIOR,
+    OPPORTUNITY_RATES,
+)
 from game_opportunities.counts import (
     _beta_binomial,
     _conditional_makes,
     _shoot_pools,
+    align_zone_makes,
     multinomial_rows,
     sample_negbin,
+    split_turnovers,
 )
 from game_opportunities.model import _model
 
@@ -163,6 +170,8 @@ def allocate_opportunities(
         )
         for name in OPPORTUNITY_RATES
     }
+    _attach_zone_rates(profile, rates)
+    _attach_live_share(profile, rates)
 
     if segments is not None:
         from game_opportunities.segments import _allocate_segment_opportunities
@@ -242,6 +251,8 @@ def allocate_opportunities(
         rates["p_2p"],
         rates["ft_pct"],
         rng,
+        zone_share=rates.get("zone_share"),
+        zone_make=rates.get("zone_make"),
     )
 
     resamples = np.zeros(n, dtype=np.int64)
@@ -311,6 +322,8 @@ def allocate_opportunities(
                         rates["p_2p"],
                         rates["ft_pct"],
                         rng,
+                        zone_share=rates.get("zone_share"),
+                        zone_make=rates.get("zone_make"),
                     )
 
                     for name, values in redrawn.items():
@@ -323,8 +336,16 @@ def allocate_opportunities(
                 stats["3PM"][i] = conditioned["3PM"][0]
                 stats["FGM"][i] = conditioned["FGM"][0]
                 stats["FTM"][i] = made_ft[0]
+                stats["ZONE_FGM"][i] = align_zone_makes(
+                    stats["ZONE_FGA"][i : i + 1],
+                    stats["2PM"][i : i + 1],
+                    stats["3PM"][i : i + 1],
+                    rng,
+                )[0]
                 stats["PTS"][i] = (
-                    2 * stats["2PM"][i] + 3 * stats["3PM"][i] + stats["FTM"][i]
+                    2 * (stats["ZONE_FGM"][i, :, 0] + stats["ZONE_FGM"][i, :, 1])
+                    + 3 * (stats["ZONE_FGM"][i, :, 2] + stats["ZONE_FGM"][i, :, 3])
+                    + stats["FTM"][i]
                 )
                 break
 
@@ -333,6 +354,12 @@ def allocate_opportunities(
         tov_shares,
         rng,
     )
+    stats["LIVE_TOV"], stats["DEAD_TOV"] = split_turnovers(
+        stats["TOV"],
+        rates["p_live_tov"],
+        rng,
+    )
+    stats["MISS_BY_ZONE"] = (stats["ZONE_FGA"] - stats["ZONE_FGM"]).sum(axis=1)
 
     return {
         **stats,
@@ -387,6 +414,69 @@ def _shared_rate(values, name):
 
 def _weights(rate, minutes):
     return _normalize_rows(minutes * rate[None, :])
+
+
+_ZONES = ("rim", "mid", "corner3", "atb3")
+
+
+def _attach_zone_rates(profile, rates) -> None:
+    """Four-zone shares from the possession table, when the profile has them."""
+
+    share_columns = [f"{zone}_share" for zone in _ZONES]
+    if any(column not in profile.columns for column in share_columns):
+        return
+
+    share = (
+        profile[share_columns]
+        .apply(pd.to_numeric, errors="coerce")
+        .to_numpy(dtype=float)
+    )
+    make_columns = [f"{zone}_fg_pct" for zone in _ZONES]
+    if any(column not in profile.columns for column in make_columns):
+        make = np.column_stack(
+            [rates["p_2p"], rates["p_2p"], rates["p_3p"], rates["p_3p"]]
+        )
+    else:
+        make = (
+            profile[make_columns]
+            .apply(pd.to_numeric, errors="coerce")
+            .to_numpy(dtype=float)
+        )
+
+    missing = ~np.isfinite(share).all(axis=1)
+    if missing.any():
+        p3 = rates["p_3pa"]
+        zeros = np.zeros(int(missing.sum()))
+        share[missing] = np.column_stack([1 - p3[missing], zeros, zeros, p3[missing]])
+    missing_make = ~np.isfinite(make).all(axis=1)
+    if missing_make.any():
+        make[missing_make] = np.column_stack(
+            [
+                rates["p_2p"][missing_make],
+                rates["p_2p"][missing_make],
+                rates["p_3p"][missing_make],
+                rates["p_3p"][missing_make],
+            ]
+        )
+
+    totals = share.sum(axis=1, keepdims=True)
+    totals[totals <= 0] = 1.0
+    rates["zone_share"] = share / totals
+    rates["zone_make"] = np.clip(make, 0.0, 1.0)
+
+
+def _attach_live_share(profile, rates) -> None:
+    """Live-ball share of each player's turnovers. Missing values use the prior."""
+
+    if "p_live_tov" not in profile.columns:
+        rates["p_live_tov"] = np.full(len(profile), LIVE_TOV_PRIOR)
+        return
+
+    values = pd.to_numeric(profile["p_live_tov"], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(values)
+    if np.any(finite & ((values < 0.0) | (values > 1.0))):
+        raise ValueError("p_live_tov must be in [0, 1]")
+    rates["p_live_tov"] = np.where(finite, values, LIVE_TOV_PRIOR)
 
 
 def _whole_score(value, n):

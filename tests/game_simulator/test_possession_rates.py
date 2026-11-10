@@ -5,9 +5,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 from possession_rates import (
+    FTA_PRIOR_POSSESSIONS,
     USAGE_PRIOR_POSSESSIONS,
     ZONE_PRIOR_ATTEMPTS,
     ft_structure,
+    possession_player_rates,
     shrunk_usage,
     usage_rate,
     zone_make_rates,
@@ -78,6 +80,29 @@ def test_with_teammate_usage_shrinks_toward_the_unconditional_rate():
     assert shrunk < 0.6
 
 
+def test_with_teammate_usage_ignores_the_slate_date():
+    past = [_row(shots=((1, "rim", True),)) for _ in range(10)]
+    for row in past:
+        row["game_date"] = "2024-01-15"
+    slate = _row(offense=(1, 3, 4, 5, 6))
+    slate["game_date"] = "2024-02-01"
+    frame = _table([*past, slate])
+
+    kept = shrunk_usage(frame, 1, 2, teammate_on=True, before="2024-02-01")
+    past_only = shrunk_usage(_table(past), 1, 2, teammate_on=True)
+
+    assert kept == pytest.approx(past_only)
+    assert kept == pytest.approx((10 + 400 * 1.0) / 410)
+    with pytest.raises(ValueError, match="game_date"):
+        shrunk_usage(
+            _table([_row(shots=((1, "rim", True),))]),
+            1,
+            2,
+            teammate_on=True,
+            before="2024-02-01",
+        )
+
+
 def test_shrinkage_priors_are_strong():
     assert USAGE_PRIOR_POSSESSIONS >= 200
     assert ZONE_PRIOR_ATTEMPTS >= 50
@@ -137,13 +162,23 @@ def test_free_throw_structure_separates_trip_types():
     )
 
     structure = ft_structure(frame, 1)
+    prior = FTA_PRIOR_POSSESSIONS
+    zone_prior = ZONE_PRIOR_ATTEMPTS
 
-    assert structure["shooting2_per_poss"] == pytest.approx(0.25)
-    assert structure["shooting3_per_poss"] == pytest.approx(0.25)
-    assert structure["and1_per_poss"] == pytest.approx(0.25)
-    assert structure["bonus_per_poss"] == pytest.approx(0.25)
-    assert structure["and1_zone_share"]["rim"] == pytest.approx(1.0)
-    assert structure["and1_zone_share"]["mid"] == pytest.approx(0.0)
+    assert structure["shooting2_per_poss"] == pytest.approx(
+        (1 + prior * 0.2) / (4 + prior)
+    )
+    assert structure["shooting3_per_poss"] == pytest.approx(
+        (1 + prior * 0.2) / (4 + prior)
+    )
+    assert structure["and1_per_poss"] == pytest.approx((1 + prior * 0.4) / (4 + prior))
+    assert structure["bonus_per_poss"] == pytest.approx((1 + prior * 0.2) / (4 + prior))
+    assert structure["and1_zone_share"]["rim"] == pytest.approx(
+        (1 + zone_prior * 0.5) / (1 + zone_prior)
+    )
+    assert structure["and1_zone_share"]["mid"] == pytest.approx(
+        (zone_prior * 0.5) / (1 + zone_prior)
+    )
 
 
 def test_player_with_no_possessions_is_rejected():
@@ -151,3 +186,18 @@ def test_player_with_no_possessions_is_rejected():
 
     with pytest.raises(ValueError, match="offensive possessions"):
         usage_rate(frame, 99)
+
+
+def test_possession_player_rates_replace_minutes_with_usage_and_zones():
+    frame = _table([_row(shots=((1, "rim", True),))])
+
+    rates = possession_player_rates(frame, [1])
+    row = rates.iloc[0]
+
+    assert row["fga_per_min"] == pytest.approx(
+        (1 + USAGE_PRIOR_POSSESSIONS * 0.2) / (1 + USAGE_PRIOR_POSSESSIONS)
+    )
+    assert row["p_3pa"] == pytest.approx(0.0)
+    assert row["p_2p"] == pytest.approx(1.0)
+    assert row["rim_share"] == pytest.approx(1.0)
+    assert row["atb3_share"] == pytest.approx(0.0)

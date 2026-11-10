@@ -22,8 +22,10 @@ from game_events.constants import (
     _UPSTREAM_STATS,
     _WEIGHTED_STATS,
 )
+from game_events.credit import allocate_zone_assists
 from game_events.draws import _allocate, _overdispersed_binomial, _streams
 from game_events.shares import _rebound_pools, allocate_joint_assists, event_shares
+from possession_table import ZONES
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,18 @@ class _Side:
     minutes: np.ndarray | None = None
     # Rate times factor before exposure; segments turn this into weights.
     intensity: dict[str, np.ndarray] | None = None
+    # Event-level credit. Absent on the box-score rate path.
+    zone_fgm: np.ndarray | None = None
+    p_assisted: np.ndarray | None = None
+    passer_counts: np.ndarray | None = None
+    passer_strength: float = 0.0
+    rim_fga: np.ndarray | None = None
+    live_tov: np.ndarray | None = None
+    on_floor: np.ndarray | None = None
+    credit_rates: bool = False
+    # Team misses by zone. Present when Layer 4 recorded the shot mix.
+    miss_by_zone: np.ndarray | None = None
+    p_oreb_zone: np.ndarray | None = None
 
 
 def _empty_stats(n_sims: int, n_players: int) -> dict[str, np.ndarray]:
@@ -71,16 +85,18 @@ def _draw_events(
         d = 1 - index
         p = probs[index]
         misses = offense.fga.sum(axis=1) - offense.fgm.sum(axis=1)
-        upstream = None if offense.oreb is None else offense.oreb.sum(axis=1)
-        oreb_pool, dreb_pool = _rebound_pools(
-            misses,
-            upstream,
-            p["p_rebound"],
-            p["p_oreb"],
-            streams[("rebounds", index)],
-            pool_dispersion,
-        )
-        if offense.oreb is None:
+        if offense.miss_by_zone is not None:
+            # Each miss is an offensive rebound with a zone rate, and every
+            # miss that is not kept is a defensive rebound.
+            probability = offense.p_oreb_zone
+            if probability is None:
+                probability = np.full(len(ZONES), p["p_oreb"])
+            oreb_pool = _oreb_by_zone(
+                offense.miss_by_zone,
+                probability,
+                streams[("rebounds", index)],
+            )
+            dreb_pool = offense.miss_by_zone.sum(axis=1) - oreb_pool
             stats[offense.name]["OREB"] = _allocate(
                 oreb_pool,
                 offense.weights["OREB"],
@@ -90,8 +106,27 @@ def _draw_events(
             )
             sources[offense.name]["OREB"] = "layer5"
         else:
-            stats[offense.name]["OREB"] = offense.oreb
-            sources[offense.name]["OREB"] = "layer4"
+            upstream = None if offense.oreb is None else offense.oreb.sum(axis=1)
+            oreb_pool, dreb_pool = _rebound_pools(
+                misses,
+                upstream,
+                p["p_rebound"],
+                p["p_oreb"],
+                streams[("rebounds", index)],
+                pool_dispersion,
+            )
+            if offense.oreb is None:
+                stats[offense.name]["OREB"] = _allocate(
+                    oreb_pool,
+                    offense.weights["OREB"],
+                    streams[("OREB", index)],
+                    "OREB",
+                    share_concentration.get("OREB"),
+                )
+                sources[offense.name]["OREB"] = "layer5"
+            else:
+                stats[offense.name]["OREB"] = offense.oreb
+                sources[offense.name]["OREB"] = "layer4"
         stats[defense.name]["DREB"] = _allocate(
             dreb_pool,
             defense.weights["DREB"],
@@ -100,8 +135,13 @@ def _draw_events(
             share_concentration.get("DREB"),
         )
 
+        # A steal is a live-ball turnover. Without that split, every turnover
+        # is treated as live, which is the box-score path.
+        steal_trials = offense.tov.sum(axis=1)
+        if offense.live_tov is not None:
+            steal_trials = np.minimum(offense.live_tov.sum(axis=1), steal_trials)
         steal_pool = _overdispersed_binomial(
-            offense.tov.sum(axis=1),
+            steal_trials,
             p["p_steal"],
             pool_dispersion.get("p_steal", 0.0),
             streams[("steals", d)],
@@ -113,9 +153,16 @@ def _draw_events(
             "STL",
             share_concentration.get("STL"),
         )
-        # A block is recorded on a missed field-goal attempt.
+        # A block is a missed rim attempt. Rim is the short-range zone this
+        # model records (inside 4 feet). Without that split, every miss can
+        # be blocked, which is the box-score path.
+        block_trials = misses
+        if offense.miss_by_zone is not None:
+            block_trials = offense.miss_by_zone[:, ZONES.index("rim")]
+        elif offense.rim_fga is not None:
+            block_trials = np.minimum(offense.rim_fga.sum(axis=1), misses)
         block_pool = _overdispersed_binomial(
-            misses,
+            block_trials,
             p["p_block"],
             pool_dispersion.get("p_block", 0.0),
             streams[("blocks", d)],
@@ -134,7 +181,28 @@ def _draw_events(
         pools["BLK"][defense.name] = block_pool
 
     for index, side in enumerate(sides):
-        if side.ast is None:
+        if side.ast is None and side.zone_fgm is not None:
+            # P(assisted | shooter, zone), then P(passer | shooter, lineup).
+            weights = np.asarray(side.weights["AST"], dtype=float)
+            n_players = len(side.player_ids)
+            if weights.ndim == 2 and weights.shape == (n_sims, n_players):
+                weights = np.broadcast_to(
+                    weights[:, None, :],
+                    (n_sims, n_players, n_players),
+                ).copy()
+            assisted = side.p_assisted
+            if assisted is None:
+                assisted = np.broadcast_to(
+                    side.assisted_rate[:, None],
+                    (n_players, side.zone_fgm.shape[2]),
+                ).copy()
+            if weights.ndim != 3:
+                raise ValueError(f"{side.name} zone assists need passer weights")
+            assists, team_pairs = allocate_zone_assists(
+                side.zone_fgm, assisted, weights, streams[("AST", index)]
+            )
+            sources[side.name]["AST"] = "layer5"
+        elif side.ast is None:
             stream = streams[("AST", index)]
             rate = side.assisted_rate
             rho = pool_dispersion.get("assisted_rate", 0.0)
@@ -181,6 +249,23 @@ def _draw_events(
             "steals exceed turnovers",
         )
     return stats, {"pools": pools, "sources": sources}, pairs
+
+
+def _oreb_by_zone(misses, probability, rng):
+    """Draw offensive rebounds separately for each miss zone."""
+
+    misses = np.asarray(misses, dtype=np.int64)
+    probability = np.asarray(probability, dtype=float)
+    if probability.shape != (misses.shape[1],):
+        raise ValueError("offensive-rebound rates must have one value per zone")
+    if np.any(~np.isfinite(probability)) or np.any(
+        (probability < 0.0) | (probability > 1.0)
+    ):
+        raise ValueError("offensive-rebound rates must be in [0, 1]")
+    drawn = np.zeros(misses.shape[0], dtype=np.int64)
+    for zone in range(misses.shape[1]):
+        drawn += rng.binomial(misses[:, zone], probability[zone])
+    return drawn
 
 
 def _validate_upstream(
@@ -296,7 +381,18 @@ def _prepare_team(name: str, raw: dict, n_sims: int) -> _Side:
         },
         oreb=upstream.get("OREB"),
         ast=upstream.get("AST"),
+        rim_fga=_optional_counts(raw, "rim_fga", n_sims, n_players, fga, "FGA"),
+        live_tov=_optional_counts(raw, "live_tov", n_sims, n_players, tov, "TOV"),
     )
+
+
+def _optional_counts(raw, key, n_sims, n_players, cap, cap_name):
+    if key not in raw or raw[key] is None:
+        return None
+    values = _as_count_matrix(raw[key], n_sims, n_players, key)
+    if np.any(values > cap):
+        raise ValueError(f"{key} cannot exceed {cap_name}")
+    return values
 
 
 def simulate_shared_events(

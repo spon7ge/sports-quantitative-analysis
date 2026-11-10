@@ -27,8 +27,12 @@ from game_opportunities.counts import (
     _beta_binomial,
     _beta_probability,
     _conditional_makes,
+    align_zone_makes,
+    apply_zone_shots,
     multinomial_rows,
     sample_negbin,
+    split_turnovers,
+    zones_from_point_value,
 )
 from game_opportunities.model import _model
 
@@ -225,12 +229,32 @@ def _segment_shots(team_fga, team_fta, active, duration, rates, target, rng):
         _normalize_rows(fta_weights.reshape(1, -1)),
         rng,
     )[0].reshape(active.shape)
-    three_pa = rng.binomial(fga, rates["p_3pa"][None, :])
-    two_pa = fga - three_pa
+    if "zone_share" in rates:
+        two_pa, two_pm, three_pa, three_pm, zone_fga, zone_fgm = apply_zone_shots(
+            fga,
+            rates["zone_share"],
+            rates["zone_make"],
+            rng,
+        )
+    else:
+        three_pa = rng.binomial(fga, rates["p_3pa"][None, :])
+        two_pa = fga - three_pa
+        two_pm = None
+        three_pm = None
+        zone_fga, zone_fgm = zones_from_point_value(
+            two_pa,
+            np.zeros_like(two_pa),
+            three_pa,
+            np.zeros_like(three_pa),
+        )
 
     if target is None:
-        two_pm = rng.binomial(two_pa, rates["p_2p"][None, :])
-        three_pm = rng.binomial(three_pa, rates["p_3p"][None, :])
+        if two_pm is None:
+            two_pm = rng.binomial(two_pa, rates["p_2p"][None, :])
+            three_pm = rng.binomial(three_pa, rates["p_3p"][None, :])
+            _attempts, zone_fgm = zones_from_point_value(
+                two_pa, two_pm, three_pa, three_pm
+            )
         ftm = rng.binomial(fta, rates["ft_pct"][None, :])
     else:
         shot = {
@@ -267,6 +291,7 @@ def _segment_shots(team_fga, team_fta, active, duration, rates, target, rng):
                 made_ft[0, player],
                 rng,
             )
+        zone_fgm = align_zone_makes(zone_fga, two_pm, three_pm, rng)
 
     return {
         "FGA": fga,
@@ -277,7 +302,13 @@ def _segment_shots(team_fga, team_fta, active, duration, rates, target, rng):
         "3PM": three_pm,
         "FTA": fta,
         "FTM": ftm,
-        "PTS": 2 * two_pm + 3 * three_pm + ftm,
+        "PTS": 2 * zone_fgm[:, :, 0]
+        + 2 * zone_fgm[:, :, 1]
+        + 3 * zone_fgm[:, :, 2]
+        + 3 * zone_fgm[:, :, 3]
+        + ftm,
+        "ZONE_FGA": zone_fga,
+        "ZONE_FGM": zone_fgm,
     }
 
 
@@ -453,6 +484,13 @@ def _allocate_segment_opportunities(
         )
         possession_exposure = owned[row] * time_share
         exposure[row] = (possession_exposure[:, None] * active).sum(axis=0)
+        zone_attempts = stats.pop("ZONE_FGA")
+        zone_makes = stats.pop("ZONE_FGM")
+        if "ZONE_FGA" not in totals:
+            totals["ZONE_FGA"] = np.zeros((n, n_players, 4), dtype=np.int64)
+            totals["ZONE_FGM"] = np.zeros((n, n_players, 4), dtype=np.int64)
+        totals["ZONE_FGA"][row] = zone_attempts.sum(axis=0)
+        totals["ZONE_FGM"][row] = zone_makes.sum(axis=0)
 
         for name in names:
             totals[name][row] = stats[name].sum(axis=0)
@@ -484,6 +522,11 @@ def _allocate_segment_opportunities(
                     "stats": stats,
                 }
             )
+
+    live, dead = split_turnovers(totals["TOV"], rates["p_live_tov"], rng)
+    totals["LIVE_TOV"] = live
+    totals["DEAD_TOV"] = dead
+    totals["MISS_BY_ZONE"] = (totals["ZONE_FGA"] - totals["ZONE_FGM"]).sum(axis=1)
 
     result = {
         **totals,

@@ -359,9 +359,7 @@ def _prior_role_sums(
         return out
     played = played.reset_index(drop=True)
     buckets = {
-        label: _prior_league_sums(
-            played.loc[history_roles.eq(label)], targets, columns
-        )
+        label: _prior_league_sums(played.loc[history_roles.eq(label)], targets, columns)
         for label in labels
     }
     for label in [role for role in roles.unique() if role]:
